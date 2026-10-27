@@ -220,3 +220,30 @@ TEST_CASE("default management password peers are limited to local networks", "[c
                                "not-an-address", ""})
         CHECK_FALSE(local_network_address(remote));
 }
+TEST_CASE("build_app upstream is opt-in, needs a Build App link and site isolation, and needs a restart", "[config][admin][build-app]") {
+    AdminDirectory dir;
+    auto cfg = Config::load(dir.path / "config.json");
+    CHECK(Config{}.upstream == "makersuite");
+    CHECK(cfg.to_json().at("upstream") == "makersuite");
+    CHECK(cfg.to_json().at("build_app_url") == "");
+    constexpr std::string_view link = "https://ai.studio/apps/0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b";
+    CHECK_THROWS_AS(cfg.patched({{"upstream", "build_app"}}), Error);
+    auto app = cfg.patched({{"upstream", "build_app"}, {"build_app_url", link}});
+    CHECK(app.upstream == "build_app");
+    CHECK(restart_required(cfg, app));
+    CHECK(restart_required(app, app.patched({{"build_app_url", "https://aistudio.google.com/apps/drive/abc_DEF-1"}})));
+    app.save();
+    const auto saved = Config::load(cfg.config_file);
+    CHECK(saved.upstream == "build_app");
+    CHECK(saved.build_app_url == link);
+    CHECK_THROWS_AS(app.patched({{"browser_site_isolation", false}}), Error);
+    // A link may be kept while the default upstream is in use.
+    CHECK(cfg.patched({{"build_app_url", link}}).upstream == "makersuite");
+    for (const auto* invalid : {"http://ai.studio/apps/abc", "https://ai.studio/apps/", "https://ai.studio/apps/abc/def",
+                                "https://ai.studio/apps/abc?authuser=1", "https://ai.studio/apps/abc#x", "https://ai.studio/apps/a%2Fb",
+                                "https://aistudio.google.com/apps/a/b/c/d", "https://aistudio.google.com/prompts/new_chat",
+                                "https://evil.example/apps/abc", "https://ai.studio.evil.example/apps/abc", "https://ai.studio/apps/abc/"})
+        CHECK_THROWS_AS(cfg.patched({{"build_app_url", invalid}}), Error);
+    for (const auto& invalid : json::array{"", "Build_App", "auto", nullptr, 1})
+        CHECK_THROWS_AS(cfg.patched({{"upstream", invalid}, {"build_app_url", link}}), Error);
+}

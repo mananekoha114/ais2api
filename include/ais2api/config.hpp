@@ -54,6 +54,13 @@ struct Config {
     // Optional memory saving: stop the browser after this many seconds without
     // work (0 = keep it running). The next request starts it again.
     unsigned browser_idle_seconds = 0;
+    // Generation upstream: "makersuite" replays the AI Studio prompt page's
+    // private RPC; "build_app" calls the public Gemini API from a Build App
+    // preview frame, where AI Studio supplies the account's credentials.
+    std::string upstream = "makersuite";
+    // The Build App the build_app upstream opens: https://ai.studio/apps/<id>
+    // or https://aistudio.google.com/apps/<path>.
+    std::string build_app_url;
     Limits limits;
     json::object model_aliases;
     json::array configured_models;

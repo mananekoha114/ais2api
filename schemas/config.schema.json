@@ -93,6 +93,21 @@
       "anyOf": [{"const": 0}, {"minimum": 10, "maximum": 86400}],
       "description": "Optional memory saving: stop the browser after this many seconds without any work; 0 keeps it running. The next request starts it again (cold start). Takes effect without restarting."
     },
+    "upstream": {
+      "enum": ["makersuite", "build_app"],
+      "default": "makersuite",
+      "description": "Generation upstream. makersuite replays the AI Studio prompt page's private RPC; build_app calls the public Gemini API from the preview frame of build_app_url, where AI Studio supplies the account's credentials (needs browser_site_isolation). Requires a restart."
+    },
+    "build_app_url": {
+      "type": "string",
+      "default": "",
+      "anyOf": [
+        {"const": ""},
+        {"pattern": "^https://ai\\.studio/apps/[A-Za-z0-9_-]{1,128}$"},
+        {"pattern": "^https://aistudio\\.google\\.com/apps/[A-Za-z0-9_-]{1,128}(/[A-Za-z0-9_-]{1,128}){0,2}$"}
+      ],
+      "description": "Build App the build_app upstream opens, preferably one owned by the account; required when upstream is build_app. Requires a restart."
+    },
     "model_aliases": {
       "type": "object",
       "additionalProperties": {

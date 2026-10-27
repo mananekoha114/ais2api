@@ -2775,6 +2775,19 @@
             "default": true,
             "description": "When a *-search model request carries function declarations, drop them and keep Google Search (true), or keep the caller's tools unchanged without injecting search (false). Takes effect without restarting."
           },
+          "upstream": {
+            "enum": [
+              "makersuite",
+              "build_app"
+            ],
+            "default": "makersuite",
+            "description": "Generation upstream. makersuite replays the AI Studio prompt page's private RPC; build_app calls the public Gemini API from the preview frame of build_app_url (needs browser_site_isolation). Requires a restart."
+          },
+          "build_app_url": {
+            "type": "string",
+            "default": "",
+            "description": "Build App the build_app upstream opens: https://ai.studio/apps/<id> or https://aistudio.google.com/apps/<path>. Required when upstream is build_app. Requires a restart."
+          },
           "model_aliases": {
             "type": "object",
             "additionalProperties": {

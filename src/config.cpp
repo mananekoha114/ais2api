@@ -151,6 +151,8 @@ json::object Config::to_json(bool portable_paths) const {
           {"ignore_unsupported_parameters", ignore_unsupported_parameters},
           {"search_model_drop_functions", search_model_drop_functions},
           {"browser_idle_seconds", browser_idle_seconds},
+          {"upstream", upstream},
+          {"build_app_url", build_app_url},
           {"limits",
            {{"request_bytes", limits.request_bytes},
             {"object_bytes", limits.object_bytes},
@@ -210,7 +212,9 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
                     {"AIS2API_BIND", "bind"},
                     {"AIS2API_DATA_DIR", "data_dir"},
                     {"AIS2API_BROWSER_EXECUTABLE", "browser_executable"},
-                    {"AIS2API_PROXY", "proxy"}}) {
+                    {"AIS2API_PROXY", "proxy"},
+                    {"AIS2API_UPSTREAM", "upstream"},
+                    {"AIS2API_BUILD_APP_URL", "build_app_url"}}) {
     auto v = env(pair.first);
     if (env_exists(pair.first))
       e[pair.second] = v;
@@ -286,7 +290,7 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
 static Config parse_config(Config c, json::object o, bool explicit_browser) {
   fields(o, {"version", "bind", "port", "api_key", "admin_key", "admin_origins", "cookie_import_key",
              "cookie_import_max_accounts", "cookie_import_timeout_seconds", "data_dir", "browser_executable",
-             "proxy", "browser_proxy_relay", "browser_remote_allow_origins", "browser_site_isolation", "headless", "ignore_unsupported_parameters", "search_model_drop_functions", "browser_idle_seconds", "limits", "model_aliases",
+             "proxy", "browser_proxy_relay", "browser_remote_allow_origins", "browser_site_isolation", "headless", "ignore_unsupported_parameters", "search_model_drop_functions", "browser_idle_seconds", "upstream", "build_app_url", "limits", "model_aliases",
              "configured_models", "model_defaults"});
   auto text = [&](const char *k) {
     if (!o.at(k).is_string())
@@ -344,6 +348,8 @@ static Config parse_config(Config c, json::object o, bool explicit_browser) {
   if (idle > 86400)
     throw Error(400, "invalid_config", "browser_idle_seconds must be 0 or 10..86400");
   c.browser_idle_seconds = static_cast<unsigned>(idle);
+  c.upstream = text("upstream");
+  c.build_app_url = text("build_app_url");
   if (!o.at("limits").is_object() || !o.at("model_aliases").is_object() ||
       !o.at("configured_models").is_array() ||
       !o.at("model_defaults").is_object())
@@ -396,6 +402,7 @@ bool restart_required(const Config& previous, const Config& next) {
     next.browser_remote_allow_origins != previous.browser_remote_allow_origins ||
     next.browser_site_isolation != previous.browser_site_isolation ||
     next.headless != previous.headless ||
+    next.upstream != previous.upstream || next.build_app_url != previous.build_app_url ||
     next.limits.generation_seconds != previous.limits.generation_seconds ||
     next.limits.stream_idle_seconds != previous.limits.stream_idle_seconds ||
     next.limits.object_bytes != previous.limits.object_bytes || next.limits.relay_bytes != previous.limits.relay_bytes;
@@ -438,6 +445,30 @@ static bool valid_admin_origin(std::string_view origin) {
   }
   return true;
 }
+// A Build App link as AI Studio shares it, or its aistudio.google.com form.
+// The gateway appends the account's authuser, so no query or fragment.
+static bool valid_build_app_url(std::string_view url) {
+  std::string_view path;
+  std::size_t max_segments = 0;
+  if (url.starts_with("https://ai.studio/apps/")) {
+    path = url.substr(23);
+    max_segments = 1;
+  } else if (url.starts_with("https://aistudio.google.com/apps/")) {
+    path = url.substr(33);
+    max_segments = 3;
+  } else {
+    return false;
+  }
+  std::size_t segments = 0;
+  while (true) {
+    const auto slash = path.find('/');
+    const auto segment = path.substr(0, slash);
+    if (segment.empty() || segment.size() > 128 || ++segments > max_segments) return false;
+    for (unsigned char ch : segment) if (!std::isalnum(ch) && ch != '-' && ch != '_') return false;
+    if (slash == std::string_view::npos) return true;
+    path.remove_prefix(slash + 1);
+  }
+}
 
 void Config::validate() const {
   if (admin_key == "***" || api_key == "***" || cookie_import_key == "***")
@@ -470,6 +501,16 @@ void Config::validate() const {
   }
   if (browser_idle_seconds && (browser_idle_seconds < 10 || browser_idle_seconds > 86400))
     throw Error(400, "invalid_config", "browser_idle_seconds must be 0 or 10..86400");
+  if (upstream != "makersuite" && upstream != "build_app")
+    throw Error(400, "invalid_config", "upstream must be makersuite or build_app");
+  if (!build_app_url.empty() && !valid_build_app_url(build_app_url))
+    throw Error(400, "invalid_config", "build_app_url must be https://ai.studio/apps/<id> or https://aistudio.google.com/apps/<path>");
+  if (upstream == "build_app" && build_app_url.empty())
+    throw Error(400, "invalid_config", "The build_app upstream needs build_app_url");
+  // The Build App preview is a cross-site frame; the gateway reaches it as its
+  // own DevTools target, which only site isolation provides.
+  if (upstream == "build_app" && !browser_site_isolation)
+    throw Error(400, "invalid_config", "The build_app upstream needs browser_site_isolation");
   if (!cookie_import_max_accounts || cookie_import_max_accounts > 32 ||
       !cookie_import_timeout_seconds || cookie_import_timeout_seconds > 240)
     throw Error(400, "invalid_config", "Cookie import permits 1..32 accounts and a 1..240 second timeout");
