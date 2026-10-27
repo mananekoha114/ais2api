@@ -7,6 +7,7 @@
 #include "ais2api/browser.hpp"
 #include "../browser/cdp.hpp"
 #include "../browser/rpc_error.hpp"
+#include "../browser/sse.hpp"
 #include "../browser/google_auth.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
@@ -640,4 +641,58 @@ TEST_CASE("launch switches drop the sandbox with the zygote and keep a visible b
     CHECK(has(args, "--remote-allow-origins=*"));
     CHECK(has(args, "--disable-site-isolation-trials"));
     CHECK(features(args).ends_with(",SitePerProcess"));
+}
+TEST_CASE("Build App bridge is embedded with a matching digest and required host methods", "[browser][build-app]") {
+    const auto source = browser_detail::embedded_app_bridge_source();
+    REQUIRE_FALSE(source.empty());
+    REQUIRE(source.size() <= 256 * 1024);
+    REQUIRE(sha256(source) == browser_detail::embedded_app_bridge_sha256());
+    REQUIRE(source.find("ready, models, append, start, ack, next, abort") != std::string_view::npos);
+}
+TEST_CASE("Gemini API event streams split events at blank lines across feeds", "[browser][build-app][sse]") {
+    std::vector<std::string> events;
+    const auto emit = [&](std::string_view data) { events.emplace_back(data); };
+    browser_detail::SseParser parser(1024);
+    // CRLF, CR and LF line ends; a CRLF split between feeds ends one line.
+    const std::string stream = ": keep-alive\r\ndata: {\"a\":1}\r\n\r\nevent: message\nid: 7\ndata:{\"b\":\ndata: 2}\n\ndata: {\"c\":3}\r\r";
+    for (std::size_t i = 0; i < stream.size(); i += 3) parser.feed(std::string_view(stream).substr(i, 3), emit);
+    parser.feed("data: x\r", emit);
+    parser.feed("\n", emit);
+    parser.feed("\r\ndata: {\"tail\":true}", emit);
+    CHECK(events == std::vector<std::string>{"{\"a\":1}", "{\"b\":\n2}", "{\"c\":3}", "x"});
+    parser.finish(emit);
+    CHECK(events.back() == "{\"tail\":true}");
+    parser.finish(emit);
+    CHECK(events.size() == 5);
+
+    browser_detail::SseParser bounded(16);
+    CHECK_NOTHROW(bounded.feed("data: 0123456789\n\n", emit));
+    try {
+        bounded.feed("data: 01234567", emit);
+        bounded.feed("\ndata: 89abcdef\n\n", emit);
+        FAIL("an oversized event must fail");
+    } catch (const Error& error) {
+        CHECK(error.code == "invalid_upstream");
+    }
+}
+TEST_CASE("Build App preview frames are recognized by their HTTPS usercontent host only", "[browser][build-app]") {
+    CHECK(browser_detail::build_app_frame("https://0f1e2d3c.scf.usercontent.goog/index.html?x=1"));
+    CHECK(browser_detail::build_app_frame("https://Preview.USERCONTENT.goog"));
+    for (const auto* url : {"https://usercontent.goog/", "https://.usercontent.goog/", "http://a.usercontent.goog/",
+                            "https://a.usercontent.goog.evil.example/", "https://evil.example/?h=a.usercontent.goog",
+                            "https://user@a.usercontent.goog/", "https://aistudio.google.com/apps/abc", "about:blank", ""})
+        CHECK_FALSE(browser_detail::build_app_frame(url));
+    CHECK(browser_detail::build_app_page("https://ai.studio/apps/abc", "2") == "https://ai.studio/apps/abc?authuser=2");
+}
+TEST_CASE("Build App bodies keep thoughts and resolve thinking levels beside budgets", "[browser][build-app]") {
+    auto thinking = [](json::object body) {
+        return browser_detail::build_app_body(std::move(body)).at("generationConfig").as_object().at("thinkingConfig").as_object();
+    };
+    const auto defaulted = thinking({{"contents", json::array{}}, {"generationConfig", {{"thinkingConfig", {{"thinkingLevel", "HIGH"}, {"thinkingBudget", 128}}}}}});
+    CHECK(defaulted == json::object{{"thinkingLevel", "HIGH"}, {"includeThoughts", true}});
+    CHECK(thinking({{"generationConfig", {{"thinkingConfig", {{"thinkingLevel", "LOW"}, {"includeThoughts", false}}}}}}).at("includeThoughts") == false);
+    // Without a level the public API applies the budget the caller chose.
+    CHECK(thinking({{"generationConfig", {{"thinkingConfig", {{"thinkingBudget", 0}}}}}}) == json::object{{"thinkingBudget", 0}});
+    const json::object plain{{"contents", json::array{}}, {"generationConfig", {{"temperature", 1}}}};
+    CHECK(browser_detail::build_app_body(plain) == plain);
 }

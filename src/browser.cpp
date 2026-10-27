@@ -10,6 +10,7 @@
 #include "../browser/proxy_relay.hpp"
 #include "../browser/google_auth.hpp"
 #include "../browser/rpc_error.hpp"
+#include "../browser/sse.hpp"
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 #include <boost/beast/websocket.hpp>
@@ -186,8 +187,42 @@ namespace http = beast::http;
 using tcp = asio::ip::tcp;
 using namespace std::chrono_literals;
 #include "browser_bridge.inc"
+#include "browser_app_bridge.inc"
 
 [[noreturn]] void incompatible(std::string message) { throw Error(502, "browser_incompatible", std::move(message)); }
+// Retry-After seconds a page transfer reported (0: none).
+unsigned retry_after(const json::object& state) {
+    const auto value = state.if_contains("retryAfter");
+    return value && value->is_int64() && value->as_int64() > 0 ? static_cast<unsigned>(std::min<std::int64_t>(86400, value->as_int64())) : 0u;
+}
+// The error a finished page transfer reported, classified from its retained
+// error body or HTTP status.
+std::optional<Error> transfer_error(const json::object& state) {
+    const auto error = string_or(state, "error");
+    if (error.empty()) return std::nullopt;
+    const auto retry = retry_after(state);
+    const auto status_value = state.if_contains("status");
+    const auto status = status_value && status_value->is_int64() ? status_value->as_int64() : 0;
+    const auto error_body = string_or(state, "errorBody");
+    if (auto rpc = browser_detail::rpc_text_error(error_body, retry)) return rpc;
+    if (auto http = browser_detail::rpc_status_error(status, retry, error_body)) return http;
+    return Error(502, error.starts_with("browser_incompatible") ? "browser_incompatible" : "upstream_error", "Browser generation transport failed");
+}
+// Model ids the Gemini API accepts as a path segment.
+bool api_model_id(std::string_view id) {
+    if (id.empty() || id.size() > 128 || !std::isalnum(static_cast<unsigned char>(id.front()))) return false;
+    return std::all_of(id.begin(), id.end(), [](unsigned char c) { return std::isalnum(c) || c == '.' || c == '_' || c == '-'; });
+}
+// Reads the Build App's top page while its preview frame is pending. The
+// confirmation AI Studio shows for another user's app is never clicked.
+constexpr std::string_view app_gate_probe = R"((() => {
+  const label = el => (el.innerText || el.getAttribute('aria-label') || '').trim();
+  return {
+    login: location.hostname === 'accounts.google.com' || /\/signin|\/ServiceLogin/.test(location.pathname),
+    regionBlocked: location.pathname.includes('available-regions'),
+    consent: [...document.querySelectorAll('button, a')].some(el => /^Continue to the app$/i.test(label(el)))
+  };
+})())";
 std::string quote_js(std::string_view s) {
     std::string quoted;
     browser_detail::append_quoted(quoted, s);
@@ -436,6 +471,36 @@ std::string_view browser_detail::embedded_bridge_source() {
     return {reinterpret_cast<const char*>(embedded_bridge_bytes), sizeof(embedded_bridge_bytes)};
 }
 std::string_view browser_detail::embedded_bridge_sha256() { return embedded_bridge_digest; }
+std::string_view browser_detail::embedded_app_bridge_source() {
+    return {reinterpret_cast<const char*>(embedded_app_bridge_bytes), sizeof(embedded_app_bridge_bytes)};
+}
+std::string_view browser_detail::embedded_app_bridge_sha256() { return embedded_app_bridge_digest; }
+bool browser_detail::build_app_frame(std::string_view url) {
+    constexpr std::string_view scheme = "https://", suffix = ".usercontent.goog";
+    if (!url.starts_with(scheme)) return false;
+    auto host = url.substr(scheme.size());
+    host = host.substr(0, host.find_first_of("/?#:"));
+    if (host.size() <= suffix.size() || host.find('@') != std::string_view::npos) return false;
+    std::string lower(host);
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return lower.ends_with(suffix);
+}
+std::string browser_detail::build_app_page(std::string_view app_url, std::string_view auth_user) {
+    // Configuration validation keeps queries and fragments out of the URL.
+    return std::string(app_url) + "?authuser=" + std::string(auth_user);
+}
+json::object browser_detail::build_app_body(json::object gemini) {
+    auto generation = gemini.if_contains("generationConfig");
+    if (!generation || !generation->is_object()) return gemini;
+    auto thinking = generation->as_object().if_contains("thinkingConfig");
+    if (!thinking || !thinking->is_object()) return gemini;
+    auto& config = thinking->as_object();
+    if (config.contains("thinkingLevel")) {
+        config.erase("thinkingBudget");
+        if (!config.contains("includeThoughts")) config["includeThoughts"] = true;
+    }
+    return gemini;
+}
 
 struct BrowserGateway::Impl {
     Config config;
@@ -448,6 +513,13 @@ struct BrowserGateway::Impl {
     std::string relay_error;
     fs::path profile;
     std::string context, session, account_id, account_fingerprint;
+    // The prompt page bridge's new-document script, removed before the page
+    // opens the Build App.
+    std::string bridge_script;
+    // build_app upstream: the top page shows the Build App, and `app_session`
+    // is attached to its preview frame once the app bridge runs there.
+    bool app_page = false;
+    std::string app_session;
     json::array base_template;
     std::string timezone = "UTC";
     json::array cached_models;
@@ -489,27 +561,29 @@ struct BrowserGateway::Impl {
         cdp.reset(); process.stop();
         if (relay) { relay_error = relay->last_error(); relay.reset(); }
         context.clear(); session.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); cached_models.clear(); session_state = {};
+        bridge_script.clear(); app_page = false; app_session.clear();
         if (!profile.empty()) { std::error_code ec; fs::remove_all(profile, ec); profile.clear(); }
         last_status = "closed";
     }
     json::value eval(std::string expression, std::stop_token token, std::chrono::seconds timeout = 30s) { return cdp->evaluate(std::move(expression), session, token, timeout); }
+    json::value eval_in(const std::string& page, std::string expression, std::stop_token token, std::chrono::seconds timeout = 30s) { return cdp->evaluate(std::move(expression), page, token, timeout); }
     // Sends a request body to the page in pieces passed as call arguments.
     // The bridge keeps each piece as a Blob, outside the JavaScript heap, so
     // neither a script source nor a page string ever holds the whole body.
-    std::string upload(std::string body, std::stop_token token) {
+    std::string upload(std::string body, std::stop_token token, const std::string& page, std::string_view bridge_name) {
         constexpr std::size_t piece_bytes = 512 * 1024;
-        auto bridge = cdp->call("Runtime.evaluate", {{"expression", "globalThis.__ais2bridge"}, {"objectGroup", "ais2api-upload"}}, session, token);
+        auto bridge = cdp->call("Runtime.evaluate", {{"expression", bridge_name}, {"objectGroup", "ais2api-upload"}}, page, token);
         auto remote = bridge.if_contains("result");
         const auto handle = remote && remote->is_object() ? string_or(remote->as_object(), "objectId") : std::string{};
         if (bridge.if_contains("exceptionDetails") || handle.empty()) incompatible("Page bridge is unavailable for the request upload");
-        const auto release = [&] { cdp->notify("Runtime.releaseObjectGroup", {{"objectGroup", "ais2api-upload"}}, session); };
+        const auto release = [&] { cdp->notify("Runtime.releaseObjectGroup", {{"objectGroup", "ais2api-upload"}}, page); };
         const auto id = random_hex(8);
         try {
             const std::string_view rest(body);
             std::size_t offset = 0;
             do {
                 const auto size = browser_detail::utf8_prefix(rest.substr(offset), piece_bytes);
-                cdp->call_function(handle, "function(id, chunk) { return this.append(id, chunk); }", {id, rest.substr(offset, size)}, session, token);
+                cdp->call_function(handle, "function(id, chunk) { return this.append(id, chunk); }", {id, rest.substr(offset, size)}, page, token);
                 offset += size;
             } while (offset < rest.size());
         } catch (...) { release(); throw; }
@@ -518,8 +592,8 @@ struct BrowserGateway::Impl {
     }
     // A large body's Blob is released only when the page collects its small
     // wrapper, which heap pressure alone may not trigger for a long time.
-    void collect_garbage() noexcept {
-        try { if (cdp && !session.empty()) cdp->notify("HeapProfiler.collectGarbage", {}, session); } catch (...) {}
+    void collect_garbage(const std::string& page) noexcept {
+        try { if (cdp && !page.empty()) cdp->notify("HeapProfiler.collectGarbage", {}, page); } catch (...) {}
     }
     std::string authorization(std::stop_token token) {
         check_cancel(token);
@@ -606,6 +680,7 @@ struct BrowserGateway::Impl {
         authorization_cache.clear();
         if (!context.empty()) cdp->call("Target.disposeBrowserContext", {{"browserContextId", context}}, {}, token);
         context.clear(); session.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); cached_models.clear(); session_state = {};
+        bridge_script.clear(); app_page = false; app_session.clear();
     }
     // Google rotates session cookies while the page is in use. Persist the
     // verified context's current cookies so later sessions do not restart from
@@ -684,12 +759,27 @@ struct BrowserGateway::Impl {
         throw Error(409, "identity_unverified", last == browser_detail::IdentityVerdict::ambiguous
             ? "AI Studio exposed multiple account identities" : "AI Studio account identity did not finish loading");
     }
+    void navigate(const std::string& url, std::stop_token token) {
+        const auto navigation = cdp->call("Page.navigate", {{"url", url}}, session, token);
+        // Without this an unreachable page waits out the identity
+        // check and is blamed on the account.
+        if (auto failure = browser_detail::navigation_failure(string_or(navigation, "errorText"), !config.proxy.empty())) {
+            if (failure->code == "proxy_failed" && relay)
+                if (const auto detail = relay->last_error(); !detail.empty()) failure = Error(failure->status, failure->code, std::string(failure->what()) + ": " + detail);
+            throw *failure;
+        }
+    }
+    // `bootstrap` prepares the page for generation: the captured request
+    // template, or for the build_app upstream the Build App's preview frame.
     void ensure_account(const Account& account, std::stop_token token, bool bootstrap, bool identity_only = false) {
         phase = "browser_start";
         ensure_browser(token, identity_for(account));
+        const bool app = bootstrap && config.upstream == "build_app";
         auto fingerprint = sha256(json::serialize(account.storage_state) + "\n" + account.auth_user + "\n" + account.email);
         bool verified_session = false;
-        if (account.id != account_id || fingerprint != account_fingerprint || session.empty()) {
+        // Identity checks and imports need the prompt page, which a page
+        // showing the Build App no longer is.
+        if (account.id != account_id || fingerprint != account_fingerprint || session.empty() || (app_page && !app)) {
             // Dispose before create: never keep two account contexts resident.
             dispose_context(token);
             try {
@@ -708,20 +798,13 @@ struct BrowserGateway::Impl {
                 // not depend on them).
                 try { cdp->call("Inspector.enable", {}, session, token, 5s); }
                 catch (const Error& error) { if (error.code == "cancelled") throw; }
-                cdp->call("Page.addScriptToEvaluateOnNewDocument", {{"source", bridge_source()}}, session, token);
+                bridge_script = string_or(cdp->call("Page.addScriptToEvaluateOnNewDocument", {{"source", bridge_source()}}, session, token), "identifier");
                 if (auto origins = account.storage_state.if_contains("origins"); origins && origins->is_array()) {
                     const auto restore = "(() => {const entries=" + json::serialize(*origins) + ";for(const e of entries){if(e.origin!==location.origin||!Array.isArray(e.localStorage))continue;for(const p of e.localStorage){if(typeof p.name==='string'&&typeof p.value==='string')localStorage.setItem(p.name,p.value);}}})()";
                     cdp->call("Page.addScriptToEvaluateOnNewDocument", {{"source", restore}}, session, token);
                 }
                 if (account.auth_user.empty() || !std::all_of(account.auth_user.begin(), account.auth_user.end(), [](unsigned char c) { return std::isdigit(c); })) throw Error(400, "invalid_auth_user", "auth_user must be a nonnegative integer");
-                const auto navigation = cdp->call("Page.navigate", {{"url", "https://aistudio.google.com/prompts/new_chat?authuser=" + account.auth_user}}, session, token);
-                // Without this an unreachable page waits out the identity
-                // check and is blamed on the account.
-                if (auto failure = browser_detail::navigation_failure(string_or(navigation, "errorText"), !config.proxy.empty())) {
-                    if (failure->code == "proxy_failed" && relay)
-                        if (const auto detail = relay->last_error(); !detail.empty()) failure = Error(failure->status, failure->code, std::string(failure->what()) + ": " + detail);
-                    throw *failure;
-                }
+                navigate("https://aistudio.google.com/prompts/new_chat?authuser=" + account.auth_user, token);
                 phase = "account_identity";
                 await_account_identity(account, token, !identity_only);
                 account_id = account.id; account_fingerprint = std::move(fingerprint); last_status = "account_ready";
@@ -730,10 +813,13 @@ struct BrowserGateway::Impl {
                 persist_cookies(account, token);
             } catch (...) { try { dispose_context({}); } catch (...) { close(); } throw; }
         }
-        if (!verified_session) {
+        // The Build App page has no prompt page bridge; its preview frame
+        // shows whether the verified session is still usable.
+        if (!verified_session && !app_page) {
             phase = "account_identity";
             await_account_identity(account, token, !identity_only);
         }
+        if (app) { ensure_app_frame(account, token); return; }
         if (!bootstrap || !base_template.empty()) return;
         phase = "bootstrap_prepare";
         auto prepared = eval("globalThis.__ais2bridge.bootstrap()", token);
@@ -788,6 +874,176 @@ struct BrowserGateway::Impl {
         incompatible(template_seen
             ? "Live GenerateContent was captured but its snapshot adapter could not be verified"
             : "The page did not expose a supported fetch/XHR GenerateContent request during bootstrap");
+    }
+    void detach_app_frame() noexcept {
+        if (app_session.empty()) return;
+        try { cdp->notify("Target.detachFromTarget", {{"sessionId", app_session}}, {}); } catch (...) {}
+        app_session.clear();
+    }
+    // Attaches the preview frame target and starts the app bridge in its main
+    // world, where AI Studio completes the frame's Gemini API calls. Returns
+    // false while the frame is still loading.
+    bool attach_app_frame(const std::string& target, std::stop_token token) {
+        const auto attached = string_or(cdp->call("Target.attachToTarget", {{"targetId", target}, {"flatten", true}}, {}, token), "sessionId");
+        if (attached.empty()) incompatible("Browser did not attach the Build App preview frame");
+        app_session = attached;
+        try {
+            // Renderer crash notifications (best effort, as for the page).
+            try { cdp->call("Inspector.enable", {}, app_session, token, 5s); }
+            catch (const Error& error) { if (error.code == "cancelled") throw; }
+            eval_in(app_session, std::string(browser_detail::embedded_app_bridge_source()), token, 10s);
+            const auto ready = eval_in(app_session, "globalThis.__ais2app.ready()", token, 5s);
+            if (ready.is_object() && bool_or(ready.as_object(), "fetch")) return true;
+        } catch (const Error& error) {
+            // A frame replacing its document drops the evaluation; retry.
+            if (error.code != "browser_incompatible") { detach_app_frame(); throw; }
+        }
+        detach_app_frame();
+        return false;
+    }
+    void ensure_app_frame(const Account& account, std::stop_token token) {
+        if (!app_session.empty()) {
+            try {
+                const auto present = eval_in(app_session, "!!globalThis.__ais2app", token, 5s);
+                if (present.is_bool() && present.as_bool()) return;
+            } catch (const Error& error) {
+                if (error.code == "cancelled") throw;
+            }
+            // A reloaded or replaced frame needs a new attachment.
+            detach_app_frame();
+        }
+        if (!app_page) {
+            // The prompt page bridge intercepts AI Studio's own RPCs, which the
+            // Build App page must be able to send unchanged.
+            if (!bridge_script.empty())
+                cdp->call("Page.removeScriptToEvaluateOnNewDocument", {{"identifier", bridge_script}}, session, token);
+            bridge_script.clear();
+            phase = "app_open";
+            app_page = true;
+            navigate(browser_detail::build_app_page(config.build_app_url, account.auth_user), token);
+        }
+        phase = "app_frame";
+        const auto deadline = Clock::now() + 60s;
+        while (Clock::now() < deadline) {
+            check_cancel(token);
+            std::vector<std::string> frames;
+            const auto targets = cdp->call("Target.getTargets", {}, {}, token, 5s);
+            if (auto infos = targets.if_contains("targetInfos"); infos && infos->is_array())
+                for (const auto& value : infos->as_array()) {
+                    if (!value.is_object()) continue;
+                    const auto& info = value.as_object();
+                    if (string_or(info, "type") == "iframe" && string_or(info, "browserContextId") == context &&
+                        browser_detail::build_app_frame(string_or(info, "url")))
+                        frames.push_back(string_or(info, "targetId"));
+                }
+            if (frames.size() > 1) incompatible("The Build App page shows more than one preview frame");
+            if (frames.size() == 1 && attach_app_frame(frames.front(), token)) { phase = "ready"; last_status = "gateway_ready"; return; }
+            try {
+                const auto gate = eval(std::string(app_gate_probe), token, 5s);
+                if (gate.is_object()) {
+                    const auto& state = gate.as_object();
+                    if (bool_or(state, "login")) throw Error(401, "session_expired", "Google redirected the account to sign-in");
+                    if (bool_or(state, "regionBlocked")) throw Error(403, "region_blocked", "AI Studio is unavailable in the browser region");
+                    if (bool_or(state, "consent"))
+                        throw Error(409, "build_app_consent_required", "The Build App asks to confirm opening another user's app; use a Build App owned by this account");
+                }
+            } catch (const Error& error) {
+                // Redirects can replace the page's execution context.
+                if (error.code != "browser_incompatible") throw;
+            }
+            pause(token, 500ms);
+        }
+        last_status = "app_frame_missing";
+        incompatible("The Build App page did not show a usable preview frame");
+    }
+    // Reads the transfer the bridge `bridge_name` on `page` started. Each
+    // chunk goes to `chunk`; only after it returned does the page get the
+    // credit to read the next one. Returns the transfer's final state.
+    json::object read_transfer(const std::string& page, std::string_view bridge_name, bool stream, std::stop_token cancel,
+                       const std::function<void(std::string_view, const json::object&)>& chunk) {
+        const auto began = Clock::now();
+        auto activity = began;
+        std::uint64_t sequence = 0;
+        // Sequence of the consumed chunk the next call acknowledges (0: none).
+        std::uint64_t unacknowledged = 0;
+        while (true) {
+            check_cancel(cancel);
+            if (!stream && Clock::now() - began > std::chrono::seconds(config.limits.generation_seconds)) throw Error(504, "generation_timeout", "Generation deadline exceeded");
+            if (Clock::now() - activity > std::chrono::seconds(config.limits.stream_idle_seconds)) throw Error(504, "stream_idle_timeout", "No upstream stream bytes before idle deadline");
+            // The page answers as soon as a chunk or the end arrives.
+            auto value = eval_in(page, std::string(bridge_name) + ".next(" + std::to_string(unacknowledged) + ",250)", cancel, 5s);
+            unacknowledged = 0;
+            check_cancel(cancel);
+            if (!value.is_object()) incompatible("Browser relay state was lost");
+            auto& state = value.as_object();
+            auto pending = state.if_contains("pending");
+            if (pending && pending->is_object()) {
+                auto number = pending->as_object().if_contains("sequence");
+                if (!number || !number->is_int64() || number->as_int64() != static_cast<std::int64_t>(sequence + 1)) incompatible("Browser relay sequence mismatch");
+                const auto bytes = decode64(string_or(pending->as_object(), "bytes"));
+                if (bytes.empty()) incompatible("Empty browser relay credit");
+                chunk(bytes, state);
+                if (!stream && Clock::now() - began > std::chrono::seconds(config.limits.generation_seconds)) throw Error(504, "generation_timeout", "Generation deadline exceeded while consuming downstream events");
+                // EventSink returns only once downstream consumed its event.
+                // ACK grants the page permission for exactly one next read.
+                unacknowledged = ++sequence;
+                activity = Clock::now();
+            } else if (bool_or(state, "done")) {
+                return std::move(state);
+            }
+        }
+    }
+    // build_app upstream: streamGenerateContent through the preview frame.
+    // The public API's SSE events already have the Gemini response shape.
+    void generate_app(const Request& request, const Account& account, const EventSink& sink, std::stop_token cancel) {
+        if (!api_model_id(request.model)) throw Error(400, "invalid_argument", "The model id cannot be used with the Gemini API");
+        const auto chunk_bytes = std::min<std::size_t>(32768, config.limits.relay_bytes);
+        if (!chunk_bytes) throw Error(500, "invalid_config", "Browser relay byte budget must be positive");
+        auto body = json::serialize(browser_detail::build_app_body(request.gemini));
+        const bool large_body = body.size() >= 1024 * 1024;
+        browser_detail::SseParser parser(config.limits.object_bytes);
+        // A body that is no event stream may still be a status envelope.
+        std::string prefix;
+        constexpr std::size_t prefix_limit = 16384;
+        bool events = false;
+        unsigned retry = 0;
+        const auto emit = [&](std::string_view data) {
+            check_cancel(cancel);
+            boost::system::error_code parse_error;
+            auto value = json::parse(data, parse_error);
+            if (parse_error) throw Error(502, "invalid_upstream", "Gemini API stream carried invalid JSON");
+            if (auto error = browser_detail::rpc_error(value, retry)) throw *error;
+            if (!value.is_object()) throw Error(502, "invalid_upstream", "Gemini API stream carried a non-object event");
+            events = true;
+            sink(std::move(value.as_object()));
+            check_cancel(cancel);
+        };
+        try {
+            phase = "generation_upload";
+            const auto upload_id = upload(std::move(body), cancel, app_session, "globalThis.__ais2app");
+            phase = "generation_start";
+            eval_in(app_session, "globalThis.__ais2app.start({upload:" + quote_js(upload_id) + ",model:" + quote_js(request.model) +
+                                 ",chunkBytes:" + std::to_string(chunk_bytes) + "})", cancel);
+            phase = "generation_read";
+            const auto state = read_transfer(app_session, "globalThis.__ais2app", request.stream, cancel, [&](std::string_view bytes, const json::object& state) {
+                retry = retry_after(state);
+                if (prefix.size() < prefix_limit) prefix.append(bytes.substr(0, prefix_limit - prefix.size()));
+                parser.feed(bytes, emit);
+            });
+            retry = retry_after(state);
+            if (auto error = transfer_error(state)) throw *error;
+            parser.finish(emit);
+            if (!events)
+                if (auto error = browser_detail::rpc_text_error(prefix, retry)) throw *error;
+            phase = "generation_complete";
+            if (Clock::now() - cookies_saved_at >= 300s)
+                try { persist_cookies(account, {}); } catch (...) {}
+            if (large_body) collect_garbage(app_session);
+        } catch (...) {
+            try { eval_in(app_session, "globalThis.__ais2app.abort()", {}, 3s); } catch (...) { detach_app_frame(); }
+            if (large_body) collect_garbage(app_session);
+            throw;
+        }
     }
 };
 
@@ -844,9 +1100,12 @@ json::object BrowserGateway::diagnostics() {
     std::unique_lock lock(impl_->mutex, std::try_to_lock);
     if (!lock.owns_lock())
         return {{"status", "busy"}, {"phase", "active"}, {"bridgeSource", "embedded"},
-                {"bridgeSha256", browser_detail::embedded_bridge_sha256()}};
+                {"bridgeSha256", browser_detail::embedded_bridge_sha256()},
+                {"appBridgeSha256", browser_detail::embedded_app_bridge_sha256()}};
     return {{"status", impl_->last_status}, {"phase", impl_->phase},
         {"bridgeSource", "embedded"}, {"bridgeSha256", browser_detail::embedded_bridge_sha256()},
+        {"appBridgeSha256", browser_detail::embedded_app_bridge_sha256()},
+        {"upstream", impl_->config.upstream}, {"appFrame", !impl_->app_session.empty()},
         {"running", impl_->process.alive()}, {"isolatedContext", !impl_->context.empty()}, {"templateCaptured", !impl_->base_template.empty()}, {"modelDiscovery", impl_->cached_models.empty() ? "not_loaded" : "live_rpc_cache"}, {"chunkBytes", 32768},
         {"cookieRefresh", impl_->cookie_refresh},
         {"proxy", json::object{{"mode", impl_->config.proxy.empty() ? "none" : impl_->config.browser_proxy_relay ? "relay" : "direct"},
@@ -901,14 +1160,17 @@ json::array BrowserGateway::models(std::stop_token cancel) {
         if (!account) return configured();
         // Listing models needs a verified account, never a generation request,
         // prompt editor, Run button or snapshot service. Recheck before cache.
-        impl_->ensure_account(*account, cancel, false, true);
+        // The build_app upstream lists the public API's models through the
+        // Build App frame it generates with.
+        const bool app = impl_->config.upstream == "build_app";
+        impl_->ensure_account(*account, cancel, app, true);
         if (!impl_->cached_models.empty() && Clock::now() - impl_->models_at < 600s) {
             auto cached = impl_->cached_models;
             for (auto& item : cached) item.as_object()["source"] = "cache";
             return cached;
         }
-        const auto authorization = impl_->authorization(cancel);
-        auto result = impl_->eval("globalThis.__ais2bridge.discoverModels(" + quote_js(account->auth_user) + "," + quote_js(authorization) + ")", cancel, 25s);
+        auto result = app ? impl_->eval_in(impl_->app_session, "globalThis.__ais2app.models()", cancel, 60s)
+            : impl_->eval("globalThis.__ais2bridge.discoverModels(" + quote_js(account->auth_user) + "," + quote_js(impl_->authorization(cancel)) + ")", cancel, 25s);
         if (!result.is_array()) incompatible("ListModels returned an unsupported response");
         impl_->cached_models = result.as_array(); impl_->models_at = Clock::now();
         return impl_->cached_models.empty() ? configured() : impl_->cached_models;
@@ -922,6 +1184,7 @@ json::array BrowserGateway::models(std::stop_token cancel) {
 void BrowserGateway::generate(const Request& request, const Account& account, const EventSink& sink, std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
     impl_->ensure_account(account, cancel, true);
+    if (impl_->config.upstream == "build_app") return impl_->generate_app(request, account, sink, cancel);
     impl_->phase = "snapshot_ticket";
     auto wire = encode_request(request, impl_->base_template, "", impl_->timezone);
     // Covers the bridge's bounded snapshot retries (3 x 9 s).
@@ -936,85 +1199,49 @@ void BrowserGateway::generate(const Request& request, const Account& account, co
     const auto authorization = impl_->authorization(cancel);
     const bool large_body = body.size() >= 1024 * 1024;
     WireStreamParser parser(impl_->config.limits.object_bytes);
-    std::uint64_t sequence = 0;
     std::string error_prefix;
     constexpr std::size_t error_prefix_limit = 16384;
     std::optional<Error> parse_failure;
+    const auto classified = [](Error error, const json::object& state) {
+        if (error.status == 403 && string_or(state, "benefitTier", "unknown") == "unknown")
+            error.code = "benefit_tier_unconfirmed";
+        return error;
+    };
     try {
         impl_->phase = "generation_upload";
-        const auto upload = impl_->upload(std::move(body), cancel);
+        const auto upload = impl_->upload(std::move(body), cancel, impl_->session, "globalThis.__ais2bridge");
         impl_->phase = "generation_start";
         impl_->eval("globalThis.__ais2bridge.start({upload:" + quote_js(upload) + ",authUser:" + quote_js(account.auth_user) +
                     ",authorization:" + quote_js(authorization) + ",chunkBytes:" + std::to_string(chunk_bytes) + "})", cancel);
-        const auto began = Clock::now();
-        auto activity = began;
         impl_->phase = "generation_read";
-        // Sequence of the consumed chunk the next call acknowledges (0: none).
-        std::uint64_t unacknowledged = 0;
-        while (true) {
-            check_cancel(cancel);
-            if (!request.stream && Clock::now() - began > std::chrono::seconds(impl_->config.limits.generation_seconds)) throw Error(504, "generation_timeout", "Generation deadline exceeded");
-            if (Clock::now() - activity > std::chrono::seconds(impl_->config.limits.stream_idle_seconds)) throw Error(504, "stream_idle_timeout", "No upstream stream bytes before idle deadline");
-            // The page answers as soon as a chunk or the end arrives.
-            auto value = impl_->eval("globalThis.__ais2bridge.next(" + std::to_string(unacknowledged) + ",250)", cancel, 5s);
-            unacknowledged = 0;
-            check_cancel(cancel);
-            if (!value.is_object()) incompatible("Browser relay state was lost");
-            const auto& state = value.as_object();
-            auto classified = [&](Error error) {
-                if (error.status == 403 && string_or(state, "benefitTier", "unknown") == "unknown")
-                    error.code = "benefit_tier_unconfirmed";
-                return error;
-            };
-            const auto retry_value = state.if_contains("retryAfter");
-            const auto retry_after = retry_value && retry_value->is_int64() && retry_value->as_int64() > 0 ? static_cast<unsigned>(std::min<std::int64_t>(86400, retry_value->as_int64())) : 0u;
-            auto pending = state.if_contains("pending");
-            if (pending && pending->is_object()) {
-                auto number = pending->as_object().if_contains("sequence");
-                if (!number || !number->is_int64() || number->as_int64() != static_cast<std::int64_t>(sequence + 1)) incompatible("Browser relay sequence mismatch");
-                const auto bytes = decode64(string_or(pending->as_object(), "bytes"));
-                if (bytes.empty()) incompatible("Empty browser relay credit");
-                if (error_prefix.size() < error_prefix_limit) error_prefix.append(bytes.substr(0, error_prefix_limit - error_prefix.size()));
-                if (auto error = browser_detail::rpc_text_error(error_prefix, retry_after)) throw classified(*error);
-                try { if (!parse_failure) parser.feed(bytes, [&](json::value chunk) {
-                    check_cancel(cancel);
-                    if (auto error = browser_detail::rpc_error(chunk, retry_after)) throw classified(*error);
-                    auto event = decode_chunk(chunk);
-                    if (!event.empty()) sink(std::move(event));
-                    check_cancel(cancel);
-                }); } catch (const Error& error) {
-                    if (error.code != "invalid_upstream" && error.code != "truncated_upstream") throw;
-                    parse_failure = error;
-                }
-                if (parse_failure && error_prefix.size() >= error_prefix_limit) throw *parse_failure;
-                if (!request.stream && Clock::now() - began > std::chrono::seconds(impl_->config.limits.generation_seconds)) throw Error(504, "generation_timeout", "Generation deadline exceeded while consuming downstream events");
-                // EventSink returns only once downstream consumed its event.
-                // ACK grants the page permission for exactly one next read.
-                unacknowledged = ++sequence;
-                activity = Clock::now();
-            } else if (bool_or(state, "done")) {
-                const auto error = string_or(state, "error");
-                const auto status_value = state.if_contains("status");
-                const auto status = status_value && status_value->is_int64() ? status_value->as_int64() : 0;
-                if (status == 204) throw Error(502, "upstream_no_content", "Google returned an empty response");
-                if (!error.empty()) {
-                    const auto error_body = string_or(state, "errorBody");
-                    if (auto rpc = browser_detail::rpc_text_error(error_body, retry_after)) throw classified(*rpc);
-                    if (auto http = browser_detail::rpc_status_error(status, retry_after, error_body)) throw classified(*http);
-                    throw Error(502, error.starts_with("browser_incompatible") ? "browser_incompatible" : "upstream_error", "Browser generation transport failed");
-                }
-                if (auto rpc = browser_detail::rpc_text_error(error_prefix, retry_after)) throw classified(*rpc);
-                if (parse_failure) throw *parse_failure;
-                parser.finish(); impl_->phase = "generation_complete";
-                if (Clock::now() - impl_->cookies_saved_at >= 300s)
-                    try { impl_->persist_cookies(account, {}); } catch (...) {}
-                if (large_body) impl_->collect_garbage();
-                return;
+        const auto state = impl_->read_transfer(impl_->session, "globalThis.__ais2bridge", request.stream, cancel, [&](std::string_view bytes, const json::object& state) {
+            const auto retry = retry_after(state);
+            if (error_prefix.size() < error_prefix_limit) error_prefix.append(bytes.substr(0, error_prefix_limit - error_prefix.size()));
+            if (auto error = browser_detail::rpc_text_error(error_prefix, retry)) throw classified(*error, state);
+            try { if (!parse_failure) parser.feed(bytes, [&](json::value chunk) {
+                check_cancel(cancel);
+                if (auto error = browser_detail::rpc_error(chunk, retry)) throw classified(*error, state);
+                auto event = decode_chunk(chunk);
+                if (!event.empty()) sink(std::move(event));
+                check_cancel(cancel);
+            }); } catch (const Error& error) {
+                if (error.code != "invalid_upstream" && error.code != "truncated_upstream") throw;
+                parse_failure = error;
             }
-        }
+            if (parse_failure && error_prefix.size() >= error_prefix_limit) throw *parse_failure;
+        });
+        const auto status_value = state.if_contains("status");
+        if (status_value && status_value->is_int64() && status_value->as_int64() == 204) throw Error(502, "upstream_no_content", "Google returned an empty response");
+        if (auto error = transfer_error(state)) throw classified(*error, state);
+        if (auto rpc = browser_detail::rpc_text_error(error_prefix, retry_after(state))) throw classified(*rpc, state);
+        if (parse_failure) throw *parse_failure;
+        parser.finish(); impl_->phase = "generation_complete";
+        if (Clock::now() - impl_->cookies_saved_at >= 300s)
+            try { impl_->persist_cookies(account, {}); } catch (...) {}
+        if (large_body) impl_->collect_garbage(impl_->session);
     } catch (...) {
         try { impl_->eval("globalThis.__ais2bridge.abort()", {}, 3s); } catch (...) { impl_->close(); }
-        if (large_body) impl_->collect_garbage();
+        if (large_body) impl_->collect_garbage(impl_->session);
         throw;
     }
 }

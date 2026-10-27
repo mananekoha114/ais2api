@@ -12,7 +12,18 @@ namespace ais2api {
 namespace browser_detail {
 std::string_view embedded_bridge_source();
 std::string_view embedded_bridge_sha256();
+std::string_view embedded_app_bridge_source();
+std::string_view embedded_app_bridge_sha256();
 std::string wire_content_hash(const json::array &wire);
+// Whether a DevTools iframe target's URL belongs to a Build App preview frame.
+bool build_app_frame(std::string_view url);
+// The configured Build App page for the account slot `auth_user`.
+std::string build_app_page(std::string_view app_url, std::string_view auth_user);
+// The public Gemini API body for a normalized request. Thoughts come back
+// whenever a thinking level is set, as on the private upstream, and the
+// thinkingBudget that upstream ignores is dropped beside a level, which the
+// public API rejects.
+json::object build_app_body(json::object gemini);
 enum class IdentityVerdict { pending, verified, mismatch, ambiguous };
 IdentityVerdict identity_verdict(const json::object &identity, std::string_view expected_email);
 json::array import_cookies(const json::array &cookies, std::size_t *skipped_partition_cookies = nullptr);

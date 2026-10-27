@@ -35,6 +35,8 @@ jobs:
           node --check browser/bridge.js
           node --check browser/test_cookie_runtime.cjs
           node --test browser/test_bridge.cjs
+          node --check browser/app_bridge.js
+          node --test browser/test_app_bridge.cjs
           node --check userscript/ais2api-cookie.user.js
           node userscript/test_cookie_helper.cjs
   linux:

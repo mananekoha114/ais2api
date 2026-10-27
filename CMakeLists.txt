@@ -31,7 +31,12 @@ add_custom_command(OUTPUT "${browser_bridge_inc}"
   COMMAND "${CMAKE_COMMAND}" "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/browser/bridge.js"
     "-DOUTPUT=${browser_bridge_inc}" -P "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-browser.cmake"
   DEPENDS browser/bridge.js scripts/embed-browser.cmake VERBATIM)
-target_sources(ais2api_core PRIVATE "${browser_bridge_inc}")
+set(browser_app_bridge_inc "${CMAKE_CURRENT_BINARY_DIR}/generated/browser_app_bridge.inc")
+add_custom_command(OUTPUT "${browser_app_bridge_inc}"
+  COMMAND "${CMAKE_COMMAND}" "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/browser/app_bridge.js"
+    "-DOUTPUT=${browser_app_bridge_inc}" -DNAME=app_bridge -P "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-browser.cmake"
+  DEPENDS browser/app_bridge.js scripts/embed-browser.cmake VERBATIM)
+target_sources(ais2api_core PRIVATE "${browser_bridge_inc}" "${browser_app_bridge_inc}")
 target_include_directories(ais2api_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 include(scripts/webui.cmake)
 target_include_directories(ais2api_core PUBLIC include)
@@ -70,7 +75,7 @@ if(BUILD_TESTING)
   add_test(NAME unit COMMAND ais2api_tests)
 endif()
 install(TARGETS ais2api RUNTIME DESTINATION bin)
-install(FILES browser/bridge.js DESTINATION bin/browser)
+install(FILES browser/bridge.js browser/app_bridge.js DESTINATION bin/browser)
 install(FILES userscript/ais2api-cookie.user.js DESTINATION bin/userscript)
 install(FILES runtime-manifest.json DESTINATION bin)
 install(DIRECTORY schemas DESTINATION share/ais2api)
