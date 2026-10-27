@@ -10,6 +10,7 @@ ais2api 是一个 C++20 编写的 AI Studio 网页会话网关：它驱动本地
 
 - **三种 API**：Gemini `generateContent` / `streamGenerateContent`、OpenAI `/v1/chat/completions` 与 `/v1/responses`，支持流式、多模态输入、函数调用、JSON Schema 输出。
 - **真 role 与思考签名**：保留完整历史中的消息边界和原生部件，思考签名可在多轮对话中往返。
+- **Build App 上游（实验性）**：可选改为在 AI Studio Build App 的预览框架内调用公共 Gemini API，无需 BotGuard 与请求模板，见 [浏览器网关](docs/browser.md#build-app-上游实验性)。
 - **搜索模型**：每个模型自动提供 `<模型>-search` 变体，无需客户端配置即可开启 Google 搜索。
 - **多账号管理**：账号轮换、按模型冷却与自动恢复、每个账号固定的浏览器指纹、Cookie 自动写回。
 - **三种管理方式**：命令行、独立鉴权的管理 API，以及嵌入程序的 Web 控制台（运行时无需 Node.js）。
@@ -80,7 +81,7 @@ CXXFLAGS=-fexperimental-library sh scripts/build.sh termux --install-deps
 
 ## 致谢与许可
 
-工作原理参考了 [aistudio-api-termux](https://github.com/ReedSein/aistudio-api-termux/tree/84b50663fcae79058fe33e0e45b5c3452da7c461)；本项目的实现代码与测试样例为独立编写。
+工作原理参考了 [aistudio-api-termux](https://github.com/ReedSein/aistudio-api-termux/tree/84b50663fcae79058fe33e0e45b5c3452da7c461)，Build App 上游的思路参考了 [AIStudioToAPI](https://github.com/iBUHub/AIStudioToAPI)；本项目的实现代码与测试样例为独立编写。
 
 Copyright (c) 2026 Mana Nekoha (mananekoha114)。本项目自有源码、脚本、schema、测试与文档采用 [Mozilla Public License 2.0](LICENSE)，许可声明见 [NOTICE](NOTICE)。第三方依赖与浏览器保留各自的许可，其中可选 `Browser-Local` 包内的 CloakBrowser 仅限个人或内部使用，详见 [第三方说明](THIRD_PARTY_NOTICES.md)。
 

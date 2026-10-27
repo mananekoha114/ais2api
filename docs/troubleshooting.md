@@ -97,6 +97,7 @@
 | `network_failed`（502） | 无法连接 Google。检查网络或代理；会按临时错误在原账号重试，不会冷却账号。 |
 | `empty_upstream` / `incomplete_upstream` / `upstream_no_content`（502） | 上游返回空内容或数据不完整。服务会在原账号短暂等待后重试；已经输出给客户端的内容不会重新生成。 |
 | `cancelled`（499） | 客户端断开连接，生成已取消。 |
+| `build_app_consent_required`（409） | 使用 `build_app` 上游时，AI Studio 要求确认打开别人分享的 Build App。ais2api 不会代为确认；请改用当前账号自己创建的 App。不会让账号进入冷却。 |
 
 ## 客户端相关
 

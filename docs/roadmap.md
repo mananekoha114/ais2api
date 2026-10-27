@@ -43,6 +43,10 @@
 - 存储调用在 HTTP 线程上同步等待。
 - 每个请求多次复制整个配置。
 
+## 实验性功能
+
+- **Build App 上游**（`upstream: "build_app"`）：在 Build App 预览框架内调用公共 Gemini API，见 [浏览器网关](browser.md#build-app-上游实验性)。已有单元测试，尚未用真实账号验证；验证通过前不作为默认上游。
+
 ## 已知的功能缺口
 
 - 搜索来源与引用元数据未解码，Responses 不输出 `web_search_call`。

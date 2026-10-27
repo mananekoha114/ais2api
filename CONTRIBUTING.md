@@ -7,7 +7,7 @@ ais2api 是独立编写的 C++20 网关，目前仍为开发版本。开始之�
 | 目录 | 内容 |
 |---|---|
 | `src/`、`include/ais2api/` | C++ 服务：HTTP、协议适配、存储、配置、CLI、管理 API |
-| `browser/` | 浏览器网关（CDP、代理转发、重试策略）与页面桥接脚本 `bridge.js` |
+| `browser/` | 浏览器网关（CDP、代理转发、重试策略）与页面桥接脚本 `bridge.js`、Build App 桥接脚本 `app_bridge.js` |
 | `webui/` | Vue 3 管理控制台，构建时嵌入可执行文件 |
 | `userscript/` | Tampermonkey Cookie 导入脚本 |
 | `launcher/` | 运行包中的一键启动脚本 |

@@ -139,6 +139,34 @@ fetch 与 XHR 两种捕获方式都支持。页面内部结构变化时报告 `b
 - 浏览器启动参数沿用桌面版的配置（单 GPU 进程、SwiftShader 等），以便 CloakBrowser 在容器内稳定运行。仅在无界面模式下额外加入低内存渲染参数（V8 堆上限 128 MiB、低端设备模式等）；显示窗口时保持正常渲染，便于排查登录。Linux 上始终以 `--no-zygote` 启动，并同时加入 `--no-sandbox`（沙箱依赖 zygote），非 root 用户也不例外；Windows 与 macOS 没有 zygote，两者都不加入。`--remote-allow-origins=*` 与关闭站点隔离分别由 `browser_remote_allow_origins`、`browser_site_isolation` 控制，默认不启用。
 - 页面导航失败时会检查 `errorText`：代理类错误报 `502 proxy_failed`，无法连接 Google 报 `502 network_failed`，不会再等满超时后冷却账号。
 
+## Build App 上游（实验性）
+
+`upstream` 设为 `build_app` 后，生成不再回放聊天页的私有 RPC，而是在 AI Studio Build App 的预览框架内直接调用公共 Gemini API（`generativelanguage.googleapis.com`），由 AI Studio 为该框架的请求补全账号凭据。工作原理参考了 [AIStudioToAPI](https://github.com/iBUHub/AIStudioToAPI)；本项目的实现独立编写，不需要在 App 里粘贴任何代码。
+
+**准备页面**
+
+1. 浏览器进程、隐身上下文、指纹、Cookie 注入与身份核对和默认上游相同：先在聊天页确认邮箱。
+2. 移除聊天页桥接脚本的新文档注入（它会拦截 AI Studio 自己的 RPC），然后以账号的 `authuser` 打开 `build_app_url`。
+3. 每 0.5 秒通过 `Target.getTargets` 查找同一上下文中主机名以 `.usercontent.goog` 结尾的 HTTPS iframe 目标，最多 60 秒；找到后以扁平化会话附加，并在框架主世界执行内嵌的 `browser/app_bridge.js`。框架是跨站 iframe，只有开启站点隔离才会成为独立目标，因此该上游要求 `browser_site_isolation`。
+4. 等待期间检查顶层页面：跳转登录报 `401 session_expired`，地区限制报 `403 region_blocked`，出现 “Continue to the app” 确认时报 `409 build_app_consent_required`。确认按钮**从不**点击，这与引导阶段只关闭弹窗的规则一致。
+5. 超时仍没有可用框架报 `browser_incompatible`，由重启逻辑接管。之后每次请求先检查框架中的桥接是否仍在，框架重载或替换时重新附加。
+
+**每次请求**
+
+- 请求体是规范化后的 Gemini 请求本身，不经过线路编码、BotGuard 快照、SAPISIDHASH 签名或会员等级查询。设置了 `thinkingLevel` 时补上 `includeThoughts: true`（与默认上游一样返回思考），并舍弃同时存在的 `thinkingBudget`（公共 API 不允许两者并存）。
+- 模型 id 必须是单个路径段（字母数字开头，只含字母数字、`.`、`_`、`-`），否则返回 `400 invalid_argument`，不会发出请求。
+- 请求体按 512 KiB 分块上传，由框架以 `POST .../v1beta/models/<id>:streamGenerateContent?alt=sse` 发出，不附带任何密钥或授权头。非流式请求同样走流式接口，由服务端聚合。
+- 响应沿用逐块确认的转发：支持字节流时使用 32 KiB 的 BYOB 读取；AI Studio 自行构造的响应若只提供默认读取器，则把每块切成不超过 32 KiB 的片段逐片转发。
+- C++ 增量解析 SSE，单个事件受 `limits.object_bytes` 限制。每个 `data:` 负载都是一个 Gemini 响应对象，直接交给下游，与默认上游解码后的事件格式相同；负载中的 `error` 信封和非 200 响应（保留最多 8 KiB）按与默认上游相同的规则分类，`Retry-After` 同样生效，因此重试、冷却与调度不变。
+- 模型列表改为在框架中调用 `GET /v1beta/models`（每页 1000 条，最多 10 页，每页 10 秒超时、1 MiB 上限），缓存规则不变。
+- 诊断中的 `upstream` 显示当前上游，`appFrame` 表示是否已附加预览框架，`appBridgeSha256` 是内嵌 App 桥接脚本的摘要。
+
+**限制**
+
+- 账号探测与 Cookie 导入仍在聊天页进行；驻留页面正显示 Build App 时会重建该账号的上下文，下一次生成再重新打开 App。
+- 所有账号共用一个 `build_app_url`。对不拥有该 App 的账号，AI Studio 可能要求确认，这些请求会失败但不会冷却账号。
+- 公共 API 的配额、可用模型和错误格式与私有 RPC 不同，尚未经过真实账号验证。
+
 ## 验证边界
 
 本地单元测试无法证明上游页面钩子、Cookie、地区可用性或 Android 后台存活。真实 Google 与 Termux 环境的结果见 [验证记录](validation.md)。

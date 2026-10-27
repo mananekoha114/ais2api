@@ -55,6 +55,8 @@
 |---|---|---|---|
 | `ignore_unsupported_parameters` | 布尔，`false` | 热更新 | 舍弃已知不支持的可选参数后继续生成，而不是报错。舍弃清单见 [协议合同](protocol.md#optional-unsupported-parameter-dropping)。 |
 | `search_model_drop_functions` | 布尔，`true` | 热更新 | `*-search` 模型同时收到自定义函数时：`true` 舍弃函数、保留搜索；`false` 保留函数、不加搜索。见 [搜索模型](protocol.md#search-models)。 |
+| `upstream` | `"makersuite"` 或 `"build_app"`，`"makersuite"` | 重启 | 生成上游。`makersuite` 回放 AI Studio 聊天页的私有 RPC；`build_app`（实验性）在 Build App 预览框架内调用公共 Gemini API，见 [Build App 上游](browser.md#build-app-上游实验性)。 |
+| `build_app_url` | 字符串，`""` | 重启 | `build_app` 上游打开的 Build App，格式为 `https://ai.studio/apps/<id>` 或 `https://aistudio.google.com/apps/<路径>`，不能带查询参数或片段。`upstream` 为 `build_app` 时必填。 |
 | `model_aliases` | 对象，`{}` | 热更新 | 模型别名，键为客户端使用的名称，值为实际模型 id，例如 `{"flash": "gemini-3.1-flash-lite"}`。 |
 | `model_defaults` | 对象，`{}` | 热更新 | 按模型 id 设置默认请求字段（Gemini 请求格式），客户端显式传入的字段优先。例如 `{"gemini-3.1-flash-lite": {"generationConfig": {"temperature": 0.7}}}`。 |
 | `configured_models` | 数组，`[]` | 热更新 | 手动声明的模型（字符串 id 或模型对象）。仅在没有账号或实时发现失败时作为 `source: "configured"` 返回，不代表这些模型真实可用。 |
@@ -89,6 +91,8 @@
 | `browser_remote_allow_origins` | `AIS2API_BROWSER_REMOTE_ALLOW_ORIGINS` | — |
 | `browser_site_isolation` | `AIS2API_BROWSER_SITE_ISOLATION` | — |
 | `browser_idle_seconds` | `AIS2API_BROWSER_IDLE_SECONDS` | `--browser-idle-seconds N` |
+| `upstream` | `AIS2API_UPSTREAM` | — |
+| `build_app_url` | `AIS2API_BUILD_APP_URL` | — |
 | `ignore_unsupported_parameters` | `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS` | — |
 | `search_model_drop_functions` | `AIS2API_SEARCH_MODEL_DROP_FUNCTIONS` | — |
 | `model_aliases` | `AIS2API_MODEL_ALIASES`（JSON） | — |
@@ -105,7 +109,7 @@
 
 ## 热更新与重启
 
-- **需要重启**的字段：`bind`、`port`、`data_dir`、`browser_executable`、`proxy`、`browser_proxy_relay`、`browser_remote_allow_origins`、`browser_site_isolation`、`headless`、`limits.generation_seconds`、`limits.stream_idle_seconds`、`limits.object_bytes`、`limits.relay_bytes`。
+- **需要重启**的字段：`bind`、`port`、`data_dir`、`browser_executable`、`proxy`、`browser_proxy_relay`、`browser_remote_allow_origins`、`browser_site_isolation`、`headless`、`upstream`、`build_app_url`、`limits.generation_seconds`、`limits.stream_idle_seconds`、`limits.object_bytes`、`limits.relay_bytes`。
 - 其余字段都可热更新。热更新前会校验完整配置；校验失败时保留原配置。
 - `ais2api config reload` 重新读取配置文件和环境变量。存在需要重启的差异时返回 `restart_required`，不会只应用其中一部分。
 - 通过管理 API 或 WebUI 保存时，如果修改中包含需要重启的字段，整份配置会作为“待重启配置”保存到磁盘，当前进程继续使用原配置；之后的修改以待重启配置为基础叠加。详见 [管理 API](management-api.md#配置保存与重启)。
@@ -153,6 +157,21 @@ Chromium 不能直接使用带用户名密码的代理，也不支持 SOCKS 认�
 ```
 
 连续 900 秒没有任何任务（生成、探测、模型发现）时，先写回 Cookie 再关闭浏览器。之后的第一个请求需要重新启动浏览器并完成页面引导，会明显变慢。
+
+### 使用 Build App 上游（实验性）
+
+```json
+{
+  "upstream": "build_app",
+  "build_app_url": "https://ai.studio/apps/你的应用 ID"
+}
+```
+
+重启后，生成与模型列表都改由 Build App 预览框架内的公共 Gemini API 完成。规则如下：
+
+- 建议使用当前账号自己创建的空白 Build App。打开别人分享的 App 时 AI Studio 会要求确认，ais2api 不会代为点击，而是返回 `409 build_app_consent_required`。
+- 需要保持 `browser_site_isolation` 为 `true`（默认值），否则配置被拒绝。
+- 所有账号共用同一个 `build_app_url`，每个账号以自己的 `authuser` 打开它。对其他账号而言这是别人的 App，如果 AI Studio 要求确认，这些账号的请求会以 `build_app_consent_required` 失败（不会冷却账号）。目前还不支持按账号配置不同的 App。
 
 ### 模型别名与默认参数
 
