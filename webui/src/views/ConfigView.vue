@@ -13,13 +13,14 @@ import { session, signIn } from '../stores/session'
 import { confirm, copyText, notify, notifyError } from '../stores/ui'
 import { formatBytes } from '../utils/format'
 
-type ScalarKey = 'bind' | 'port' | 'proxy' | 'browser_proxy_relay' | 'browser_remote_allow_origins' | 'browser_site_isolation' | 'data_dir' | 'browser_executable' | 'headless' | 'ignore_unsupported_parameters' | 'search_model_drop_functions' | 'browser_idle_seconds' | 'cookie_import_max_accounts' | 'cookie_import_timeout_seconds'
+type ScalarKey = 'bind' | 'port' | 'proxy' | 'browser_proxy_relay' | 'browser_remote_allow_origins' | 'browser_site_isolation' | 'data_dir' | 'browser_executable' | 'headless' | 'ignore_unsupported_parameters' | 'search_model_drop_functions' | 'browser_idle_seconds' | 'cookie_import_max_accounts' | 'cookie_import_timeout_seconds' | 'upstream' | 'build_app_url'
 
 interface FieldDef {
   key: ScalarKey | `limits.${keyof Limits}`
   label: string
   desc: string
-  type: 'text' | 'number' | 'bool'
+  type: 'text' | 'number' | 'bool' | 'select'
+  options?: { value: string; label: string }[]
   restart?: boolean
   min?: number
   max?: number
@@ -35,6 +36,24 @@ const groups: { title: string; icon: IconName; fields: FieldDef[] }[] = [
     fields: [
       { key: 'ignore_unsupported_parameters', label: '忽略不支持的参数', desc: '默认关闭。开启后，数据 API 会丢弃上游明确不支持的可选参数；保存后立即生效。', type: 'bool' },
       { key: 'search_model_drop_functions', label: '搜索模型舍弃自定义函数', desc: '默认开启。上游不允许 Google 搜索与自定义函数同时使用：开启时，*-search 模型收到自定义函数会舍弃函数、保留搜索；关闭时保留客户端传来的工具，不再自动加入搜索。保存后立即生效。', type: 'bool' },
+    ],
+  },
+  {
+    title: '生成上游',
+    icon: 'server',
+    fields: [
+      {
+        key: 'upstream',
+        label: '上游通道',
+        desc: '默认使用 AI Studio 聊天页的私有接口。Build App（实验性）改为在 Build App 预览框架内调用公共 Gemini API，不需要 BotGuard 与请求模板；需要填写下面的 Build App 链接，并保持站点隔离开启。',
+        type: 'select',
+        restart: true,
+        options: [
+          { value: 'makersuite', label: '聊天页私有接口（默认）' },
+          { value: 'build_app', label: 'Build App（实验性）' },
+        ],
+      },
+      { key: 'build_app_url', label: 'Build App 链接', desc: 'Build App 上游打开的应用，建议使用账号自己创建的空白 App；打开别人的 App 需要确认时，请求会失败而不会代为确认。格式为 https://ai.studio/apps/<应用 ID> 或 https://aistudio.google.com/apps/<路径>，不能带查询参数。', type: 'text', restart: true, placeholder: 'https://ai.studio/apps/<应用 ID>' },
     ],
   },
   {
@@ -153,8 +172,17 @@ const jsonErrors = computed(() => {
   return errors
 })
 
+// Mirrors the service's build_app_url validation.
+const BUILD_APP_URL = /^https:\/\/(?:ai\.studio\/apps\/[A-Za-z0-9_-]{1,128}|aistudio\.google\.com\/apps\/[A-Za-z0-9_-]{1,128}(?:\/[A-Za-z0-9_-]{1,128}){0,2})$/
+
 function fieldError(field: FieldDef): string {
   const value = form[field.key]
+  const buildApp = form.upstream === 'build_app'
+  if (field.key === 'upstream') return buildApp && !form.browser_site_isolation ? 'Build App 上游需要开启站点隔离' : ''
+  if (field.key === 'build_app_url') {
+    if (!value) return buildApp ? '使用 Build App 上游时必填' : ''
+    return BUILD_APP_URL.test(String(value)) ? '' : '格式应为 https://ai.studio/apps/<应用 ID>，不含查询参数'
+  }
   if (field.type !== 'number') return field.key === 'bind' && !String(value).trim() ? '不能为空' : ''
   if (value === '' || typeof value !== 'number' || !Number.isInteger(value)) return '请输入整数'
   if (field.min !== undefined && value < field.min) return `不能小于 ${field.min}`
@@ -253,7 +281,7 @@ async function save() {
     notify(
       result.restart_required ? 'warning' : 'success',
       result.restart_required ? '已保存，需重启后生效' : '配置已保存并生效',
-      result.restart_required ? '包含监听、浏览器、存储或传输限额的变更；在重启前其余更改也不会应用。' : undefined,
+      result.restart_required ? '包含监听、浏览器、上游、存储或传输限额的变更；在重启前其余更改也不会应用。' : undefined,
       result.restart_required ? 9000 : 4000,
     )
     await load()
@@ -329,6 +357,12 @@ const bytesHint = (field: FieldDef) => (field.unit === 'bytes' && typeof form[fi
             </div>
             <div class="setting-control">
               <FToggle v-if="field.type === 'bool'" :model-value="!!form[field.key]" :label="field.label" @update:model-value="form[field.key] = $event" />
+              <div v-else-if="field.type === 'select'" class="input-wrap">
+                <select :id="`f-${field.key}`" v-model="form[field.key]" class="select" :aria-invalid="!!fieldError(field) || undefined">
+                  <option v-for="option in field.options" :key="option.value" :value="option.value">{{ option.label }}</option>
+                </select>
+                <span v-if="fieldError(field)" class="error-text t-caption">{{ fieldError(field) }}</span>
+              </div>
               <div v-else class="input-wrap">
                 <input
                   :id="`f-${field.key}`"
@@ -496,6 +530,10 @@ const bytesHint = (field: FieldDef) => (field.unit === 'bytes' && typeof form[fi
 .input-wrap .input[type='number'] {
   width: 180px;
   text-align: right;
+}
+.input-wrap .select {
+  width: auto;
+  min-width: 220px;
 }
 .unit,
 .input-wrap .error-text {

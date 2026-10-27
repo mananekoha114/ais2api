@@ -145,6 +145,8 @@ export interface Config {
   ignore_unsupported_parameters?: boolean
   search_model_drop_functions?: boolean
   browser_idle_seconds?: number
+  upstream?: 'makersuite' | 'build_app'
+  build_app_url?: string
   model_aliases?: Record<string, string>
   configured_models?: Array<string | Record<string, unknown>>
   model_defaults?: Record<string, unknown>

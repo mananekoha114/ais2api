@@ -28,7 +28,7 @@ GitHub CI 的 Windows、Ubuntu、Debian 与 Termux 运行包均启用 WebUI。
 | `/keys` | API 密钥 | 设置/轮换/清空配置密钥，创建与撤销托管密钥，查看接入地址 |
 | `/stats` | 用量统计 | 按账号与模型的调用计数和 usage |
 | `/logs` | 日志 | 全部日志来源的历史与实时流 |
-| `/config` | 服务配置 | 网络、浏览器与存储、API 兼容性、限额等 |
+| `/config` | 服务配置 | 生成上游（含实验性 Build App 上游）、网络、浏览器与存储、API 兼容性、限额等 |
 | `/diagnostics` | 诊断 | 浏览器适配阶段、当前指纹、模型发现、Cookie 写回状态，导出脱敏快照 |
 | `/settings` | 设置 | 外观与连接偏好（仅保存在当前浏览器）、修改管理密码 |
 
