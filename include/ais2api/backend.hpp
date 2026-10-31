@@ -14,7 +14,9 @@ class GenerationBackend {
   public:
     virtual ~GenerationBackend() = default;
     virtual void generate(const Request &, const Account &, const EventSink &, std::stop_token) = 0;
-    virtual json::array models(std::stop_token = {}) = 0;
+    // A fresh discovery for this exact account. Errors propagate; configured
+    // or previously saved lists are not discovery results.
+    virtual json::array models(const Account &, std::stop_token = {}) = 0;
     virtual json::object probe(const Account &, std::stop_token = {}) = 0;
     virtual json::object probe_import(Account &account, std::stop_token token = {}) { return probe(account, token); }
     virtual json::object diagnostics() = 0;

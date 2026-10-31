@@ -25,8 +25,9 @@ else()
 endif()
 find_package(LibArchive REQUIRED)
 find_package(Threads REQUIRED)
-add_library(ais2api_core src/common.cpp src/config.cpp src/store.cpp src/cookie_import.cpp src/schema.cpp src/protocol.cpp src/responses.cpp src/browser.cpp src/runtime.cpp src/setup.cpp src/download.cpp src/bundle.cpp src/server.cpp src/control.cpp src/management.cpp src/logs.cpp src/console.cpp src/log_sources.cpp src/webui.cpp src/region.cpp)
+add_library(ais2api_core src/common.cpp src/config.cpp src/store.cpp src/pricing.cpp src/cookie_import.cpp src/schema.cpp src/protocol.cpp src/responses.cpp src/browser.cpp src/runtime.cpp src/setup.cpp src/download.cpp src/bundle.cpp src/server.cpp src/control.cpp src/management.cpp src/logs.cpp src/console.cpp src/log_sources.cpp src/webui.cpp src/region.cpp)
 set(browser_bridge_inc "${CMAKE_CURRENT_BINARY_DIR}/generated/browser_bridge.inc")
+target_sources(ais2api_core PRIVATE src/price_service.cpp src/usage.cpp)
 add_custom_command(OUTPUT "${browser_bridge_inc}"
   COMMAND "${CMAKE_COMMAND}" "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/browser/bridge.js"
     "-DOUTPUT=${browser_bridge_inc}" -P "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-browser.cmake"

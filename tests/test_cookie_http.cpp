@@ -29,7 +29,7 @@ class PushBackend final : public GenerationBackend {
 public:
     explicit PushBackend(std::shared_ptr<PushState> s) : state(std::move(s)) {}
     void generate(const Request &, const Account &, const EventSink &, std::stop_token t) override { check_cancel(t); }
-    json::array models(std::stop_token = {}) override { return {}; }
+    json::array models(const Account &, std::stop_token = {}) override { return {}; }
     json::object probe(const Account &, std::stop_token = {}) override { return {}; }
     json::object probe_import(Account &a, std::stop_token token = {}) override {
         ++state->probes;

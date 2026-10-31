@@ -7,6 +7,8 @@
 #pragma once
 #include "store.hpp"
 namespace ais2api {
+// Shared classification for client finish reasons and request accounting.
+bool content_filtered(std::string_view reason);
 enum class Protocol { gemini, openai };
 struct Request {
     Protocol protocol = Protocol::gemini;

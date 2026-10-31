@@ -6,6 +6,7 @@
 
 #include "ais2api/backend.hpp"
 #include "ais2api/runtime.hpp"
+#include "ais2api/pricing.hpp"
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -158,12 +159,14 @@ public:
         auto finished = finish_event();
         if (request.model == "synthetic-length")
             finished.at("candidates").as_array()[0].as_object()["finishReason"] = "MAX_TOKENS";
+        if (request.model == "synthetic-blocked")
+            finished.at("candidates").as_array()[0].as_object()["finishReason"] = "PROHIBITED_CONTENT";
         if (request.model == "synthetic-unspecified")
             finished.at("candidates").as_array()[0].as_object()["finishReason"] = "FINISH_REASON_UNSPECIFIED";
         emit(finished);
     }
 
-    json::array models(std::stop_token = {}) override { return {}; }
+    json::array models(const Account &, std::stop_token = {}) override { return {}; }
     json::object probe(const Account& account, std::stop_token cancel = {}) override {
         check_cancel(cancel);
         {
@@ -208,7 +211,8 @@ struct GenerationServer {
     std::jthread thread;
     std::atomic<bool> failed{false};
 
-    explicit GenerationServer(bool browser_file_present = false, unsigned browser_idle_seconds = 0) {
+    explicit GenerationServer(bool browser_file_present = false, unsigned browser_idle_seconds = 0,
+                              unsigned queue_size = 8, unsigned queue_seconds = 5) {
         net::io_context io;
         tcp::acceptor available(io, {tcp::v4(), 0});
         config.port = available.local_endpoint().port();
@@ -221,7 +225,8 @@ struct GenerationServer {
         config.limits.request_bytes = 16384;
         config.limits.object_bytes = 32768;
         config.limits.relay_bytes = 1024;
-        config.limits.queue_seconds = 5;
+        config.limits.queue_seconds = queue_seconds;
+        config.limits.queue_size = queue_size;
         config.limits.generation_seconds = 5;
         config.limits.stream_idle_seconds = 5;
         config.limits.max_attempts = 3;
@@ -229,6 +234,7 @@ struct GenerationServer {
         fs::create_directories(directory);
         key = "generation-test-" + random_hex(24);
         config.api_key = key;
+        config.admin_key = key;
         atomic_write(config.config_file, json::serialize(config.to_json()), true);
         {
             Store store(config.data_dir);
@@ -307,6 +313,20 @@ std::vector<std::string> sse_records(std::string_view body) {
         offset = end + 2;
     }
     return records;
+}
+json::array finished_history(GenerationServer &server) {
+    Store store(server.config.data_dir);
+    auto deadline = Clock::now() + 3s;
+    json::array rows;
+    do {
+        rows = store.requests({}).at("records").as_array();
+        if (!rows.empty() && std::all_of(rows.begin(), rows.end(), [](const json::value &r) {
+            auto state = string_or(r.as_object(), "status");
+            return state == "succeeded" || state == "failed" || state == "cancelled" || state == "interrupted";
+        })) return rows;
+        std::this_thread::sleep_for(5ms);
+    } while (Clock::now() < deadline);
+    throw std::runtime_error("Synthetic requests did not reach terminal history states");
 }
 
 json::object await_operation(const Config& config, const json::object& queued) {
@@ -994,6 +1014,140 @@ TEST_CASE("Disconnecting an HTTP stream cancels the active generation backend", 
     REQUIRE(server.state->cancelled);
     REQUIRE(server.state->calls == 1);
     REQUIRE_FALSE(server.failed);
+    auto history = finished_history(server);
+    REQUIRE(history.size() == 1);
+    REQUIRE(history[0].at("status") == "cancelled");
+    REQUIRE(history[0].at("cost").at("amount_nano").is_null());
+}
+
+TEST_CASE("HTTP request history covers all generation protocols and excludes authentication failures", "[generation][http][usage]") {
+    GenerationServer server;
+    for (bool streaming : {false, true}) {
+        auto chat = server.call("/v1/chat/completions", json::serialize(json::object{
+            {"model", "synthetic"}, {"stream", streaming}, {"messages", json::array{json::object{{"role", "user"}, {"content", "private-question"}}}}}));
+        REQUIRE(chat.result_int() == 200);
+        REQUIRE(server.call("/v1/responses", json::serialize(json::object{{"model", "synthetic"}, {"stream", streaming}, {"input", "private-question"}})).result_int() == 200);
+        REQUIRE(server.call(streaming ? "/v1beta/models/synthetic:streamGenerateContent" : "/v1beta/models/synthetic:generateContent",
+                            R"({"contents":[{"parts":[{"text":"private-question"}]}]})").result_int() == 200);
+    }
+    REQUIRE(server.call("/v1/chat/completions", "{}", http::verb::post, "").result_int() == 401);
+    REQUIRE(server.call("/v1/chat/completions", "{").result_int() == 400);
+    auto rows = finished_history(server);
+    REQUIRE(rows.size() == 7);
+    REQUIRE(json::serialize(rows).find("private-question") == std::string::npos);
+    Store store(server.config.data_dir);
+    REQUIRE(store.stats().at("totals").at("success") == 6);
+    REQUIRE(store.stats().at("totals").at("failure") == 1);
+    REQUIRE(store.stats().at("totals").at("usage").at("totalTokenCount") == 42);
+    REQUIRE(server.call("/api/admin/v1/usage/requests", "", http::verb::get, "").result_int() == 401);
+    auto list = server.call("/api/admin/v1/usage/requests?limit=1", "", http::verb::get);
+    REQUIRE(list.result_int() == 200);
+    auto page = json::parse(list.body());
+    REQUIRE(page.at("total") == 7);
+    auto id = string_or(page.at("records").as_array()[0].as_object(), "id");
+    REQUIRE(server.call("/api/admin/v1/usage/requests/" + id, "", http::verb::get).result_int() == 200);
+    REQUIRE(server.call("/api/admin/v1/usage/requests?limit=101", "", http::verb::get).result_int() == 400);
+    REQUIRE(server.call("/api/admin/v1/usage/summary?from=no", "", http::verb::get).result_int() == 400);
+    REQUIRE(server.call("/api/admin/v1/usage/summary?limit=1", "", http::verb::get).result_int() == 400);
+}
+
+TEST_CASE("HTTP retries and streaming errors retain one truthful request outcome", "[generation][http][usage]") {
+    GenerationServer server;
+    REQUIRE(server.call("/v1/chat/completions", R"({"model":"synthetic-route-retry","messages":[{"role":"user","content":"hello"}]})").result_int() == 200);
+    auto history = finished_history(server);
+    REQUIRE(history.size() == 1);
+    REQUIRE(history[0].at("attempt_count") == 3);
+    REQUIRE(history[0].at("status") == "succeeded");
+    REQUIRE(history[0].at("cost").at("amount_nano").is_null());
+    REQUIRE(server.call("/v1/chat/completions", R"({"model":"synthetic-after-content-error","stream":true,"messages":[{"role":"user","content":"hello"}]})").result_int() == 200);
+    history = finished_history(server);
+    REQUIRE(history[0].at("status") == "failed");
+    REQUIRE(history[0].at("http_status") == 200);
+    REQUIRE(history[0].at("generation_completed") == false);
+    Store store(server.config.data_dir);
+    REQUIRE(store.stats().at("totals").at("success") == 1);
+    REQUIRE(store.stats().at("totals").at("failure") == 1);
+}
+TEST_CASE("Content-filtered responses retain their text across all protocols",
+          "[generation][http][usage-followup]") {
+    GenerationServer server;
+    Store store(server.config.data_dir);
+    store.save_price_source(
+        "litellm",
+        parse_price_catalog(
+            "litellm",
+            json::parse(
+                R"({"gemini/synthetic-blocked":{"litellm_provider":"gemini","mode":"chat","input_cost_per_token":0.000001,"output_cost_per_token":0.000002}})"),
+            1),
+        1);
+    for (bool streaming : {false, true})
+        for (auto protocol : {"chat", "responses", "gemini"}) {
+            INFO(protocol << " streaming=" << streaming);
+            std::string target, body;
+            if (std::string_view(protocol) == "gemini") {
+                target = std::string("/v1beta/models/synthetic-blocked:") +
+                         (streaming ? "streamGenerateContent" : "generateContent");
+                body = R"({"contents":[{"parts":[{"text":"synthetic question"}]}]})";
+            } else {
+                target =
+                    std::string_view(protocol) == "chat" ? "/v1/chat/completions" : "/v1/responses";
+                json::object request{{"model", "synthetic-blocked"}, {"stream", streaming}};
+                if (std::string_view(protocol) == "chat")
+                    request["messages"] = json::array{
+                        json::object{{"role", "user"}, {"content", "synthetic question"}}};
+                else
+                    request["input"] = "synthetic question";
+                body = json::serialize(request);
+            }
+            auto response = server.call(target, body);
+            REQUIRE(response.result_int() == 200);
+            REQUIRE(response.body().find("hello ") != std::string::npos);
+            REQUIRE(response.body().find("world") != std::string::npos);
+            REQUIRE(response.body().find(std::string_view(protocol) == "gemini"
+                                             ? "PROHIBITED_CONTENT"
+                                             : "content_filter") != std::string::npos);
+            if (std::string_view(protocol) == "responses")
+                REQUIRE(response.body().find(streaming ? "response.incomplete"
+                                                       : "\"incomplete\"") != std::string::npos);
+            auto rows = finished_history(server);
+            REQUIRE(rows[0].at("status") == "failed");
+            REQUIRE(rows[0].at("http_status") == 200);
+            REQUIRE(rows[0].at("delivery_completed") == true);
+            REQUIRE(rows[0].at("usage").at("totalTokenCount") == 7);
+            REQUIRE(rows[0].at("cost").at("amount_nano") == 10000);
+        }
+    REQUIRE(server.state->calls == 6);
+    REQUIRE(store.stats().at("totals").at("known_amount_nano") == 60000);
+    REQUIRE(store.stats().at("totals").at("failure") == 6);
+}
+
+TEST_CASE("Queue rejection and expiry create records without upstream attempts", "[generation][http][usage]") {
+    GenerationServer server(false, 0, 1, 1);
+    std::atomic<unsigned> first_status{0}, queued_status{0};
+    std::jthread first([&] {
+        try { first_status = server.call("/v1/chat/completions", R"({"model":"synthetic-gated-stream","stream":true,"messages":[{"role":"user","content":"hello"}]})").result_int(); }
+        catch (...) { first_status = 999; }
+    });
+    auto deadline = Clock::now() + 2s;
+    while (!server.state->calls && Clock::now() < deadline) std::this_thread::sleep_for(5ms);
+    std::jthread queued([&] {
+        try { queued_status = server.call("/v1/chat/completions", R"({"model":"synthetic","messages":[{"role":"user","content":"hello"}]})").result_int(); }
+        catch (...) { queued_status = 999; }
+    });
+    deadline = Clock::now() + 2s;
+    while (local_call(server.config, {{"command", "status"}}).at("queued").to_number<unsigned>() == 0 && Clock::now() < deadline)
+        std::this_thread::sleep_for(5ms);
+    auto full = server.call("/v1/chat/completions", R"({"model":"synthetic","messages":[{"role":"user","content":"hello"}]})");
+    queued.join();
+    server.state->continue_stream = true; first.join();
+    REQUIRE(full.result_int() == 429);
+    REQUIRE(queued_status == 504);
+    REQUIRE(first_status == 200);
+    auto history = finished_history(server);
+    REQUIRE(history.size() == 3);
+    REQUIRE(history[0].at("cost").at("amount_nano") == 0);
+    REQUIRE(history[1].at("cost").at("amount_nano") == 0);
+    REQUIRE(server.state->calls == 1);
 }
 
 TEST_CASE("Readiness requires a nonempty configured API key", "[generation][http][config]") {

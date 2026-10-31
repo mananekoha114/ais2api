@@ -93,6 +93,13 @@
       "anyOf": [{"const": 0}, {"minimum": 10, "maximum": 86400}],
       "description": "Optional memory saving: stop the browser after this many seconds without any work; 0 keeps it running. The next request starts it again (cold start). Takes effect without restarting."
     },
+    "request_retention_days": {
+      "type": "integer",
+      "default": 90,
+      "minimum": 1,
+      "maximum": 3650,
+      "description": "Retain completed request details for this many days. Lifetime usage and estimated costs remain after expiry. Takes effect without restarting."
+    },
     "model_aliases": {
       "type": "object",
       "additionalProperties": {

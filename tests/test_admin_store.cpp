@@ -25,7 +25,7 @@ TEST_CASE("admin rotation advances in insertion order and preserves selection on
         CHECK_THROWS_AS(store.rotate_account(), Error);
         a = add(store, "a"); b = add(store, "b"); c = add(store, "c");
         CHECK(store.rotate_account() == a);
-        store.success(c, "m", {}); // Explicit rotation must clear model stickiness.
+        store.success(c, "m"); // Explicit rotation must clear model stickiness.
         CHECK(store.rotate_account() == b);
         CHECK(store.choose("m")->id == b);
         store.failure(c, "m", "login_expired");

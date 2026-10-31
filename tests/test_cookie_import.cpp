@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/cookie_import.hpp"
+#include "ais2api/usage.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <set>
@@ -22,7 +23,7 @@ struct ImportBackend : GenerationBackend {
     bool expand_state = false;
     std::string failure_code = "secret";
     void generate(const Request &, const Account &, const EventSink &, std::stop_token) override {}
-    json::array models(std::stop_token = {}) override { return {}; }
+    json::array models(const Account &, std::stop_token = {}) override { return {}; }
     json::object probe(const Account &, std::stop_token = {}) override { return {}; }
     json::object probe_import(Account &a, std::stop_token token = {}) override {
         check_cancel(token);
@@ -278,7 +279,12 @@ TEST_CASE("verified account merge reuses email identity and preserves cooldown s
     auto result = probe_cookie_import({{"cookies", "SID=private-cookie"}, {"auth_user", "0"}}, 8, backend);
     auto first = result.accounts[0]; first.name = "Personal name";
     store.merge_verified_accounts({first}); store.select_account(first.id);
-    store.success(first.id, "model", {{"tokens", 2}});
+    store.success(first.id, "model");
+    RequestUsage usage(store, "import-test-request", "gemini");
+    usage.configure("model", false); usage.start(); usage.normalized("model", {}); usage.begin_attempt(first.id);
+    usage.event({{"usageMetadata", json::object{{"promptTokenCount", 2}, {"candidatesTokenCount", 0}, {"totalTokenCount", 2}}},
+                 {"candidates", json::array{json::object{{"finishReason", "STOP"}}}}}, false);
+    usage.end_attempt(); usage.producer_done(); usage.http_done(200, "", true);
     store.failure(first.id, "model", "429", 120);
     auto refreshed = first; refreshed.id = "different-id"; refreshed.email = "ONE@example.com";
     refreshed.name = "Automatic name"; refreshed.auth_user = "3";

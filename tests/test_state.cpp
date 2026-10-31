@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/store.hpp"
+#include "ais2api/usage.hpp"
 #include "../browser/rate_policy.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <fstream>
@@ -28,6 +29,14 @@ json::object credential(std::string value = "private-cookie") {
                                                  {"path", "/"},
                                                  {"secure", true}}}},
             {"origins", json::array{}}};
+}
+void record_usage(Store &store, const std::string &account, int tokens) {
+    RequestUsage usage(store, "test-" + random_hex(8), "gemini");
+    usage.configure("model", false); usage.start(); usage.normalized("model", {}); usage.begin_attempt(account);
+    usage.event({{"usageMetadata", json::object{{"promptTokenCount", tokens}, {"candidatesTokenCount", 0},
+                                                {"totalTokenCount", tokens}, {"cookie", "do-not-persist"}}},
+                 {"candidates", json::array{json::object{{"finishReason", "STOP"}}}}}, false);
+    usage.end_attempt(); usage.producer_done(); usage.http_done(200, "", true);
 }
 } // namespace
 TEST_CASE("Pacific quota dates follow modern DST boundaries", "[quota-policy]") {
@@ -82,7 +91,7 @@ TEST_CASE("model quota cooldowns isolate counters and preserve drip recovery", "
     store.failure(id, "m", "rate_limit_model"); delay_is(60);
     store.failure(id, "m", "rate_limit_day"); delay_is(300);
     execute("UPDATE failures SET until=0");
-    store.success(id, "m", {});
+    store.success(id, "m");
     CHECK(scalar("SELECT count FROM quota_counters WHERE model='m'") == 3);
     store.failure(id, "m", "rate_limit_model"); delay_is(300);
     store.failure(id, "m", "rate_limit_model"); delay_is(600);
@@ -101,7 +110,7 @@ TEST_CASE("model quota cooldowns isolate counters and preserve drip recovery", "
     store.failure(id, "m", "rate_limit_day"); delay_is(60);
     CHECK(scalar("SELECT count FROM quota_counters WHERE model='m'") == 1);
     execute("UPDATE failures SET until=0");
-    store.success(id, "m", {});
+    store.success(id, "m");
     CHECK(scalar("SELECT COUNT(*) FROM quota_counters") == 0);
     store.failure(id, "m", "transient");
     store.failure(id, "m", "transient");
@@ -187,7 +196,7 @@ TEST_CASE("routing isolates account expiry and model permissions") {
     store.select_account(a);
     REQUIRE(store.choose("m"));
     CHECK(store.choose("m")->id == a);
-    store.success(b, "m", {{"total_tokens", 3}});
+    store.success(b, "m");
     CHECK(store.choose("m")->id == b);
     store.failure(b, "m", "permission");
     CHECK(store.choose("m")->id == a);
@@ -247,7 +256,7 @@ TEST_CASE("SQLite backup restores account statistics and key authentication") {
         Store store(d.path / "original");
         auto a = store.import_accounts(credential());
         auto id = string_or(a[0].as_object(), "id");
-        store.success(id, "model", {{"total_tokens", 7}});
+        record_usage(store, id, 7);
         key = string_or(store.create_key("backup"), "secret");
         store.backup(backup);
         CHECK_THROWS(store.backup(backup));
@@ -279,10 +288,10 @@ TEST_CASE("tool TTL uses original insertion time and statistics aggregate safely
         store.put_tool("principal", "old", {{"signature", "private"}});
         auto imported = store.import_accounts(credential());
         auto id = string_or(imported[0].as_object(), "id");
-        store.success(id, "m", {{"total_tokens", 7}, {"cookie", "do-not-persist"}});
-        store.success(id, "m", {{"total_tokens", 4}});
+        record_usage(store, id, 7);
+        record_usage(store, id, 4);
         auto records = store.stats().at("records").as_array();
-        CHECK(records[0].as_object().at("usage").as_object().at("total_tokens") == 11);
+        CHECK(records[0].as_object().at("usage").as_object().at("totalTokenCount") == 11);
         CHECK(json::serialize(records).find("do-not-persist") == std::string::npos);
     }
     sqlite3 *db = nullptr;
@@ -351,14 +360,14 @@ TEST_CASE("newer database versions are refused without altering the version") {
     Directory d;
     sqlite3 *db = nullptr;
     REQUIRE(sqlite3_open((d.path / "state.sqlite3").string().c_str(), &db) == SQLITE_OK);
-    REQUIRE(sqlite3_exec(db, "PRAGMA user_version=2", nullptr, nullptr, nullptr) == SQLITE_OK);
+    REQUIRE(sqlite3_exec(db, "PRAGMA user_version=999", nullptr, nullptr, nullptr) == SQLITE_OK);
     sqlite3_close(db);
     CHECK_THROWS_AS(Store(d.path), Error);
     REQUIRE(sqlite3_open((d.path / "state.sqlite3").string().c_str(), &db) == SQLITE_OK);
     sqlite3_stmt *statement = nullptr;
     REQUIRE(sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &statement, nullptr) == SQLITE_OK);
     REQUIRE(sqlite3_step(statement) == SQLITE_ROW);
-    CHECK(sqlite3_column_int(statement, 0) == 2);
+    CHECK(sqlite3_column_int(statement, 0) == 999);
     sqlite3_finalize(statement);
     sqlite3_close(db);
 }
@@ -580,7 +589,7 @@ TEST_CASE("An auth cooldown admits one probe attempt only when no account is usa
     store.failure(a, "m", "auth");
     REQUIRE(store.choose("m", {}, true));
     // A completed generation clears the auth cooldown before it expires.
-    store.success(a, "m", {});
+    store.success(a, "m");
     REQUIRE(store.choose("m"));
 
     SECTION("quota, permission and expiry are never bypassed") {
@@ -613,8 +622,8 @@ TEST_CASE("Alternating models stay on the current account until it cannot serve 
     const auto a = string_or(store.import_accounts(credential("first"))[0].as_object(), "id");
     const auto b = string_or(store.import_accounts(credential("second"))[0].as_object(), "id");
     // Each model remembers a different account; the last success is current.
-    store.success(a, "x", {});
-    store.success(b, "y", {});
+    store.success(a, "x");
+    store.success(b, "y");
     for (int i = 0; i < 3; ++i) {
         CHECK(store.choose("x")->id == b);
         CHECK(store.choose("y")->id == b);
@@ -624,7 +633,7 @@ TEST_CASE("Alternating models stay on the current account until it cannot serve 
     store.failure(b, "x", "rate_limit_model");
     CHECK(store.choose("x")->id == a);
     CHECK(store.choose("y")->id == b);
-    store.success(a, "x", {});
+    store.success(a, "x");
     CHECK(store.choose("y")->id == a);
     // An explicit selection takes effect immediately and becomes current.
     store.select_account(b);

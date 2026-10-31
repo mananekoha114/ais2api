@@ -18,7 +18,7 @@ namespace {
 class AdminBackend final : public GenerationBackend {
  public:
     void generate(const Request&, const Account&, const EventSink&, std::stop_token) override {}
-    json::array models(std::stop_token = {}) override { return {}; }
+    json::array models(const Account &, std::stop_token = {}) override { return {}; }
     json::object probe(const Account&, std::stop_token = {}) override { return {{"ok", true}}; }
     json::object diagnostics() override { return {{"synthetic", true}}; }
     void close() override {}
@@ -246,7 +246,7 @@ TEST_CASE("management HTTP log pages SSE resumption raw sources and rotation", "
     raw.until("__never_present__", 2s); CHECK(raw.ended);
     server.admin = rotated; CHECK(server.get("/status").result_int() == 200);
 }
-TEST_CASE("internal model discovery releases retained operation slots", "[http][admin]") {
+TEST_CASE("reading model lists does not consume maintenance operation slots", "[http][admin]") {
     AdminServer server;
     for (int i = 0; i < 40; ++i) {
         INFO("model request index " << i);

@@ -6,17 +6,21 @@
 
 #include "ais2api/store.hpp"
 #include "ais2api/region.hpp"
+#include "ais2api/usage.hpp"
 #include "../browser/rate_policy.hpp"
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
 #include <future>
 #include <limits>
+#include <map>
+#include <set>
 #include <sqlite3.h>
 #include <sstream>
 #include <thread>
 namespace ais2api {
 namespace {
+void migrate_request_usage(sqlite3 *db);
 std::string sqlite_path(const fs::path &path) {
     auto u = path.u8string();
     return std::string(reinterpret_cast<const char *>(u.data()), u.size());
@@ -29,7 +33,7 @@ struct Statement {
     }
     ~Statement() { sqlite3_finalize(p); }
     void text(int i, std::string_view v) {
-        if (sqlite3_bind_text(p, i, v.data(), static_cast<int>(v.size()), SQLITE_TRANSIENT) !=
+        if (sqlite3_bind_text(p, i, v.empty() ? "" : v.data(), static_cast<int>(v.size()), SQLITE_TRANSIENT) !=
             SQLITE_OK)
             throw Error(500, "database", "Cannot bind database value");
     }
@@ -60,6 +64,53 @@ void exec(sqlite3 *db, const char *sql) {
         throw Error(500, "database", s);
     }
 }
+json::array discovered_models(json::array values) {
+    auto invalid = [] {
+        throw Error(502, "model_discovery_invalid",
+                    "Model discovery returned an invalid or empty list");
+    };
+    if (values.empty() || json::serialize(values).size() > 1024 * 1024)
+        invalid();
+    std::set<std::string> ids;
+    for (auto &value : values) {
+        if (!value.is_object())
+            invalid();
+        auto &item = value.as_object();
+        for (auto key : {"id", "name"})
+            if (auto field = item.if_contains(key); field && !field->is_string())
+                invalid();
+        const auto name = string_or(item, "name");
+        auto id = string_or(item, "id");
+        if (id.empty() && name.starts_with("models/"))
+            id = name.substr(7);
+        if (id.empty() || id.size() > 512 ||
+            id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") !=
+                std::string::npos ||
+            (!name.empty() && name != "models/" + id) || !ids.insert(id).second)
+            invalid();
+        if (auto source = item.if_contains("source");
+            source && (!source->is_string() || source->as_string() != "live"))
+            invalid();
+        for (auto key : {"displayName", "description"})
+            if (auto field = item.if_contains(key); field && !field->is_string())
+                invalid();
+        for (auto key : {"inputTokenLimit", "outputTokenLimit"})
+            if (auto field = item.if_contains(key);
+                field && !field->is_uint64() && !(field->is_int64() && field->as_int64() >= 0))
+                invalid();
+        if (auto methods = item.if_contains("supportedGenerationMethods")) {
+            if (!methods->is_array())
+                invalid();
+            for (auto &method : methods->as_array())
+                if (!method.is_string())
+                    invalid();
+        }
+        item["id"] = id;
+        item["name"] = "models/" + id;
+        item["source"] = "saved";
+    }
+    return values;
+}
 Account decode(Statement &s) {
     Account a;
     a.id = s.str(0);
@@ -69,40 +120,6 @@ Account decode(Statement &s) {
     a.storage_state = json::parse(s.str(4)).as_object();
     a.disabled = sqlite3_column_int(s.p, 5) != 0;
     return a;
-}
-json::object counters(const json::object &source) {
-    json::object result;
-    for (auto &p : source) {
-        if (p.value().is_int64() && p.value().as_int64() >= 0)
-            result[p.key()] = p.value();
-        else if (p.value().is_uint64())
-            result[p.key()] = p.value();
-        else if (p.value().is_object())
-            result[p.key()] = counters(p.value().as_object());
-    }
-    return result;
-}
-void accumulate(json::object &target, const json::object &values) {
-    for (auto &p : values) {
-        if (p.value().is_object()) {
-            auto old = target.if_contains(p.key());
-            if (!old || !old->is_object())
-                target[p.key()] = json::object{};
-            accumulate(target.at(p.key()).as_object(), p.value().as_object());
-        } else {
-            auto old = target.if_contains(p.key());
-            auto next = p.value().is_uint64() ? p.value().as_uint64()
-                                              : static_cast<std::uint64_t>(p.value().as_int64());
-            std::uint64_t prior = 0;
-            if (old && old->is_uint64())
-                prior = old->as_uint64();
-            else if (old && old->is_int64() && old->as_int64() > 0)
-                prior = static_cast<std::uint64_t>(old->as_int64());
-            target[p.key()] = next > std::numeric_limits<std::uint64_t>::max() - prior
-                                  ? std::numeric_limits<std::uint64_t>::max()
-                                  : prior + next;
-        }
-    }
 }
 json::object summary(const Account &a) {
     return {{"id", a.id},
@@ -340,9 +357,11 @@ struct Store::Impl {
                                     nullptr) != SQLITE_OK)
                     throw Error(500, "database", "Cannot open state database");
                 sqlite3_busy_timeout(db, 5000);
+                int schema_version = 0;
                 {
                     Statement version(db, "PRAGMA user_version");
-                    if (version.row() && sqlite3_column_int(version.p, 0) > 1)
+                    if (version.row()) schema_version = sqlite3_column_int(version.p, 0);
+                    if (schema_version > 3)
                         throw Error(500, "database_version",
                                     "Database was created by a newer ais2api version");
                 }
@@ -366,7 +385,7 @@ struct Store::Impl {
                          "TEXT,created INTEGER,touched INTEGER,PRIMARY "
                          "KEY(principal,call_id));CREATE INDEX IF NOT EXISTS tools_lru ON "
                          "tools(touched);CREATE INDEX IF NOT EXISTS tools_expiry ON "
-                         "tools(created);PRAGMA user_version=1;");
+                         "tools(created);");
                 bool quota_deadline = false;
                 { Statement columns(db, "PRAGMA table_info(quota_counters)");
                   while (columns.row()) if (columns.str(1) == "cooldown_until") quota_deadline = true; }
@@ -384,6 +403,25 @@ struct Store::Impl {
                          "accounts(id) ON DELETE CASCADE,seed INTEGER NOT NULL,timezone TEXT NOT NULL "
                          "DEFAULT '',locale TEXT NOT NULL DEFAULT '');INSERT OR IGNORE INTO "
                          "fingerprints(account,seed) SELECT id,10000+abs(random()%90000) FROM accounts");
+                exec(db, "CREATE TABLE IF NOT EXISTS model_catalog(account TEXT PRIMARY KEY REFERENCES "
+                         "accounts(id) ON DELETE CASCADE,models TEXT NOT NULL,saved_at INTEGER NOT NULL)");
+                exec(db, "BEGIN IMMEDIATE;"
+                         "CREATE TABLE IF NOT EXISTS request_history(seq INTEGER PRIMARY KEY AUTOINCREMENT,"
+                         "id TEXT NOT NULL UNIQUE,created_at INTEGER NOT NULL,model TEXT NOT NULL DEFAULT '',"
+                         "account TEXT NOT NULL DEFAULT '',status TEXT NOT NULL,terminal INTEGER NOT NULL DEFAULT 0,"
+                         "detail TEXT NOT NULL);"
+                         "CREATE INDEX IF NOT EXISTS request_history_time ON request_history(created_at);"
+                         "CREATE INDEX IF NOT EXISTS request_history_model ON request_history(model,seq);"
+                         "CREATE INDEX IF NOT EXISTS request_history_account ON request_history(account,seq);"
+                         "CREATE INDEX IF NOT EXISTS request_history_status ON request_history(status,seq);"
+                         "CREATE TABLE IF NOT EXISTS request_totals(account TEXT NOT NULL,model TEXT NOT NULL,"
+                         "detail TEXT NOT NULL,PRIMARY KEY(account,model));"
+                         "CREATE TABLE IF NOT EXISTS price_sources(source TEXT PRIMARY KEY,catalog TEXT NOT NULL,"
+                         "fetched_at INTEGER NOT NULL,attempted_at INTEGER NOT NULL,error TEXT NOT NULL);"
+                         "INSERT OR IGNORE INTO settings(k,v) VALUES('usage_since',CAST(unixepoch()*1000 AS TEXT));"
+                         "INSERT OR IGNORE INTO settings(k,v) SELECT 'usage_detail_since',v FROM settings WHERE k='usage_since';"
+                         "COMMIT;");
+                if (schema_version < 3) migrate_request_usage(db);
                 ready.set_value();
             } catch (...) {
                 ready.set_exception(std::current_exception());
@@ -742,6 +780,38 @@ std::optional<Account> Store::choose(std::string_view model,
         return a;
     });
 }
+ModelCatalog Store::model_catalog() {
+    return impl_->run([&] {
+        ModelCatalog result;
+        Statement row(impl_->db,
+            "SELECT a.id,m.models,m.saved_at FROM accounts a LEFT JOIN model_catalog m ON m.account=a.id "
+            "ORDER BY (a.id=(SELECT v FROM settings WHERE k='current')) DESC,"
+            "(a.id=(SELECT v FROM settings WHERE k='selected')) DESC,a.rowid LIMIT 1");
+        if (row.row()) {
+            result.account_id = row.str(0);
+            auto models = row.str(1);
+            if (!models.empty()) {
+                result.models = json::parse(models).as_array();
+                result.saved_at = sqlite3_column_int64(row.p, 2);
+            }
+        }
+        return result;
+    });
+}
+ModelCatalog Store::save_models(std::string_view account_id, json::array models) {
+    auto values = discovered_models(std::move(models));
+    return impl_->run([&] {
+        const auto saved_at = unix_seconds();
+        // One statement replaces the entire snapshot in an implicit transaction.
+        Statement save(impl_->db, "INSERT INTO model_catalog(account,models,saved_at) VALUES(?,?,?) "
+                                 "ON CONFLICT(account) DO UPDATE SET models=excluded.models,saved_at=excluded.saved_at");
+        save.text(1, account_id);
+        save.text(2, json::serialize(values));
+        save.integer(3, saved_at);
+        save.row();
+        return ModelCatalog{std::string(account_id), std::move(values), saved_at};
+    });
+}
 json::object Store::rotation_status() {
     auto result = impl_->run([&] {
         json::object out{{"preferred_account_id", nullptr}, {"next_account_id", nullptr}};
@@ -800,7 +870,15 @@ void Store::clear_cooldown(std::string_view id, std::string_view model) {
     });
 }
 void Store::reset_stats() {
-    impl_->run([&] { exec(impl_->db, "DELETE FROM stats"); });
+    impl_->run([&] {
+        exec(impl_->db, "BEGIN IMMEDIATE");
+        try {
+            Statement active(impl_->db, "SELECT 1 FROM request_history WHERE terminal=0 LIMIT 1");
+            if (active.row()) throw Error(409, "requests_active", "Wait for active requests before resetting statistics");
+            exec(impl_->db, "DELETE FROM stats;DELETE FROM request_history;DELETE FROM request_totals;"
+                            "UPDATE settings SET v=CAST(unixepoch()*1000 AS TEXT) WHERE k IN ('usage_since','usage_detail_since');COMMIT");
+        } catch (...) { exec(impl_->db, "ROLLBACK"); throw; }
+    });
 }
 void Store::failure(std::string_view id, std::string_view model, std::string_view kind,
                     unsigned retry) {
@@ -868,11 +946,6 @@ void Store::failure(std::string_view id, std::string_view model, std::string_vie
                 s.integer(6, current_time);
                 s.row();
             }
-            Statement st(impl_->db, "INSERT INTO stats(account,model,failed) VALUES(?,?,1) ON "
-                                    "CONFLICT(account,model) DO UPDATE SET failed=failed+1");
-            st.text(1, id);
-            st.text(2, model);
-            st.row();
             exec(impl_->db, "COMMIT");
         } catch (...) {
             exec(impl_->db, "ROLLBACK");
@@ -880,24 +953,10 @@ void Store::failure(std::string_view id, std::string_view model, std::string_vie
         }
     });
 }
-void Store::success(std::string_view id, std::string_view model, const json::object &usage) {
+void Store::success(std::string_view id, std::string_view model) {
     impl_->run([&] {
         exec(impl_->db, "BEGIN IMMEDIATE");
         try {
-            json::object totals;
-            Statement previous(impl_->db, "SELECT usage FROM stats WHERE account=? AND model=?");
-            previous.text(1, id);
-            previous.text(2, model);
-            if (previous.row())
-                totals = json::parse(previous.str(0)).as_object();
-            accumulate(totals, counters(usage));
-            Statement s(impl_->db,
-                        "INSERT INTO stats(account,model,ok,usage) VALUES(?,?,1,?) ON "
-                        "CONFLICT(account,model) DO UPDATE SET ok=ok+1,usage=excluded.usage");
-            s.text(1, id);
-            s.text(2, model);
-            s.text(3, json::serialize(totals));
-            s.row();
             Statement sticky(impl_->db, "INSERT INTO sticky VALUES(?,?) ON CONFLICT(model) DO "
                                         "UPDATE SET account=excluded.account");
             sticky.text(1, model);
@@ -926,18 +985,329 @@ void Store::success(std::string_view id, std::string_view model, const json::obj
         }
     });
 }
-json::object Store::stats() {
+namespace {
+using UsageGroups = std::map<std::pair<std::string, std::string>, json::object>;
+std::int64_t integer(const json::object &o, std::string_view key) {
+    auto p = o.if_contains(key);
+    if (!p) return 0;
+    if (p->is_int64() && p->as_int64() >= 0) return p->as_int64();
+    if (p->is_uint64() && p->as_uint64() <= 9007199254740991ULL) return static_cast<std::int64_t>(p->as_uint64());
+    throw Error(500, "usage_invalid", "Stored usage counter is invalid");
+}
+json::object empty_total() {
+    return {{"success", 0},          {"failure", 0},           {"priced", 0},
+            {"unpriced", 0},         {"amount_nano", 0},       {"known_amount_nano", 0},
+            {"partially_priced", 0}, {"usage", json::object{}}};
+}
+void add_counter(json::object &target, std::string_view key, std::int64_t n) {
+    auto prior = integer(target, key);
+    if (n < 0 || n > 9007199254740991LL - prior)
+        throw Error(500, "usage_overflow", "Usage totals exceed supported precision");
+    target[key] = prior + n;
+}
+void merge_total(json::object &target, const json::object &value) {
+    for (auto key : {"success", "failure", "priced", "unpriced", "amount_nano", "known_amount_nano",
+                     "partially_priced"})
+        add_counter(target, key, integer(value, key));
+    auto &usage = target.at("usage").as_object();
+    for (auto &p : value.at("usage").as_object())
+        add_counter(usage, p.key(), integer(value.at("usage").as_object(), p.key()));
+}
+UsageGroups request_contributions(const json::object &record) {
+    UsageGroups groups;
+    auto model = string_or(record, "model");
+    auto &main = groups[{string_or(record, "account"), model}];
+    main = empty_total();
+    main[string_or(record, "status") == "succeeded" ? "success" : "failure"] = 1;
+    bool priced = string_or(record.at("cost").as_object(), "status") == "priced";
+    main[priced ? "priced" : "unpriced"] = 1;
+    const bool known = !record.at("cost").at("known_amount_nano").is_null();
+    if (!priced && known)
+        main["partially_priced"] = 1;
+    for (auto &a : record.at("attempts").as_array()) {
+        auto &attempt = a.as_object();
+        auto &group = groups[{string_or(attempt, "account"), model}];
+        if (group.empty())
+            group = empty_total();
+        auto &usage = group.at("usage").as_object();
+        for (auto &p : attempt.at("usage").as_object())
+            if (p.value().is_int64() || p.value().is_uint64())
+                add_counter(usage, p.key(), integer(attempt.at("usage").as_object(), p.key()));
+        if (priced)
+            add_counter(group, "amount_nano",
+                        integer(attempt.at("cost").as_object(), "amount_nano"));
+        if (known && string_or(attempt.at("cost").as_object(), "status") == "priced")
+            add_counter(group, "known_amount_nano",
+                        integer(attempt.at("cost").as_object(), "amount_nano"));
+    }
+    return groups;
+}
+void migrate_request_usage(sqlite3 *db) {
+    exec(db, "BEGIN IMMEDIATE");
+    try {
+        // Older cumulative rows include history whose details may have expired.
+        // Seed the known subtotal with the already complete subtotal, then apply
+        // only each retained row's changed contribution; never rebuild all totals.
+        Statement totals(db, "SELECT account,model,detail FROM request_totals");
+        while (totals.row()) {
+            auto total = json::parse(totals.str(2)).as_object();
+            total["known_amount_nano"] = integer(total, "amount_nano");
+            total["partially_priced"] = 0;
+            Statement put(db, "UPDATE request_totals SET detail=? WHERE account=? AND model=?");
+            put.text(1, json::serialize(total));
+            put.text(2, totals.str(0));
+            put.text(3, totals.str(1));
+            put.row();
+        }
+        Statement rows(db, "SELECT detail,terminal FROM request_history ORDER BY seq");
+        while (rows.row()) {
+            auto original = json::parse(rows.str(0)).as_object();
+            auto corrected = original;
+            const bool terminal = sqlite3_column_int(rows.p, 1);
+            summarize_request(corrected, terminal);
+            if (terminal) {
+                // Represent the old contract explicitly for contribution removal.
+                auto before = original;
+                auto old_amount = before.at("cost").at("amount_nano");
+                before.at("cost").as_object()["known_amount_nano"] = std::move(old_amount);
+                auto previous = request_contributions(before);
+                auto next = request_contributions(corrected);
+                for (auto &[key, old] : previous) {
+                    Statement get(db,
+                                  "SELECT detail FROM request_totals WHERE account=? AND model=?");
+                    get.text(1, key.first);
+                    get.text(2, key.second);
+                    if (!get.row())
+                        throw Error(500, "usage_migration",
+                                    "Missing cumulative request contribution");
+                    auto total = json::parse(get.str(0)).as_object();
+                    auto subtract = [&](json::object &target, const json::object &source) {
+                        for (auto &entry : source) {
+                            auto value = integer(source, entry.key()),
+                                 prior = integer(target, entry.key());
+                            if (value > prior)
+                                throw Error(500, "usage_migration",
+                                            "Cumulative request contribution is inconsistent");
+                            target[entry.key()] = prior - value;
+                        }
+                    };
+                    auto counters = old;
+                    counters.erase("usage");
+                    subtract(total, counters);
+                    subtract(total.at("usage").as_object(), old.at("usage").as_object());
+                    merge_total(total, next.at(key));
+                    Statement put(db,
+                                  "UPDATE request_totals SET detail=? WHERE account=? AND model=?");
+                    put.text(1, json::serialize(total));
+                    put.text(2, key.first);
+                    put.text(3, key.second);
+                    put.row();
+                }
+            }
+            Statement put(db, "UPDATE request_history SET status=?,detail=? WHERE id=?");
+            put.text(1, string_or(corrected, "status"));
+            put.text(2, json::serialize(corrected));
+            put.text(3, string_or(corrected, "id"));
+            put.row();
+        }
+        exec(db, "PRAGMA user_version=3;COMMIT");
+    } catch (...) {
+        exec(db, "ROLLBACK");
+        throw;
+    }
+}
+void save_request_row(sqlite3 *db, const json::object &record, bool terminal) {
+    Statement update(db, "UPDATE request_history SET model=?,account=?,status=?,terminal=?,detail=? WHERE id=? AND terminal=0");
+    update.text(1, string_or(record, "model")); update.text(2, string_or(record, "account"));
+    update.text(3, string_or(record, "status")); update.integer(4, terminal);
+    update.text(5, json::serialize(record)); update.text(6, string_or(record, "id")); update.row();
+    if (!terminal || !sqlite3_changes(db)) return;
+    for (auto &[key, value] : request_contributions(record)) {
+        json::object total = empty_total();
+        Statement previous(db, "SELECT detail FROM request_totals WHERE account=? AND model=?");
+        previous.text(1, key.first); previous.text(2, key.second);
+        if (previous.row()) total = json::parse(previous.str(0)).as_object();
+        merge_total(total, value);
+        Statement put(db, "INSERT INTO request_totals VALUES(?,?,?) ON CONFLICT(account,model) DO UPDATE SET detail=excluded.detail");
+        put.text(1, key.first); put.text(2, key.second); put.text(3, json::serialize(total)); put.row();
+    }
+}
+constexpr auto request_where = " WHERE (?=0 OR created_at>=?) AND (?=0 OR created_at<?)"
+    " AND (?='' OR model=?) AND (?='' OR account=?) AND (?='' OR status=?) AND (?='' OR id=?)";
+void validate_query(const RequestQuery &q) {
+    if (q.from < 0 || q.to < 0 || (q.to && q.to <= q.from) || q.before < 0 || q.snapshot < 0 || q.limit < 1 || q.limit > 100 ||
+        q.model.size() > 256 || q.account.size() > 256 || q.id.size() > 128 ||
+        (!q.status.empty() && q.status != "queued" && q.status != "running" && q.status != "finishing" &&
+         q.status != "succeeded" && q.status != "failed" && q.status != "cancelled" && q.status != "interrupted"))
+        throw Error(400, "invalid_request_query", "Invalid request history filter");
+}
+void bind_query(Statement &s, const RequestQuery &q) {
+    s.integer(1, q.from); s.integer(2, q.from); s.integer(3, q.to); s.integer(4, q.to);
+    s.text(5, q.model); s.text(6, q.model); s.text(7, q.account); s.text(8, q.account == ":unassigned" ? "" : q.account);
+    s.text(9, q.status); s.text(10, q.status); s.text(11, q.id); s.text(12, q.id);
+}
+json::object usage_metadata(sqlite3 *db) {
+    json::object result;
+    Statement s(db, "SELECT k,CAST(v AS INTEGER) FROM settings WHERE k IN ('usage_since','usage_detail_since')");
+    while (s.row()) result[s.str(0) == "usage_since" ? "since" : "detail_since"] = sqlite3_column_int64(s.p, 1);
+    return result;
+}
+}
+void Store::begin_request(const json::object &record) {
+    impl_->run([&] {
+        Statement s(impl_->db, "INSERT INTO request_history(id,created_at,status,detail) VALUES(?,?,'queued',?)");
+        s.text(1, string_or(record, "id")); s.integer(2, integer(record, "created_at"));
+        s.text(3, json::serialize(record)); s.row();
+    });
+}
+void Store::save_request(const json::object &record, bool terminal) {
+    impl_->run([&] {
+        exec(impl_->db, "BEGIN IMMEDIATE");
+        try { save_request_row(impl_->db, record, terminal); exec(impl_->db, "COMMIT"); }
+        catch (...) { exec(impl_->db, "ROLLBACK"); throw; }
+    });
+}
+json::object Store::request(std::string_view id) {
     return impl_->run([&] {
+        Statement s(impl_->db, "SELECT detail FROM request_history WHERE id=?"); s.text(1, id);
+        if (!s.row()) throw Error(404, "request_not_found", "Request record not found or expired");
+        return json::parse(s.str(0)).as_object();
+    });
+}
+json::object Store::requests(const RequestQuery &query) {
+    return impl_->run([&] {
+        auto result = usage_metadata(impl_->db);
+        validate_query(query);
+        auto snapshot = query.snapshot;
+        if (!snapshot) {
+            Statement last(impl_->db, "SELECT COALESCE(MAX(seq),0) FROM request_history"); last.row();
+            snapshot = sqlite3_column_int64(last.p, 0);
+        }
+        auto sql = std::string("SELECT seq,detail FROM request_history") + request_where +
+            " AND seq<=? AND (?=0 OR seq<?) ORDER BY seq DESC LIMIT ?";
+        Statement s(impl_->db, sql.c_str()); bind_query(s, query); s.integer(13, snapshot);
+        s.integer(14, query.before); s.integer(15, query.before); s.integer(16, query.limit + 1);
         json::array rows;
+        std::int64_t last = 0;
+        bool more = false;
+        while (s.row()) {
+            if (rows.size() == query.limit) { more = true; break; }
+            last = sqlite3_column_int64(s.p, 0);
+            auto row = json::parse(s.str(1)).as_object();
+            row["attempt_count"] = row.at("attempts").as_array().size();
+            row.erase("attempts"); row.erase("settings");
+            rows.push_back(std::move(row));
+        }
+        auto count_sql = std::string("SELECT COUNT(*) FROM request_history") + request_where + " AND seq<=?";
+        Statement count(impl_->db, count_sql.c_str()); bind_query(count, query); count.integer(13, snapshot); count.row();
+        result["total"] = sqlite3_column_int64(count.p, 0); result["snapshot"] = snapshot;
+        result["next_cursor"] = more ? json::value(last) : json::value(nullptr);
+        result["records"] = std::move(rows);
+        return result;
+    });
+}
+json::object Store::stats(const std::optional<RequestQuery> &query) {
+    return impl_->run([&] {
+        auto result = usage_metadata(impl_->db);
+        const bool cumulative = !query || query->cumulative;
+        if (query) validate_query(*query);
+        if (query && cumulative && (query->from || query->to || !query->id.empty() || !query->status.empty()))
+            throw Error(400, "invalid_request_query", "Lifetime statistics only support model and account filters");
+        result["scope"] = cumulative ? "lifetime" : "filtered";
+        UsageGroups groups;
+        if (!cumulative) {
+            auto sql = std::string("SELECT detail FROM request_history") + request_where + " AND terminal=1";
+            auto selection = *query;
+            selection.account.clear();
+            Statement s(impl_->db, sql.c_str()); bind_query(s, selection);
+            while (s.row()) for (auto &[key, value] : request_contributions(json::parse(s.str(0)).as_object())) {
+                if (!query->account.empty() && key.first != (query->account == ":unassigned" ? "" : query->account)) continue;
+                auto &total = groups[key]; if (total.empty()) total = empty_total(); merge_total(total, value);
+            }
+        } else {
+            Statement s(impl_->db, "SELECT account,model,detail FROM request_totals WHERE (?='' OR model=?) AND (?='' OR account=?) ORDER BY account,model");
+            const auto model = query ? query->model : std::string{};
+            const auto account = query ? query->account : std::string{};
+            s.text(1, model); s.text(2, model); s.text(3, account); s.text(4, account == ":unassigned" ? "" : account);
+            while (s.row()) groups[{s.str(0), s.str(1)}] = json::parse(s.str(2)).as_object();
+        }
+        json::array rows;
+        auto totals = empty_total();
+        for (auto &[key, value] : groups) {
+            merge_total(totals, value); value["account"] = key.first; value["model"] = key.second; rows.push_back(std::move(value));
+        }
+        result["records"] = std::move(rows); result["totals"] = std::move(totals);
+        json::array legacy;
         Statement s(impl_->db, "SELECT account,model,ok,failed,usage FROM stats "
                                "ORDER BY account,model");
         while (s.row())
-            rows.push_back(json::object{{"account", s.str(0)},
+            legacy.push_back(json::object{{"account", s.str(0)},
                                         {"model", s.str(1)},
                                         {"success", sqlite3_column_int64(s.p, 2)},
                                         {"failure", sqlite3_column_int64(s.p, 3)},
                                         {"usage", json::parse(s.str(4))}});
-        return json::object{{"records", rows}};
+        result["legacy_records"] = std::move(legacy);
+        return result;
+    });
+}
+void Store::recover_requests() {
+    impl_->run([&] {
+        exec(impl_->db, "BEGIN IMMEDIATE");
+        try {
+            Statement s(impl_->db, "SELECT detail FROM request_history WHERE terminal=0");
+            std::vector<json::object> records;
+            while (s.row()) records.push_back(json::parse(s.str(0)).as_object());
+            for (auto &record : records) {
+                record["status"] = "interrupted"; record["error"] = "service_interrupted";
+                record["ended_at"] = unix_seconds() * 1000;
+                summarize_request(record, true);
+                save_request_row(impl_->db, record, true);
+            }
+            exec(impl_->db, "COMMIT");
+        } catch (...) { exec(impl_->db, "ROLLBACK"); throw; }
+    });
+}
+void Store::prune_requests(std::int64_t before) {
+    impl_->run([&] {
+        exec(impl_->db, "BEGIN IMMEDIATE");
+        try {
+            Statement s(impl_->db, "DELETE FROM request_history WHERE seq IN (SELECT seq FROM request_history WHERE terminal=1 AND created_at<? LIMIT 1000)");
+            s.integer(1, before); s.row();
+            if (sqlite3_changes(impl_->db)) {
+                Statement m(impl_->db, "UPDATE settings SET v=CAST(MAX(CAST(v AS INTEGER),?) AS TEXT) WHERE k='usage_detail_since'");
+                m.integer(1, before); m.row();
+            }
+            exec(impl_->db, "COMMIT");
+        } catch (...) { exec(impl_->db, "ROLLBACK"); throw; }
+    });
+}
+json::object Store::price_sources() {
+    return impl_->run([&] {
+        json::object result;
+        Statement s(impl_->db, "SELECT source,catalog,fetched_at,attempted_at,error FROM price_sources");
+        while (s.row()) result[s.str(0)] = json::object{{"catalog", json::parse(s.str(1))},
+            {"fetched_at", sqlite3_column_int64(s.p, 2)}, {"attempted_at", sqlite3_column_int64(s.p, 3)}, {"error", s.str(4)}};
+        return result;
+    });
+}
+void Store::save_price_source(std::string_view source, const json::object &catalog, std::int64_t fetched_at, std::string_view error) {
+    impl_->run([&] {
+        Statement s(impl_->db, "INSERT INTO price_sources VALUES(?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET "
+            "catalog=CASE WHEN excluded.error='' THEN excluded.catalog ELSE price_sources.catalog END,"
+            "fetched_at=CASE WHEN excluded.error='' THEN excluded.fetched_at ELSE price_sources.fetched_at END,"
+            "attempted_at=excluded.attempted_at,error=excluded.error");
+        s.text(1, source); s.text(2, json::serialize(catalog)); s.integer(3, fetched_at);
+        s.integer(4, unix_seconds()); s.text(5, error); s.row();
+    });
+}
+json::object Store::price_quote(std::string_view model) {
+    return impl_->run([&] {
+        Statement s(impl_->db, "SELECT catalog FROM price_sources ORDER BY CASE source WHEN 'litellm' THEN 0 ELSE 1 END");
+        while (s.row()) {
+            auto catalog = json::parse(s.str(0)).as_object();
+            if (auto quote = catalog.if_contains(model); quote && quote->is_object()) return quote->as_object();
+        }
+        return json::object{};
     });
 }
 unsigned default_fingerprint_seed(std::string_view account_id) {

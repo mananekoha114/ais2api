@@ -467,19 +467,15 @@ TEST_CASE("installed browser verifier releases its process and profile", "[.brow
     CHECK(retained_log);
 }
 
-TEST_CASE("model discovery distinguishes configured data from live Google data") {
+TEST_CASE("cancelled discovery never substitutes configured models") {
     Directory directory;
     Config config; config.data_dir = directory.path;
     config.configured_models = {"explicit-user-model"};
     Store store(directory.path);
     BrowserGateway gateway(config, store);
-    auto models = gateway.models();
-    REQUIRE(models.size() == 1);
-    CHECK(string_or(models[0].as_object(), "id") == "explicit-user-model");
-    CHECK(string_or(models[0].as_object(), "source") == "configured");
-    CHECK_FALSE(bool_or(gateway.diagnostics(), "running"));
     std::stop_source cancelled; cancelled.request_stop();
-    CHECK_THROWS_AS(gateway.models(cancelled.get_token()), Error);
+    CHECK_THROWS_AS(gateway.models(Account{}, cancelled.get_token()), Error);
+    CHECK_FALSE(bool_or(gateway.diagnostics(), "running"));
 }
 
 TEST_CASE("HTTP 200 RPC status envelopes retain scheduler error categories") {

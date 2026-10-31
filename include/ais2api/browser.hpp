@@ -39,7 +39,7 @@ class BrowserGateway final : public GenerationBackend {
     ~BrowserGateway() override;
     void generate(const Request &request, const Account &account, const EventSink &sink,
                   std::stop_token cancel) override;
-    json::array models(std::stop_token cancel = {}) override;
+    json::array models(const Account &account, std::stop_token cancel = {}) override;
     json::object probe(const Account &account, std::stop_token cancel = {}) override;
     json::object probe_import(Account &account, std::stop_token cancel = {}) override;
     json::object diagnostics() override;

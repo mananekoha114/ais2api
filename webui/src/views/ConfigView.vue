@@ -438,7 +438,7 @@ const bytesHint = (field: FieldDef) => (field.unit === 'bytes' && typeof form[fi
             <FIcon name="cube" :size="20" class="t-secondary" />
             <div class="setting-text">
               <label for="f-configured-models" class="label-row">显式配置的模型 configured_models</label>
-              <div class="desc">实时发现前使用的模型列表；元素可以是模型 ID 字符串或对象。</div>
+              <div class="desc">没有已保存列表时使用，支持模型 ID 字符串或对象。</div>
             </div>
             <div class="setting-control column">
               <textarea id="f-configured-models" v-model="configuredModelsText" class="textarea mono" rows="5" spellcheck="false" :aria-invalid="!!jsonErrors.configured_models || undefined" />

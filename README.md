@@ -24,7 +24,8 @@ ais2api 是一个 C++20 编写的 AI Studio 网页会话网关：它驱动本地
 3. 在生成的 `config.json` 中填写 `api_key`，执行 `ais2api config reload`。
 4. 打开 `http://127.0.0.1:18451/`，用默认密码 `admin` 登录控制台并按提示修改。
 5. 导入 Google 账号：安装 [Cookie 导入脚本](docs/userscript.md)，或在控制台“账号”页粘贴 Cookie。
-6. 在客户端填写接口地址：
+6. 在控制台“模型”页执行“实时发现”并保存清单，或通过 `configured_models` 配置备用列表。客户端只读取本地清单，不会自动发现模型。
+7. 在客户端填写接口地址：
 
 | 客户端 | 设置 |
 |---|---|

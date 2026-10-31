@@ -76,6 +76,6 @@ export function usageTotals(usage: Record<string, unknown> | undefined) {
   const prompt = read('promptTokenCount') || read('prompt_tokens') || read('input_tokens')
   const output = read('candidatesTokenCount') || read('completion_tokens') || read('output_tokens')
   const thoughts = read('thoughtsTokenCount')
-  const total = read('totalTokenCount') || read('total_tokens') || prompt + output + thoughts
+  const total = read('totalTokenCount') || read('total_tokens') || prompt + output + read('toolUsePromptTokenCount')
   return { prompt, output, thoughts, total }
 }

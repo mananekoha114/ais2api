@@ -450,9 +450,8 @@ struct BrowserGateway::Impl {
     std::string context, session, account_id, account_fingerprint;
     json::array base_template;
     std::string timezone = "UTC";
-    json::array cached_models;
+    bool models_discovered = false;
     browser_detail::GoogleAuthorizationCache authorization_cache;
-    Clock::time_point models_at{};
     std::string last_status = "not_started";
     std::string phase = "idle";
     // CloakBrowser applies fingerprints per process, so the running browser is
@@ -488,7 +487,7 @@ struct BrowserGateway::Impl {
         launched.reset();
         cdp.reset(); process.stop();
         if (relay) { relay_error = relay->last_error(); relay.reset(); }
-        context.clear(); session.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); cached_models.clear(); session_state = {};
+        context.clear(); session.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); models_discovered = false; session_state = {};
         if (!profile.empty()) { std::error_code ec; fs::remove_all(profile, ec); profile.clear(); }
         last_status = "closed";
     }
@@ -605,7 +604,7 @@ struct BrowserGateway::Impl {
     void dispose_context(std::stop_token token) {
         authorization_cache.clear();
         if (!context.empty()) cdp->call("Target.disposeBrowserContext", {{"browserContextId", context}}, {}, token);
-        context.clear(); session.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); cached_models.clear(); session_state = {};
+        context.clear(); session.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); models_discovered = false; session_state = {};
     }
     // Google rotates session cookies while the page is in use. Persist the
     // verified context's current cookies so later sessions do not restart from
@@ -836,7 +835,6 @@ void BrowserGateway::reconfigure(const Config& config) {
     std::lock_guard lock(impl_->mutex);
     // Transport/lifecycle settings require a service restart. These fields are
     // the model policy that config.reload may atomically replace.
-    impl_->config.configured_models = config.configured_models;
     impl_->config.model_aliases = config.model_aliases;
     impl_->config.model_defaults = config.model_defaults;
 }
@@ -847,7 +845,7 @@ json::object BrowserGateway::diagnostics() {
                 {"bridgeSha256", browser_detail::embedded_bridge_sha256()}};
     return {{"status", impl_->last_status}, {"phase", impl_->phase},
         {"bridgeSource", "embedded"}, {"bridgeSha256", browser_detail::embedded_bridge_sha256()},
-        {"running", impl_->process.alive()}, {"isolatedContext", !impl_->context.empty()}, {"templateCaptured", !impl_->base_template.empty()}, {"modelDiscovery", impl_->cached_models.empty() ? "not_loaded" : "live_rpc_cache"}, {"chunkBytes", 32768},
+        {"running", impl_->process.alive()}, {"isolatedContext", !impl_->context.empty()}, {"templateCaptured", !impl_->base_template.empty()}, {"modelDiscovery", impl_->models_discovered ? "live_rpc" : "not_loaded"}, {"chunkBytes", 32768},
         {"cookieRefresh", impl_->cookie_refresh},
         {"proxy", json::object{{"mode", impl_->config.proxy.empty() ? "none" : impl_->config.browser_proxy_relay ? "relay" : "direct"},
                                {"relayError", impl_->relay ? impl_->relay->last_error() : impl_->relay_error}}},
@@ -882,42 +880,16 @@ json::object BrowserGateway::probe_import(Account& account, std::stop_token canc
     impl_->account_fingerprint = sha256(json::serialize(account.storage_state) + "\n" + account.auth_user + "\n" + account.email);
     return {{"accountId", account.id}, {"email", email}, {"ready", true}, {"login", false}, {"identityAmbiguous", false}, {"status", "ready"}, {"generationVerified", false}, {"skippedPartitionCookies", skipped_partition_cookies}};
 }
-json::array BrowserGateway::models(std::stop_token cancel) {
+json::array BrowserGateway::models(const Account &account, std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
     check_cancel(cancel);
-    auto configured = [&] {
-        json::array result;
-        for (const auto& value : impl_->config.configured_models) {
-            json::object item;
-            if (value.is_object()) item = value.as_object();
-            else if (value.is_string()) { item["id"] = value; item["name"] = "models/" + std::string(value.as_string()); }
-            else continue;
-            item["source"] = "configured"; result.push_back(std::move(item));
-        }
-        return result;
-    };
-    try {
-        const auto account = impl_->store.choose("model_discovery");
-        if (!account) return configured();
-        // Listing models needs a verified account, never a generation request,
-        // prompt editor, Run button or snapshot service. Recheck before cache.
-        impl_->ensure_account(*account, cancel, false, true);
-        if (!impl_->cached_models.empty() && Clock::now() - impl_->models_at < 600s) {
-            auto cached = impl_->cached_models;
-            for (auto& item : cached) item.as_object()["source"] = "cache";
-            return cached;
-        }
-        const auto authorization = impl_->authorization(cancel);
-        auto result = impl_->eval("globalThis.__ais2bridge.discoverModels(" + quote_js(account->auth_user) + "," + quote_js(authorization) + ")", cancel, 25s);
-        if (!result.is_array()) incompatible("ListModels returned an unsupported response");
-        impl_->cached_models = result.as_array(); impl_->models_at = Clock::now();
-        return impl_->cached_models.empty() ? configured() : impl_->cached_models;
-    } catch (const Error& error) {
-        if (error.code == "cancelled") throw;
-        auto result = configured();
-        if (!result.empty()) return result;
-        throw;
-    }
+    // Model discovery verifies this account without generation initialization.
+    impl_->ensure_account(account, cancel, false, true);
+    const auto authorization = impl_->authorization(cancel);
+    auto result = impl_->eval("globalThis.__ais2bridge.discoverModels(" + quote_js(account.auth_user) + "," + quote_js(authorization) + ")", cancel, 25s);
+    if (!result.is_array()) incompatible("ListModels returned an unsupported response");
+    impl_->models_discovered = true;
+    return result.as_array();
 }
 void BrowserGateway::generate(const Request& request, const Account& account, const EventSink& sink, std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);

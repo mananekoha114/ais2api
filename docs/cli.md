@@ -127,8 +127,8 @@ ais2api operations status OPERATION_ID
 - **config show**：隐藏 `api_key`、代理用户信息等凭据，其余设置原样显示。
 - **config validate**：在本地校验配置。
 - **config reload**：需要服务正在运行，应用可热更新的设置（包括 `api_key`，修改后旧 Key 立即失效）；存在需要重启的差异时返回 `restart_required`。
-- **stats**：显示记录的调用计数与 usage。
-- **models list**：服务运行时请求实时发现，可能启动浏览器；服务未运行时只能返回 `configured_models`。
+- **stats**：显示按客户端请求计数的累计结果、usage 和 USD 估算费用。`records` 为账号/模型分组，`totals` 为合计，`legacy_records` 单列功能启用前的原口径累计。`amount_nano` 为完整计价请求的小计，`known_amount_nano` 为含部分计价请求的已知小计，单位均为十亿分之一美元；`priced` / `unpriced` 区分完整与未完整计价请求，`partially_priced` 为后者中有已知金额的请求数。累计不随明细到期而清空，逐条请求与价格状态见 WebUI 或管理 API。
+- **models list**：服务运行时请求实时发现并保存完整结果，可能启动浏览器；失败报错并保留之前保存的结果。客户端模型列表只读取本地，不发起发现。服务未运行时本命令只能返回 `configured_models`。
 
 模型发现和账号探测以排队的异步操作执行，使状态查询和停止命令保持响应。命令行每 200 毫秒查询一次结果，最多等待 120 秒；仍未完成时以 `operation_pending` 退出，可以用返回的 ID 执行 `operations status` 继续查询。操作结果只临时保留。
 

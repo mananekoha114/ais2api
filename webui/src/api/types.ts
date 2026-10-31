@@ -87,12 +87,104 @@ export interface Model {
   [key: string]: unknown
 }
 
+export interface ModelCatalog {
+  models: Model[]
+  source: 'saved' | 'configured' | 'none'
+  account_id: string | null
+  saved_at: number | null
+}
+
 export interface StatRecord {
   account: string
   model: string
   success: number
   failure: number
   usage?: Record<string, unknown>
+}
+export interface UsageTotal {
+  success: number
+  failure: number
+  priced: number
+  unpriced: number
+  amount_nano: number
+  known_amount_nano: number
+  partially_priced: number
+  usage: Record<string, number>
+}
+export interface UsageGroup extends UsageTotal { account: string; model: string }
+export interface UsageSummary {
+  records: UsageGroup[]
+  totals: UsageTotal
+  legacy_records: StatRecord[]
+  scope: 'lifetime' | 'filtered'
+  since: number
+  detail_since: number
+}
+export interface PriceQuote {
+  model: string
+  source: string
+  fetched_at: number
+  currency: 'USD'
+  supported: boolean
+  tiers: { above_tokens: number; input_pico: number | null; output_pico: number | null; cache_pico: number | null }[]
+}
+export interface RequestCost {
+  status: 'priced' | 'unpriced'
+  reason: string
+  amount_nano: number | null
+  currency: 'USD'
+  quote?: Partial<PriceQuote>
+  above_tokens?: number
+  lines?: { kind: string; tokens: number; rate_pico: number | null; amount_nano: number }[]
+}
+export interface RequestEstimate extends RequestCost {
+  known_amount_nano: number | null
+  unpriced_attempts: number
+}
+export type RequestStatus = 'queued' | 'running' | 'finishing' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
+export interface RequestRecord {
+  id: string
+  endpoint: 'chat_completions' | 'responses' | 'gemini'
+  created_at: number
+  ended_at: number | null
+  model: string
+  requested_model: string
+  account: string
+  stream: boolean
+  status: RequestStatus
+  http_status: number | null
+  generation_completed: boolean
+  delivery_completed: boolean
+  error: string
+  finish_reason: string
+  queue_ms: number | null
+  first_token_ms: number | null
+  generation_ms: number | null
+  duration_ms: number | null
+  usage: Record<string, number>
+  cost: RequestEstimate
+  attempt_count: number
+}
+export interface RequestDetail extends Omit<RequestRecord, 'attempt_count'> {
+  settings: Record<string, number | boolean | string | Record<string, number | boolean | string>>
+  attempts: {
+    account: string; started_at: number; ended_at: number | null; completed: boolean
+    finish_reason: string; error: string; usage: Record<string, number>; cost: RequestCost
+  }[]
+}
+export interface RequestPage {
+  records: RequestRecord[]
+  total: number
+  snapshot: number
+  next_cursor: number | null
+  since: number
+  detail_since: number
+}
+export interface PriceStatus {
+  currency: 'USD'
+  refreshing: boolean
+  error: string
+  sources: { source: string; fetched_at: number; attempted_at: number; error: string; models: number }[]
 }
 
 export interface Key {
@@ -145,6 +237,7 @@ export interface Config {
   ignore_unsupported_parameters?: boolean
   search_model_drop_functions?: boolean
   browser_idle_seconds?: number
+  request_retention_days?: number
   model_aliases?: Record<string, string>
   configured_models?: Array<string | Record<string, unknown>>
   model_defaults?: Record<string, unknown>
@@ -205,7 +298,7 @@ export interface BrowserDiagnostics {
   running?: boolean
   isolatedContext?: boolean
   templateCaptured?: boolean
-  modelDiscovery?: 'not_loaded' | 'live_rpc_cache' | string
+  modelDiscovery?: 'not_loaded' | 'live_rpc' | string
   chunkBytes?: number
   /** Last cookie write-back result: saved | unchanged | failed | not_attempted. */
   cookieRefresh?: string

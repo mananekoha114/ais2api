@@ -790,6 +790,12 @@ json::array tool_wire(const json::array &tools, const json::object *config, bool
 }
 } // namespace
 
+bool content_filtered(std::string_view reason) {
+    return reason == "SAFETY" || reason == "RECITATION" || reason == "BLOCKLIST" ||
+           reason == "PROHIBITED_CONTENT" || reason == "SPII" || reason == "IMAGE_SAFETY" ||
+           reason == "IMAGE_PROHIBITED_CONTENT" || reason == "IMAGE_RECITATION";
+}
+
 json::array encode_contents(const json::array &contents) {
     if (contents.empty())
         invalid("contents cannot be empty");
@@ -1629,9 +1635,7 @@ json::object usage_openai(const json::object &u) {
 std::string finish_openai(std::string reason, bool calls) {
     if (reason == "MAX_TOKENS")
         return "length";
-    if (reason == "SAFETY" || reason == "RECITATION" || reason == "BLOCKLIST" ||
-        reason == "PROHIBITED_CONTENT" || reason == "SPII" || reason == "IMAGE_SAFETY" ||
-        reason == "IMAGE_PROHIBITED_CONTENT" || reason == "IMAGE_RECITATION")
+    if (content_filtered(reason))
         return "content_filter";
     return calls ? "tool_calls" : "stop";
 }

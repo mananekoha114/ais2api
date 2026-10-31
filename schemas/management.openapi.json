@@ -282,7 +282,7 @@
     "/stats": {
       "get": {
         "operationId": "get_stats",
-        "summary": "Get account and model counters",
+        "summary": "Get lifetime request totals and separate legacy counters",
         "responses": {
           "200": {
             "description": "Success",
@@ -323,7 +323,7 @@
       },
       "delete": {
         "operationId": "delete_stats",
-        "summary": "Reset counters",
+        "summary": "Reset legacy and new totals and completed request records; reject while requests are active",
         "responses": {
           "200": {
             "description": "Success",
@@ -1828,15 +1828,14 @@
     "/models": {
       "get": {
         "operationId": "get_models",
-        "summary": "Get cached/configured models without browser startup",
+        "summary": "Get saved/configured models without browser startup",
         "responses": {
           "200": {
             "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true
+                  "$ref": "#/components/schemas/ModelCatalog"
                 }
               }
             }
@@ -1872,7 +1871,8 @@
     "/models/refresh": {
       "post": {
         "operationId": "post_models_refresh",
-        "summary": "Queue live model discovery",
+        "summary": "Queue fresh discovery and persist a complete model catalog",
+        "description": "A successful operation returns ModelCatalog as its result. Discovery, validation or persistence failure leaves the previous catalog unchanged and reports a failed operation. No configured or cached list substitutes for a successful discovery.",
         "responses": {
           "400": {
             "description": "Invalid request",
@@ -2324,6 +2324,514 @@
           }
         }
       }
+    },
+    "/usage/requests": {
+      "get": {
+        "operationId": "get_usage_requests",
+        "summary": "List retained client requests newest first with stable sequence cursors",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/UsageFrom"
+          },
+          {
+            "$ref": "#/components/parameters/UsageTo"
+          },
+          {
+            "$ref": "#/components/parameters/UsageModel"
+          },
+          {
+            "name": "account",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "description": "Final executing account id; :unassigned matches requests with no account."
+          },
+          {
+            "$ref": "#/components/parameters/UsageStatus"
+          },
+          {
+            "$ref": "#/components/parameters/UsageRequestId"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            },
+            "description": "Maximum page size."
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "description": "Exclusive sequence cursor returned as next_cursor."
+          },
+          {
+            "name": "snapshot",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "description": "Upper sequence boundary returned by the first page; keep it for subsequent pages."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query or body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid management Bearer credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Management permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request missing or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Active requests prevent resetting statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/usage/requests/{id}": {
+      "get": {
+        "operationId": "get_usage_request",
+        "summary": "Get runtime details, attempts and fixed price snapshots",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query or body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid management Bearer credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Management permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request missing or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Active requests prevent resetting statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/usage/summary": {
+      "get": {
+        "operationId": "get_usage_summary",
+        "summary": "Summarize completed requests; lifetime totals survive detail retention",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/UsageFrom"
+          },
+          {
+            "$ref": "#/components/parameters/UsageTo"
+          },
+          {
+            "$ref": "#/components/parameters/UsageModel"
+          },
+          {
+            "name": "account",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "description": "Account group: request counts belong to the final executor; usage and cost belong to each consuming account. :unassigned selects the group with no account."
+          },
+          {
+            "$ref": "#/components/parameters/UsageStatus"
+          },
+          {
+            "$ref": "#/components/parameters/UsageRequestId"
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "schema": {
+              "enum": [
+                "lifetime",
+                "filtered"
+              ]
+            },
+            "description": "With no query defaults to lifetime; otherwise filtered. Lifetime supports only model/account filters; filtered scans all matching retained requests, independent of pagination."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Stats"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query or body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid management Bearer credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Management permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request missing or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Active requests prevent resetting statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/pricing": {
+      "get": {
+        "operationId": "get_pricing",
+        "summary": "Get reference catalog freshness and refresh status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PriceStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query or body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid management Bearer credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Management permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request missing or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Active requests prevent resetting statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/pricing/refresh": {
+      "post": {
+        "operationId": "refresh_pricing",
+        "summary": "Queue reference price refresh independently of generation",
+        "parameters": [],
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PriceStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query or body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid management Bearer credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Management permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request missing or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Active requests prevent resetting statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "maxProperties": 0
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2411,6 +2919,45 @@
             "items": {
               "$ref": "#/components/schemas/Account"
             }
+          }
+        }
+      },
+      "ModelCatalog": {
+        "type": "object",
+        "required": [
+          "models",
+          "source",
+          "account_id",
+          "saved_at"
+        ],
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "saved",
+              "configured",
+              "none"
+            ]
+          },
+          "account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "saved_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Unix seconds when the complete catalog was saved; null without a saved discovery."
           }
         }
       },
@@ -2566,6 +3113,15 @@
           "records": {
             "type": "array",
             "items": {
+              "$ref": "#/components/schemas/UsageGroup"
+            }
+          },
+          "totals": {
+            "$ref": "#/components/schemas/UsageTotal"
+          },
+          "legacy_records": {
+            "type": "array",
+            "items": {
               "type": "object",
               "properties": {
                 "account": {
@@ -2587,10 +3143,31 @@
               },
               "required": []
             }
+          },
+          "scope": {
+            "enum": [
+              "lifetime",
+              "filtered"
+            ]
+          },
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "detail_since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
           }
         },
         "required": [
-          "records"
+          "records",
+          "totals",
+          "legacy_records",
+          "scope",
+          "since",
+          "detail_since"
         ]
       },
       "Rotation": {
@@ -2943,6 +3520,791 @@
           "host_timezone",
           "host_locale"
         ]
+      },
+      "UsageTotal": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "failure": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "priced": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "unpriced": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "amount_nano": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "usage": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "known_amount_nano": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "Known subtotal, including priced attempts from incomplete requests; not a complete bill."
+          },
+          "partially_priced": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "Requests with a known subtotal but incomplete pricing; included in unpriced."
+          }
+        },
+        "required": [
+          "success",
+          "failure",
+          "priced",
+          "unpriced",
+          "amount_nano",
+          "usage",
+          "known_amount_nano",
+          "partially_priced"
+        ]
+      },
+      "UsageGroup": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/UsageTotal"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "account": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "account",
+              "model"
+            ]
+          }
+        ]
+      },
+      "PriceTier": {
+        "type": "object",
+        "properties": {
+          "above_tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "input_pico": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "output_pico": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "cache_pico": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "above_tokens",
+          "input_pico",
+          "output_pico",
+          "cache_pico"
+        ]
+      },
+      "PriceQuote": {
+        "oneOf": [
+          {
+            "type": "object",
+            "maxProperties": 0
+          },
+          {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "source": {
+                "enum": [
+                  "litellm",
+                  "models.dev"
+                ]
+              },
+              "fetched_at": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "currency": {
+                "const": "USD"
+              },
+              "supported": {
+                "type": "boolean"
+              },
+              "tiers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/PriceTier"
+                }
+              }
+            },
+            "required": [
+              "model",
+              "source",
+              "fetched_at",
+              "currency",
+              "supported",
+              "tiers"
+            ]
+          }
+        ]
+      },
+      "CostLine": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "enum": [
+              "input",
+              "cache_read",
+              "output",
+              "reasoning"
+            ]
+          },
+          "tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "rate_pico": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "amount_nano": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "kind",
+          "tokens",
+          "rate_pico",
+          "amount_nano"
+        ]
+      },
+      "RequestCost": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "enum": [
+              "priced",
+              "unpriced"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "amount_nano": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "currency": {
+            "const": "USD"
+          },
+          "quote": {
+            "$ref": "#/components/schemas/PriceQuote"
+          },
+          "above_tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CostLine"
+            }
+          },
+          "tokens": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "required": [
+          "status",
+          "reason",
+          "amount_nano",
+          "currency"
+        ]
+      },
+      "RequestEstimate": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RequestCost"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "known_amount_nano": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Sum of fully priced attempts; null when none is known. Known zero is distinct from unknown."
+              },
+              "unpriced_attempts": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "known_amount_nano",
+              "unpriced_attempts"
+            ]
+          }
+        ]
+      },
+      "RequestFields": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "endpoint": {
+            "enum": [
+              "chat_completions",
+              "responses",
+              "gemini"
+            ]
+          },
+          "created_at": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "ended_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "model": {
+            "type": "string"
+          },
+          "requested_model": {
+            "type": "string"
+          },
+          "account": {
+            "type": "string"
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "finishing",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "interrupted"
+            ]
+          },
+          "http_status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "generation_completed": {
+            "type": "boolean"
+          },
+          "delivery_completed": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          },
+          "usage": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "cost": {
+            "$ref": "#/components/schemas/RequestEstimate"
+          },
+          "queue_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "first_token_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "generation_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "finish_reason": {
+            "type": "string",
+            "description": "Final upstream finish reason, or empty before one is available. Content filtering fails the recorded request while preserving the API response body."
+          }
+        },
+        "required": [
+          "id",
+          "endpoint",
+          "created_at",
+          "ended_at",
+          "model",
+          "requested_model",
+          "account",
+          "stream",
+          "status",
+          "http_status",
+          "generation_completed",
+          "delivery_completed",
+          "error",
+          "usage",
+          "cost",
+          "queue_ms",
+          "first_token_ms",
+          "generation_ms",
+          "duration_ms",
+          "finish_reason"
+        ]
+      },
+      "RequestRecord": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RequestFields"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "attempt_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "attempt_count"
+            ]
+          }
+        ]
+      },
+      "RequestAttempt": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "ended_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "completed": {
+            "type": "boolean"
+          },
+          "finish_reason": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "usage": {
+            "type": "object",
+            "properties": {
+              "promptTokenCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "candidatesTokenCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "cachedContentTokenCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "thoughtsTokenCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "toolUsePromptTokenCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "totalTokenCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "modality": {
+                    "enum": [
+                      "TEXT",
+                      "IMAGE",
+                      "AUDIO",
+                      "VIDEO",
+                      "DOCUMENT",
+                      "UNSPECIFIED"
+                    ]
+                  }
+                },
+                "required": [
+                  "modality"
+                ]
+              }
+            }
+          },
+          "cost": {
+            "$ref": "#/components/schemas/RequestCost"
+          }
+        },
+        "required": [
+          "account",
+          "started_at",
+          "ended_at",
+          "completed",
+          "finish_reason",
+          "error",
+          "usage",
+          "cost"
+        ]
+      },
+      "RequestDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RequestFields"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "settings": {
+                "type": "object",
+                "properties": {
+                  "temperature": {
+                    "type": "number"
+                  },
+                  "topP": {
+                    "type": "number"
+                  },
+                  "topK": {
+                    "type": "number"
+                  },
+                  "candidateCount": {
+                    "type": "number"
+                  },
+                  "maxOutputTokens": {
+                    "type": "number"
+                  },
+                  "seed": {
+                    "type": "number"
+                  },
+                  "presencePenalty": {
+                    "type": "number"
+                  },
+                  "frequencyPenalty": {
+                    "type": "number"
+                  },
+                  "responseMimeType": {
+                    "enum": [
+                      "text/plain",
+                      "application/json"
+                    ]
+                  },
+                  "thinkingConfig": {
+                    "type": "object",
+                    "properties": {
+                      "thinkingBudget": {
+                        "type": "integer"
+                      },
+                      "includeThoughts": {
+                        "type": "boolean"
+                      },
+                      "thinkingLevel": {
+                        "enum": [
+                          "MINIMAL",
+                          "LOW",
+                          "MEDIUM",
+                          "HIGH"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "additionalProperties": false
+              },
+              "attempts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RequestAttempt"
+                }
+              }
+            },
+            "required": [
+              "settings",
+              "attempts"
+            ]
+          }
+        ]
+      },
+      "RequestPage": {
+        "type": "object",
+        "properties": {
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequestRecord"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "snapshot": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "next_cursor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "detail_since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "records",
+          "total",
+          "snapshot",
+          "next_cursor",
+          "since",
+          "detail_since"
+        ]
+      },
+      "PriceStatus": {
+        "type": "object",
+        "properties": {
+          "currency": {
+            "const": "USD"
+          },
+          "refreshing": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "enum": [
+                    "litellm",
+                    "models.dev"
+                  ]
+                },
+                "fetched_at": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "attempted_at": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "error": {
+                  "type": "string"
+                },
+                "models": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "source",
+                "fetched_at",
+                "attempted_at",
+                "error",
+                "models"
+              ]
+            }
+          }
+        },
+        "required": [
+          "currency",
+          "refreshing",
+          "error",
+          "sources"
+        ]
+      }
+    },
+    "parameters": {
+      "UsageFrom": {
+        "name": "from",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "description": "Inclusive request-entry time, Unix milliseconds."
+      },
+      "UsageTo": {
+        "name": "to",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "description": "Exclusive request-entry time, Unix milliseconds."
+      },
+      "UsageModel": {
+        "name": "model",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "description": "Exact resolved model id."
+      },
+      "UsageStatus": {
+        "name": "status",
+        "in": "query",
+        "schema": {
+          "enum": [
+            "queued",
+            "running",
+            "finishing",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "interrupted"
+          ]
+        },
+        "description": "Request state."
+      },
+      "UsageRequestId": {
+        "name": "id",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "description": "Exact request id."
       }
     }
   }

@@ -1,6 +1,6 @@
 # 验证记录
 
-更新：2026-10-25。本项目仍是开发版本，尚未达到完整版本的发布门槛。本文汇总已执行的验证及其能证明的范围；各专项的详细过程见 [docs/reports/](reports/README.md)。
+更新：2026-10-31。本项目仍是开发版本，尚未达到完整版本的发布门槛。本文汇总已执行的验证及其能证明的范围；各专项的详细过程见 [docs/reports/](reports/README.md)。
 
 阅读时请注意区分四类证据，它们不能互相替代：
 
@@ -13,10 +13,10 @@
 
 | 范围 | 最近结果 | 能证明的范围 |
 |---|---|---|
-| C++ 全量测试 | 2026-10-24，Windows MSVC Release，Catch2 291 个用例、4,813 条断言通过（[搜索修复报告](reports/search-fix-2026-10-24.md)） | 合成协议、解析器、存储、CLI 控制通道、HTTP、配置与端口诊断、资源限制、下载、浏览器包、内嵌页面路由、重试策略、代理转发等 |
+| C++ 全量测试 | 2026-10-31，ARM64 Termux，Catch2 330 个用例、5,433 条断言通过（[模型目录与请求计价报告](reports/request-usage-pricing-2026-10-31.md)）；此前 Windows 结果见[搜索修复报告](reports/search-fix-2026-10-24.md) | 合成协议、解析器、存储、CLI 控制通道、HTTP、资源限制、重试、逐请求记录、计价、迁移与保留期等 |
 | 页面桥接脚本 | `node --test browser/test_bridge.cjs` 46 项通过 | 模拟页面下的捕获、快照、信用协议、取消、身份与错误分类 |
-| WebUI | `vue-tsc --noEmit` 与 Vitest 26 项通过 | 前端类型与交互（模拟管理 API） |
-| CLI 冒烟 | Windows 36 项通过（2026-10-23）；Windows / Debian 各 34 项（2026-10-22） | init 不生成密钥、旧配置迁移、start/stop、在线存储、配置密钥轮换与清空、脱敏、热更新 |
+| WebUI | 2026-10-31，`vue-tsc --noEmit` 与 Vitest 8 个文件、41 项通过 | 前端类型与交互（模拟管理 API），包括模型目录替换、失败保留、统计与请求记录的筛选、分页、日期边界、生成设置与部分费用 |
+| CLI 冒烟 | ARM64 Termux 36 项通过（2026-10-31）；Windows 36 项通过（2026-10-23）；Windows / Debian 各 34 项（2026-10-22） | init 不生成密钥、旧配置迁移、start/stop、在线存储、配置密钥轮换与清空、脱敏、热更新 |
 | Responses 专项 | Windows 14 个用例、233 条断言 | JSON / 命名 SSE、usage、函数签名与完整历史、重复工具 ID、图片输入、schema、截断与失败状态、流式限额、FIN/RST 取消；未运行真实账号或 SDK 集成 |
 | Cookie 导入与专用脚本 | Windows / Debian 离线 HTTP 测试及 Node VM 测试通过 | 原版推送格式、独立密钥、元数据转换、分区过滤、身份检查、事务更新、队列限额、超时、取消与保存前撤销检查；未使用真实 Cookie |
 | Linux sanitizer 与模糊测试 | Debian 13 GCC 14.2 与 Clang 19 ASan/UBSan 均为 105 个用例、1,591 条断言通过；Clang ASan/UBSan 下 21 秒完成 878,837 次输入，无 sanitizer 错误 | 本机 WSL 2 原生 Linux；短时线路解析器冒烟，不是长期稳定性或完整覆盖证明 |
@@ -45,7 +45,8 @@ C++ HTTP 测试使用真实的回环 TCP、HTTP 分块编码、SQLite 和本地 
 | 范围 | 结果 | 能证明的范围 |
 |---|---|---|
 | Windows 构建与安装包 | MSVC 14.51、C++20、Release、静态运行库；CMake install、CPack ZIP、摘要与资产检查通过 | 本机编译链接；独立后端、脚本、清单、schema、文档与依赖许可证打包 |
-| WebUI 整合 | Windows 前端构建、内嵌与纯后端构建、安装与 ZIP 校验通过；合成实例登录、模型/密钥/配置页与日志 SSE 检查 | 本地管理界面集成；未在本机验证 Linux / Termux 的 WebUI 构建 |
+| ARM64 Termux 原生与 WebUI | 2026-10-31，原生构建/CTest、CLI 36 项、便携目录 59 项、Chromium 桌面/手机视口通过；见[模型目录与请求计价报告](reports/request-usage-pricing-2026-10-31.md) | Android API 35 实机上的合成与隔离验证，含模型页和展开生成设置的文字测量；未运行真实 Google 生成或完整设备验收清单 |
+| Windows WebUI 整合 | Windows 前端构建、内嵌与纯后端构建、安装与 ZIP 校验通过；合成实例登录、模型/密钥/配置页与日志 SSE 检查 | Windows 本地管理界面集成的既有验证 |
 | Debian 13 / WSL 2 | 普通用户、保持沙箱，CDP 1.3 与隔离上下文；C++ setup、TGZ 检查、已安装程序冒烟、Windows 到 WSL localhost 健康请求通过 | 系统依赖、锁定浏览器、CLI/IPC/HTTP；无真实账号；见 [报告](reports/debian13-wsl2-2026-10-20.md) |
 | 便携目录与本地浏览器包 | Windows / Debian 普通模式 35 项、内置浏览器模式 38 项；逐文件清单、SHA-256、许可证与无用户数据检查通过 | 更换工作目录、移动到含空格目录、用户目录无新增数据、配置密钥保留；见 [报告](reports/portable-browser-2026-10-20.md) |
 | 本地回放短测 | 4 个客户端、100 ms 间隔、120 秒，4,414 次全部成功 | 合成生成源下的 HTTP/SSE、调度与 CPU/RSS；不是浏览器或两小时验收；见 [性能工具](performance.md) |
@@ -58,7 +59,7 @@ C++ HTTP 测试使用真实的回环 TCP、HTTP 分块编码、SQLite 和本地 
 | 工具调用、思考签名、多模态、生图 | 图片与短音频输入通过；函数调用返回 403，结果回传与逐块签名的真实往返未验证；生图未测 |
 | 页面引导与身份确认 | Windows 真实账号通过；其他平台未用真实账号验收 |
 | Ubuntu 24.04 GCC/Clang | 已配置 CI；本机仅验证 Debian 13 |
-| Android 10+ ARM64 Termux | 原生构建与 proot 准备入口已实现，CI 容器构建；未在真实设备执行 |
+| Android 10+ ARM64 Termux | Android API 35 实机原生构建、离线测试和隔离 WebUI 已通过；干净安装及完整真实账号能力矩阵仍未完成 |
 | 三端干净环境自动准备、升级失败与回退 | 未完成真实验收 |
 | 至少两小时固定回放、浏览器资源与泄漏检查 | 未完成；短测不能代替 |
 | 同设备、同负载与原项目对照 | 未执行，无加速倍数结论 |
@@ -78,7 +79,7 @@ C++ HTTP 测试使用真实的回环 TCP、HTTP 分块编码、SQLite 和本地 
 - `/ready` 返回 `scope=local_prerequisites` 与 `google_verified=false`，它不是生成成功的证明。
 - 配置声明的模型标记为 `configured`，不把固定模型表当作实测能力。
 - `thinkingBudget` 与 `seed` 没有经过验证的私有协议映射，接受但忽略；`thinkingBudget=0` 不关闭思考。强制函数调用（ANY / required / 指定函数）、`VALIDATED` 与 strict JSON Schema 默认拒绝。详见 [协议合同](protocol.md)。
-- 当前只有一个驻留上下文和一个生成任务，没有多上下文并发调度。统计保存账号/模型的调用计数与 usage；日志不写正文、Cookie、API Key 或签名。
+- 当前只有一个驻留上下文和一个生成任务，没有多上下文并发调度。统计保存逐请求用量、参考价格快照与账号/模型累计；请求记录和日志不写正文、Cookie、API Key 或签名。
 - Termux 使用官方 proot-distro，其系统依赖包含 Python。C++ 后端与浏览器脚本运行时不依赖 Python/Node。系统包版本由平台包管理器决定，浏览器版本与桌面源码依赖则被锁定。
 
 ## 复核命令

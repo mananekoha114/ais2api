@@ -6,22 +6,24 @@ import FInfoBar from '../components/FInfoBar.vue'
 import PageHeader from '../components/PageHeader.vue'
 import ProgressRing from '../components/ProgressRing.vue'
 import { api, describeError, runOperation } from '../api/client'
-import type { ConfigView, Model } from '../api/types'
-import { copyText, notify, notifyError } from '../stores/ui'
-import { formatCompact, modelId } from '../utils/format'
+import type { ConfigView, Model, ModelCatalog } from '../api/types'
+import { copyText, notify } from '../stores/ui'
+import { formatCompact, formatTimestamp, modelId } from '../utils/format'
 
-const models = ref<Model[]>([])
+const catalog = ref<ModelCatalog>({ models: [], source: 'none', account_id: null, saved_at: null })
+const models = computed(() => catalog.value.models ?? [])
 const aliases = ref<Record<string, string>>({})
 const loading = ref(true)
 const refreshing = ref(false)
 const elapsed = ref(0)
 const loadError = ref('')
+const refreshError = ref('')
 const query = ref('')
 
 async function load() {
   try {
-    const [m, c] = await Promise.all([api.get<{ models: Model[] }>('/models'), api.get<ConfigView>('/config').catch(() => null)])
-    models.value = m.models ?? []
+    const [m, c] = await Promise.all([api.get<ModelCatalog>('/models'), api.get<ConfigView>('/config').catch(() => null)])
+    catalog.value = m
     aliases.value = c?.config.model_aliases ?? {}
     loadError.value = ''
   } catch (e) {
@@ -35,12 +37,14 @@ onMounted(load)
 async function refresh() {
   refreshing.value = true
   elapsed.value = 0
+  refreshError.value = ''
   try {
-    const result = await runOperation<{ models?: Model[] }>('/models/refresh', { onPoll: (ms) => (elapsed.value = Math.round(ms / 1000)) })
-    models.value = result.models ?? models.value
-    notify('success', `已发现 ${result.models?.length ?? 0} 个模型`)
+    const result = await runOperation<ModelCatalog>('/models/refresh', { onPoll: (ms) => (elapsed.value = Math.round(ms / 1000)) })
+    catalog.value = result
+    loadError.value = ''
+    notify('success', `已更新 ${result.models.length} 个模型`)
   } catch (e) {
-    notifyError('模型发现失败', e)
+    refreshError.value = describeError(e)
   } finally {
     refreshing.value = false
   }
@@ -52,7 +56,6 @@ const filtered = computed(() => {
   return models.value.filter((m) => [m.name, m.displayName, m.description].some((v) => typeof v === 'string' && v.toLowerCase().includes(q)))
 })
 
-const configuredOnly = computed(() => models.value.length > 0 && models.value.every((m) => m.source === 'configured'))
 const aliasEntries = computed(() => Object.entries(aliases.value))
 
 const methods = (m: Model) => (Array.isArray(m.supportedGenerationMethods) ? m.supportedGenerationMethods : [])
@@ -60,8 +63,8 @@ const methods = (m: Model) => (Array.isArray(m.supportedGenerationMethods) ? m.s
 
 <template>
   <div>
-    <PageHeader title="模型" subtitle="来自实时发现、缓存或显式配置的模型。网关不内置声称可用的模型清单。">
-      <button class="btn accent" :disabled="refreshing" @click="refresh">
+    <PageHeader title="模型" subtitle="查看和更新模型列表。">
+      <button class="btn accent" :disabled="loading || refreshing" @click="refresh">
         <ProgressRing v-if="refreshing" class="on-accent" /><FIcon v-else name="arrow_sync" />
         {{ refreshing ? `发现中 ${elapsed}s` : '实时发现' }}
       </button>
@@ -69,12 +72,7 @@ const methods = (m: Model) => (Array.isArray(m.supportedGenerationMethods) ? m.s
 
     <div class="stack" style="--gap: 12px">
       <FInfoBar v-if="loadError" severity="error" title="加载失败" :message="loadError" />
-      <FInfoBar v-if="refreshing" severity="info" message="正在通过浏览器访问 AI Studio 获取模型列表，冷启动可能需要十几秒。" />
-      <FInfoBar
-        v-if="configuredOnly && !refreshing"
-        severity="info"
-        message="当前仅显示 configured_models 中显式配置的模型，尚无实时发现的缓存。"
-      />
+      <FInfoBar v-if="refreshError" severity="error" title="发现失败" :message="refreshError" />
 
       <div class="row wrap">
         <div class="input-group search">
@@ -82,13 +80,15 @@ const methods = (m: Model) => (Array.isArray(m.supportedGenerationMethods) ? m.s
           <input v-model="query" class="input has-lead" type="search" placeholder="搜索模型" aria-label="搜索模型" />
         </div>
         <span class="t-secondary t-caption">{{ filtered.length }} / {{ models.length }} 个模型</span>
+        <span v-if="catalog.source !== 'none'" class="t-secondary t-caption">来源：{{ catalog.source === 'saved' ? '实时发现' : '手动配置' }}</span>
+        <time v-if="catalog.saved_at" class="t-secondary t-caption" :datetime="new Date(catalog.saved_at * 1000).toISOString()">更新于 {{ formatTimestamp(catalog.saved_at) }}</time>
       </div>
 
       <div v-if="loading" class="card-grid" style="--min: 280px">
         <div v-for="i in 6" :key="i" class="skeleton" style="height: 120px; border-radius: 8px" />
       </div>
       <div v-else-if="!models.length" class="card">
-        <EmptyState icon="cube" title="没有缓存的模型" message="执行一次实时发现，或在服务配置中添加 configured_models。">
+        <EmptyState icon="cube" title="暂无模型" message="点击“实时发现”获取模型列表。">
           <button class="btn accent" :disabled="refreshing" @click="refresh"><FIcon name="arrow_sync" />实时发现</button>
         </EmptyState>
       </div>
@@ -96,7 +96,6 @@ const methods = (m: Model) => (Array.isArray(m.supportedGenerationMethods) ? m.s
         <article v-for="m in filtered" :key="m.name" class="card model">
           <header class="row">
             <h2 class="t-body-strong grow truncate" :title="m.displayName || modelId(m.name)">{{ m.displayName || modelId(m.name) }}</h2>
-            <span v-if="m.source" class="badge outline">{{ m.source === 'configured' ? '配置' : m.source === 'cache' ? '缓存' : m.source }}</span>
           </header>
           <button class="id-btn mono" :title="'复制 ' + modelId(m.name)" @click="copyText(modelId(m.name), '模型 ID 已复制')">
             <span class="truncate">{{ modelId(m.name) }}</span>

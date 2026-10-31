@@ -52,7 +52,7 @@ export const proxyModeLabel = (mode: string | undefined) => (mode ? (PROXY_MODES
 export const cookieRefreshLabel = (value: string | undefined) => (value ? (COOKIE_REFRESH[value] ?? value) : '—')
 
 export function modelDiscoveryLabel(value: BrowserDiagnostics['modelDiscovery']) {
-  if (value === 'live_rpc_cache') return '已缓存实时结果'
+  if (value === 'live_rpc') return '已完成实时发现'
   if (value === 'not_loaded') return '尚未加载'
   return value ?? '—'
 }

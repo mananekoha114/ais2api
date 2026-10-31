@@ -76,8 +76,14 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 | GET | `/rotation` | 轮换与首选状态 |
 | POST | `/rotation/next` | 切换到下一个账号（不代表浏览器已就绪） |
 | POST | `/rotation/clear-cooldown` | 清除冷却；必填 `id`，可选精确匹配的 `model` |
-| GET | `/models` | 缓存的模型信息 |
-| POST | `/models/refresh` | 通过浏览器重新发现模型 |
+| GET | `/models` | 读取本地保存的模型信息，不启动浏览器 |
+| POST | `/models/refresh` | 通过浏览器重新发现，成功后整份保存 |
+
+`GET /models` 返回 `models`、`source`（`saved`、`configured` 或 `none`）、`account_id`（账号不存在时为 `null`）以及 `saved_at`（Unix 秒，未保存时为 `null`）。模型对象中的 `source` 同样标明 `saved` 或 `configured`。
+
+读取按当前账号、首选账号、首个账号的顺序选择一个账号，过期或冷却不会删除其保存记录；不会借用另一账号的结果。当前账号无保存结果时才使用 `configured_models`。OpenAI/Gemini 客户端的模型列表和详情也读取这份本地清单，首次为空时可在管理页面执行实时发现。
+
+刷新使用同一账号并强制重新访问上游，继续返回 HTTP 202，通过操作接口轮询。只有校验及数据库保存均成功时，操作才标为 `done`，其 `result` 与模型列表使用相同字段。无账号或账号被禁用、发现失败、无有效模型的异常结果以及保存失败均报告操作失败，旧清单与保存时间保持不变。删除账号同时删除该账号的清单。已保存不等于当前调用权限已验证。
 
 ### 密钥
 
@@ -103,10 +109,29 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 | POST | `/config/validate` | 只校验部分配置，不保存 |
 | POST | `/config/reload` | 重新读取配置文件与环境变量；存在需重启的差异时返回 409 |
 | GET、DELETE | `/stats` | 读取或重置用量统计 |
+| GET | `/usage/summary` | 累计或筛选范围的请求用量与估算费用 |
+| GET | `/usage/requests`、`/usage/requests/{id}` | 分页请求列表与单条详情 |
+| GET、POST | `/pricing`、`/pricing/refresh` | 价格来源状态、后台更新参考价格 |
 | GET、DELETE | `/operations/{id}` | 读取异步操作结果，或处理后释放 |
 | GET | `/logs/sources`、`/logs`、`/logs/stream` | 日志来源、历史与实时流，见下文 |
 | GET | `/diagnostics` | 脱敏诊断快照 |
 | POST | `/diagnostics/export` | 导出脱敏诊断快照 |
+
+## 请求记录与估算费用
+
+上述路径沿用管理 Bearer 鉴权。请求时间戳使用 Unix **毫秒**，价表的 `fetched_at` / `attempted_at` 使用 Unix **秒**。金额 `amount_nano` 为整数纳美元，单价 `*_pico` / `rate_pico` 为整数皮美元/token；`null` 表示未知，不能当作免费。
+
+列表支持 `from`（包含）、`to`（不包含）、实际 `model`、最终执行 `account`、`status`、完整 `id`。`account=:unassigned` 只匹配未分配账号的请求。`limit` 为 1–100，默认 100。首次返回 `snapshot` 和 `next_cursor`，后续传同一 `snapshot` 及 `before=next_cursor`，按进入服务的序号倒序读取；新插入请求不会挤动后续页。已执行完的记录不可变，活动记录的状态仍会更新；到期清理可以移除旧记录。`total` 为该边界内全部匹配条数，`next_cursor=null` 表示没有下一页。
+
+请求状态为 `queued`、`running`、`finishing`、`succeeded`、`failed`、`cancelled`、`interrupted`。详情返回 `attempts` 和允许保存的 `settings`，列表仅返回 `attempt_count`。`http_status` 与 `generation_completed`、`delivery_completed` 分列，流式错误即使已发送 HTTP 200 也会标为失败或取消。`finish_reason` 保存最终上游结束原因；内容拦截（如 `PROHIBITED_CONTENT`）记录为 `failed`、`error=content_filter`，生成未正常完成，但传输仍可完成，已收到的正文继续按原接口协议返回。尝试的 `completed` 表示收到上游终态，不等同生成成功。详情不存在或已过期返回 `404 request_not_found`。
+
+`GET /stats` 等价于无参数的累计汇总。`GET /usage/summary` 无参数默认 `scope=lifetime`，有筛选参数默认 `scope=filtered`；可显式指定。累计支持模型和账号筛选，读取留存清理后仍保有的累计；按日期、状态或编号查询使用 filtered，统计所有匹配的已结束明细，不接受分页参数。两种汇总的账号筛选都按分组归属：请求数属于最终执行账号，用量和费用属于实际消耗账号，因此账号可能有消耗却没有最终归属请求。请求列表的账号筛选仍按最终执行账号。返回 `records`、`totals`、`since`、`detail_since` 和 `legacy_records`：后者为功能启用前的原统计，不含可还原的逐请求时间或费用。查询早于 `detail_since` 时只覆盖仍可查询的部分。
+
+`totals.priced` / `unpriced` 分别表示完整计价和未完整计价请求数，`partially_priced` 是其中有已知费用的未完整计价请求数，完全未知数量为 `unpriced-partially_priced`。`amount_nano` 仍为完整计价请求的小计；新增 `known_amount_nano` 累加所有可确认的尝试金额，包含未完整计价请求的已知部分。单条 `cost.known_amount_nano` 为已知小计，无可知尝试时为 null；`unpriced_attempts` 为未完整计价的尝试数。已知零保留为零。请求失败不妨碍有依据的用量和金额入账，内部重试缺少用量也不推定免费。单条详情保留选定价表与计算分项，不因后台刷新重算。统计重置删除新旧累计及已结束请求明细；存在活动记录时返回 `409 requests_active`。
+
+数据库版本 3 会沿用原尝试的价格和金额，修正可查历史的费用与内容拦截分类，并按贡献差额更新累计。已到期删除的明细无法补回未知部分，原累计继续保留；不会用当前价格重估旧请求。
+
+`POST /pricing/refresh` 不带参数或提交空对象，返回 202 和当前刷新状态。价格更新在独立后台线程中运行，不占生成队列；固定来源为 [LiteLLM 模型价格目录](https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json) 和 [models.dev API](https://models.dev/api.json)，使用配置代理，不发送请求正文或凭据。目录缺失或超过 24 小时自动更新，失败保留各来源的旧有效版本并显示错误，失败来源最早一小时后自动重试。单次下载最多 32 MiB、30 秒，停止服务可取消。
 
 ## 配置保存与重启
 

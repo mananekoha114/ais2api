@@ -92,8 +92,10 @@ ais2api accounts probe all
 
 ## 6. 发出第一个请求
 
+首次导入账号后，先在控制台“模型”页执行“实时发现”，也可在服务运行时执行 `ais2api models list`。发现成功后按账号保存完整清单，服务重启后仍可读取；没有保存结果时可以通过 `configured_models` 提供备用列表。
+
 ```sh
-# 查看模型列表（首次会启动浏览器并实时发现模型，可能需要几十秒）
+# 查看已保存或显式配置的模型列表（只读本地，不触发发现）
 curl http://127.0.0.1:18451/v1/models -H "Authorization: Bearer YOUR_KEY"
 
 # OpenAI Chat Completions 流式请求

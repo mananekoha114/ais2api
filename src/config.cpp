@@ -151,6 +151,7 @@ json::object Config::to_json(bool portable_paths) const {
           {"ignore_unsupported_parameters", ignore_unsupported_parameters},
           {"search_model_drop_functions", search_model_drop_functions},
           {"browser_idle_seconds", browser_idle_seconds},
+          {"request_retention_days", request_retention_days},
           {"limits",
            {{"request_bytes", limits.request_bytes},
             {"object_bytes", limits.object_bytes},
@@ -222,7 +223,8 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
         {"AIS2API_BROWSER_SITE_ISOLATION", "browser_site_isolation"},
         {"AIS2API_IGNORE_UNSUPPORTED_PARAMETERS", "ignore_unsupported_parameters"},
         {"AIS2API_SEARCH_MODEL_DROP_FUNCTIONS", "search_model_drop_functions"},
-        {"AIS2API_BROWSER_IDLE_SECONDS", "browser_idle_seconds"}}) {
+        {"AIS2API_BROWSER_IDLE_SECONDS", "browser_idle_seconds"},
+        {"AIS2API_REQUEST_RETENTION_DAYS", "request_retention_days"}}) {
     auto v = env(pair.first);
     if (env_exists(pair.first)) {
       try {
@@ -287,7 +289,7 @@ static Config parse_config(Config c, json::object o, bool explicit_browser) {
   fields(o, {"version", "bind", "port", "api_key", "admin_key", "admin_origins", "cookie_import_key",
              "cookie_import_max_accounts", "cookie_import_timeout_seconds", "data_dir", "browser_executable",
              "proxy", "browser_proxy_relay", "browser_remote_allow_origins", "browser_site_isolation", "headless", "ignore_unsupported_parameters", "search_model_drop_functions", "browser_idle_seconds", "limits", "model_aliases",
-             "configured_models", "model_defaults"});
+             "configured_models", "model_defaults", "request_retention_days"});
   auto text = [&](const char *k) {
     if (!o.at(k).is_string())
       throw Error(400, "invalid_config", "Expected string: " + std::string(k));
@@ -344,6 +346,10 @@ static Config parse_config(Config c, json::object o, bool explicit_browser) {
   if (idle > 86400)
     throw Error(400, "invalid_config", "browser_idle_seconds must be 0 or 10..86400");
   c.browser_idle_seconds = static_cast<unsigned>(idle);
+  const auto retention = number(o.at("request_retention_days"));
+  if (retention < 1 || retention > 3650)
+    throw Error(400, "invalid_config", "request_retention_days must be 1..3650");
+  c.request_retention_days = static_cast<unsigned>(retention);
   if (!o.at("limits").is_object() || !o.at("model_aliases").is_object() ||
       !o.at("configured_models").is_array() ||
       !o.at("model_defaults").is_object())
@@ -470,6 +476,8 @@ void Config::validate() const {
   }
   if (browser_idle_seconds && (browser_idle_seconds < 10 || browser_idle_seconds > 86400))
     throw Error(400, "invalid_config", "browser_idle_seconds must be 0 or 10..86400");
+  if (request_retention_days < 1 || request_retention_days > 3650)
+    throw Error(400, "invalid_config", "request_retention_days must be 1..3650");
   if (!cookie_import_max_accounts || cookie_import_max_accounts > 32 ||
       !cookie_import_timeout_seconds || cookie_import_timeout_seconds > 240)
     throw Error(400, "invalid_config", "Cookie import permits 1..32 accounts and a 1..240 second timeout");
