@@ -1,0 +1,419 @@
+{
+  "schema_version": 1,
+  "source": "https://ai.google.dev/gemini-api/docs/pricing",
+  "published_at": "2026-10-31T10:40:01Z",
+  "currency": "USD",
+  "unit": "USD per 1M tokens",
+  "service_tier": "standard",
+  "models": {
+    "gemini-2.5-flash": {
+      "name": "Gemini 2.5 Flash",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 0.3,
+              "output": 2.5,
+              "cache_read": 0.03
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-2.5-flash-lite": {
+      "name": "Gemini 2.5 Flash-Lite",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 0.1,
+              "output": 0.4,
+              "cache_read": 0.01
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-2.5-pro": {
+      "name": "Gemini 2.5 Pro",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 1.25,
+              "output": 10.0,
+              "cache_read": 0.125
+            },
+            {
+              "above_tokens": 200000,
+              "input": 2.5,
+              "output": 15.0,
+              "cache_read": 0.25
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-3-flash-preview": {
+      "name": "Gemini 3 Flash Preview",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 0.5,
+              "output": 3.0,
+              "cache_read": 0.05
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-3-pro-image": {
+      "name": "Gemini 3 Pro Image (Nano Banana Pro)",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 2.0,
+              "output": 12.0,
+              "cache_read": null
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-3.1-flash-image": {
+      "name": "Gemini 3.1 Flash Image (Nano Banana 2)",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 0.5,
+              "output": 3.0,
+              "cache_read": null
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-3.1-flash-lite": {
+      "name": "Gemini 3.1 Flash-Lite",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 0.25,
+              "output": 1.5,
+              "cache_read": 0.025
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-3.1-flash-lite-image": {
+      "name": "Gemini 3.1 Flash Lite Image (Nano Banana 2 Lite)",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 0.25,
+              "output": 1.5,
+              "cache_read": null
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-3.1-flash-live-preview": {
+      "name": "Gemini 3.8 Live, Gemini 3.8 Live Extended Thinking, and Gemini 3.1 Flash Live Preview",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 0.75,
+              "output": 4.5,
+              "cache_read": null
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-3.1-pro-preview": {
+      "name": "Gemini 3.1 Pro Preview",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 2.0,
+              "output": 12.0,
+              "cache_read": 0.2
+            },
+            {
+              "above_tokens": 200000,
+              "input": 4.0,
+              "output": 18.0,
+              "cache_read": 0.4
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-3.1-pro-preview-customtools": {
+      "name": "Gemini 3.1 Pro Preview",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 2.0,
+              "output": 12.0,
+              "cache_read": 0.2
+            },
+            {
+              "above_tokens": 200000,
+              "input": 4.0,
+              "output": 18.0,
+              "cache_read": 0.4
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-3.5-flash-lite": {
+      "name": "Gemini 3.5 Flash-Lite",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 0.3,
+              "output": 2.5,
+              "cache_read": 0.03
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-3.6-flash": {
+      "name": "Gemini 3.6 Flash",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 0.75,
+              "output": 3.75,
+              "cache_read": 0.075
+            }
+          ]
+        },
+        {
+          "from": "2027-01-01",
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 1.5,
+              "output": 7.5,
+              "cache_read": 0.15
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-3.8-flash": {
+      "name": "Gemini 3.8 Flash",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 0.75,
+              "output": 3.75,
+              "cache_read": 0.075
+            }
+          ]
+        },
+        {
+          "from": "2027-01-01",
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 1.5,
+              "output": 7.5,
+              "cache_read": 0.15
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-3.8-live": {
+      "name": "Gemini 3.8 Live, Gemini 3.8 Live Extended Thinking, and Gemini 3.1 Flash Live Preview",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 0.75,
+              "output": 4.5,
+              "cache_read": null
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-3.8-live-extended-thinking": {
+      "name": "Gemini 3.8 Live, Gemini 3.8 Live Extended Thinking, and Gemini 3.1 Flash Live Preview",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 0.75,
+              "output": 4.5,
+              "cache_read": null
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-4-argon": {
+      "name": "Gemini 4 Argon",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 2.0,
+              "output": 10.0,
+              "cache_read": 0.1
+            }
+          ]
+        },
+        {
+          "from": "2026-12-01",
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 4.0,
+              "output": 20.0,
+              "cache_read": 0.2
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-nano-banana-2.1": {
+      "name": "Gemini Nano Banana 2.1",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 1.5,
+              "output": 7.5,
+              "cache_read": null
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-omni-1.1-flash": {
+      "name": "Gemini Omni Flash",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 1.5,
+              "output": 9.0,
+              "cache_read": null
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-robotics-er-2-preview": {
+      "name": "Gemini Robotics ER 2 Preview",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 1.0,
+              "output": 5.0,
+              "cache_read": 0.1
+            }
+          ]
+        },
+        {
+          "from": "2027-01-01",
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 2.0,
+              "output": 10.0,
+              "cache_read": 0.2
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-robotics-er-2-streaming-preview": {
+      "name": "Gemini Robotics ER 2 Streaming Preview",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 1.0,
+              "output": 5.0,
+              "cache_read": null
+            }
+          ]
+        },
+        {
+          "from": "2027-01-01",
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 2.0,
+              "output": 10.0,
+              "cache_read": null
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
