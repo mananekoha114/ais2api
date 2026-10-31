@@ -317,12 +317,15 @@ function exportCsv() {
           <div class="stack" style="--gap: 8px; margin-top: 12px">
             <FInfoBar v-if="priceError || prices?.error" severity="error" title="价格更新失败" :message="priceError || prices?.error || ''" />
             <div v-for="source in prices?.sources" :key="source.source" class="row wrap">
-              <strong>{{ source.source }}</strong>
+              <strong>Google 官方价格页</strong>
               <span>{{ source.models }} 个模型</span>
-              <span class="t-caption t-secondary grow">{{ source.fetched_at ? formatTimestamp(source.fetched_at) : '尚未获取' }}</span>
+              <span class="t-caption t-secondary grow">
+                {{ source.published_at ? `价格版本 ${formatTimestamp(Date.parse(source.published_at) / 1000)}` : '暂无价格' }}
+                · {{ source.embedded ? '内置快照，尚未联网更新' : source.fetched_at ? `更新于 ${formatTimestamp(source.fetched_at)}` : '尚未获取' }}
+              </span>
               <span v-if="source.error" class="t-caption">更新失败：{{ source.error }}</span>
             </div>
-            <p class="t-caption t-secondary">每日自动更新，更新失败继续使用已保存价格。每次请求保留当时的价格；估算结果不代表实际账单。</p>
+            <p class="t-caption t-secondary">价格由项目仓库定时从 Google 官方价格页抓取，每日自动从 GitHub 更新，更新失败继续使用已保存价格或内置快照。每次请求保留当时的价格；估算结果不代表实际账单。</p>
             <button class="btn" :disabled="prices?.refreshing" @click="refreshPrices">{{ prices?.refreshing ? '正在更新…' : '更新参考价格' }}</button>
           </div>
         </details>

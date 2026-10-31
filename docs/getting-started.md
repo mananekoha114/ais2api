@@ -92,7 +92,7 @@ ais2api accounts probe all
 
 ## 6. 发出第一个请求
 
-首次导入账号后，先在控制台“模型”页执行“实时发现”，也可在服务运行时执行 `ais2api models list`。发现成功后按账号保存完整清单，服务重启后仍可读取；没有保存结果时可以通过 `configured_models` 提供备用列表。
+导入账号后，服务会在后台自动获取一次模型清单；也可在控制台“模型”页执行“实时发现”，或在服务运行时执行 `ais2api models list` 手动刷新。发现成功后按账号保存完整清单，服务重启后仍可读取；没有保存结果时可以通过 `configured_models` 提供备用列表。
 
 ```sh
 # 查看已保存或显式配置的模型列表（只读本地，不触发发现）
@@ -129,7 +129,8 @@ ais2api stop
 | 路径 | 内容 |
 |---|---|
 | `config.json` | 配置文件（含明文密钥，请妥善保管） |
-| `data/state.sqlite3` | 账号、Cookie、统计等数据库 |
+| `data/state.sqlite3` | 账号、Cookie、冷却状态等数据库 |
+| `data/usage.sqlite3` | 请求记录、累计用量、价格缓存与已保存的模型清单 |
 | `data/service.log` | `start` 后台运行时的服务日志（JSON 行） |
 | `data/management.log` | 管理日志，超过 8 MiB 时轮转 |
 | `data/logs/browser-*.log` | 浏览器日志，只保留最近 8 份 |

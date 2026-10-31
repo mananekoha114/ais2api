@@ -16,6 +16,9 @@ struct Request {
     bool stream = false;
     bool include_usage = false;
     bool include_thoughts = true;
+    // Nonzero when maxOutputTokens equals the upstream's per-request output
+    // limit, where AI Studio fails with an internal error instead of stopping.
+    std::int64_t output_limit = 0;
     json::array ignored_parameters;
     json::object gemini;
 };
@@ -36,6 +39,10 @@ inline constexpr std::string_view upstream_ignored_key = "ais2apiUpstreamIgnored
 json::object decode_chunk(const json::value& wire_chunk);
 json::array take_upstream_ignored(json::object& event);
 void filter_thoughts(json::object& event);
+// Converts decoded usage to the public Gemini API form for native responses.
+// Internally candidatesTokenCount includes thoughtsTokenCount; the public field
+// excludes it, and zero thought/cache counts are omitted.
+void official_usage(json::object& event);
 bool has_content(const json::object& event);
 // Merges one streamed event into `aggregate`, failing without changes when the
 // result would exceed `byte_limit` serialized bytes. A caller merging a whole

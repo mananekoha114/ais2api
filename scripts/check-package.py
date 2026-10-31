@@ -191,7 +191,7 @@ def check(path: Path, with_browser=False, target='desktop') -> int:
         forbidden = {'.tools', '.analysis', '.git', 'vcpkg_installed', 'data', 'dumps', 'server-logs',
                      '.env', 'installation.json', 'config.yaml', 'config.json', 'config.local.json',
                      'credentials', 'secrets', 'cookies.json', 'cookies.txt', 'storage_state.json',
-                     'storage-state.json', 'service.log', 'state.sqlite3'}
+                     'storage-state.json', 'service.log', 'state.sqlite3', 'usage.sqlite3'}
         relative, roots, original = set(), set(), {}
         for name in names:
             member = PurePosixPath(name)

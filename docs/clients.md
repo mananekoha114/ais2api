@@ -78,7 +78,7 @@ curl "http://127.0.0.1:18451/v1beta/models/gemini-3.1-flash-lite:streamGenerateC
 
 ## 模型列表
 
-模型只来自三种来源：浏览器中的实时发现（`live`）、10 分钟内的发现缓存（`cache`）和配置项 `configured_models`（`configured`）。项目不内置“声称可用”的模型清单，列表中出现的模型也不保证当前账号有权限使用。
+模型只来自两种来源：浏览器实时发现后保存在本地的清单（`saved`）和配置项 `configured_models`（`configured`）。读取列表不会访问上游；清单在导入账号后自动获取一次，之后通过管理页面或 `ais2api models list` 手动刷新。项目不内置“声称可用”的模型清单，列表中出现的模型也不保证当前账号有权限使用。
 
 列表会为每个支持生成的 Gemini、Gemma 和图片模型追加一个 `<模型>-search` 条目（来源为 `search_variant`），见下一节。
 
@@ -103,9 +103,10 @@ curl "http://127.0.0.1:18451/v1beta/models/gemini-3.1-flash-lite:streamGenerateC
 
 ## 思考与签名
 
-- Gemini 的 `thinkingLevel` 可用（不区分大小写）；未指定时文本模型默认 `HIGH`，图片模型默认 `MINIMAL`。
-- `includeThoughts: false` 在网关隐藏思考文本，但模型仍会思考，签名、函数调用和 usage 保留。
-- `thinkingBudget` 与 `seed` 为兼容客户端而接受，但**不会生效**；`thinkingBudget: 0` 也不会关闭思考。
+- Gemini 的 `thinkingLevel` 可用（不区分大小写）；未指定时使用官方文档中的模型默认等级（如 Gemini 4 为 `MEDIUM`），未列出的文本模型默认 `HIGH`，图片模型默认 `MINIMAL`。Gemini 4 不支持 `MINIMAL`。
+- 原生 Gemini 接口与官方一致，只有 `includeThoughts: true` 时才返回思考文本；未设置或为 `false` 时在网关隐藏，但模型仍会思考，签名、函数调用和 usage 保留。
+- `thinkingBudget` 与 `seed` 为兼容客户端而接受，但**不会生效**；`thinkingBudget: 0` 也不会关闭思考。例外：Gemini 4 上单独的 `thinkingBudget: 0` 映射为 `LOW`，与 `thinkingLevel` 同时提供时报错。
+- Gemini 4 每次最多输出 32,768 token（含思考），不支持官方的续写（`continuationToken`）；更大的输出上限会被压到 32768，超长回答以 `MAX_TOKENS` / `length` 截断。
 - OpenAI 响应额外提供 `reasoning_content` 与 `thought_signature` 字段。多轮对话中原样回传模型给出的签名和 `call_gemini_...` 工具调用 ID 即可，详见 [真 role 与思考签名](true-role.md)。
 
 ## 兼容开关：忽略不支持的参数

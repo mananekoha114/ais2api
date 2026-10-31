@@ -31,6 +31,10 @@ inline std::optional<Error> rpc_status_error(std::int64_t code, unsigned retry_a
     if (http == 404 && lower.find("ambiguous request for service") != std::string::npos &&
         lower.find("generatecontent") != std::string::npos)
         error.code = "transient_rpc_route";
+    // AI Studio's answer to output past its per-request limit (and possibly to
+    // other internal faults); the service decides which one it was.
+    if (code == 13 && lower.find("internal error encountered") != std::string::npos)
+        error.code = "upstream_internal";
     if (http == 429) {
         if (lower.find("per minute") != std::string::npos || lower.find("perminute") != std::string::npos)
             error.quota_scope = "minute";

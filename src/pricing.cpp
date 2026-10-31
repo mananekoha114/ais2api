@@ -5,9 +5,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include "ais2api/pricing.hpp"
 #include <algorithm>
-#include <charconv>
+#include <chrono>
 #include <cmath>
-#include <map>
+#include <cstdio>
 
 namespace ais2api {
 namespace {
@@ -15,13 +15,17 @@ constexpr std::int64_t exact_limit = 9007199254740991LL;
 [[noreturn]] void invalid_catalog() {
     throw Error(502, "invalid_price_catalog", "Price source returned an invalid catalog");
 }
-json::value rate(const json::object &item, std::string_view key, double scale) {
+json::value rate(const json::object &item, std::string_view key, bool required) {
     auto value = item.if_contains(key);
-    if (!value || value->is_null())
+    if (!value || value->is_null()) {
+        if (required)
+            invalid_catalog();
         return nullptr;
+    }
     if (!value->is_number())
         invalid_catalog();
-    auto number = value->to_number<double>() * scale;
+    // USD per million tokens equals picodollars per token.
+    auto number = value->to_number<double>() * 1e6;
     if (!std::isfinite(number) || number < 0 || number > 1e12)
         invalid_catalog();
     auto rounded = std::round(number);
@@ -29,15 +33,13 @@ json::value rate(const json::object &item, std::string_view key, double scale) {
         invalid_catalog();
     return static_cast<std::int64_t>(rounded);
 }
-json::object tier(const json::object &item, std::int64_t above, bool lite,
-                  std::string suffix = {}) {
-    return {{"above_tokens", above},
-            {"input_pico",
-             rate(item, lite ? "input_cost_per_token" + suffix : "input", lite ? 1e12 : 1e6)},
-            {"output_pico",
-             rate(item, lite ? "output_cost_per_token" + suffix : "output", lite ? 1e12 : 1e6)},
-            {"cache_pico", rate(item, lite ? "cache_read_input_token_cost" + suffix : "cache_read",
-                                lite ? 1e12 : 1e6)}};
+bool iso_date(std::string_view text) {
+    if (text.size() != 10 || text[4] != '-' || text[7] != '-')
+        return false;
+    for (std::size_t i = 0; i < text.size(); ++i)
+        if (i != 4 && i != 7 && (text[i] < '0' || text[i] > '9'))
+            return false;
+    return true;
 }
 bool model_id(std::string_view id) {
     return !id.empty() && id.size() <= 256 &&
@@ -83,109 +85,110 @@ std::int64_t line_amount(std::int64_t tokens, std::int64_t price) {
 }
 } // namespace
 
-json::object parse_price_catalog(std::string_view source, const json::value &data,
-                                 std::int64_t fetched_at) {
-    if (!data.is_object() || (source != "litellm" && source != "models.dev"))
+json::object parse_price_catalog(const json::value &data, std::int64_t fetched_at) {
+    if (!data.is_object())
         invalid_catalog();
-    bool lite = source == "litellm";
-    const json::object *models = &data.as_object();
-    if (!lite) {
-        auto google = models->if_contains("google");
-        if (!google || !google->is_object())
-            invalid_catalog();
-        auto p = google->as_object().if_contains("models");
-        if (!p || !p->is_object())
-            invalid_catalog();
-        models = &p->as_object();
-    }
+    auto &root = data.as_object();
+    auto version = root.if_contains("schema_version");
+    auto published = root.if_contains("published_at");
+    auto models = root.if_contains("models");
+    if (!version || !version->is_int64() || version->as_int64() != 1 ||
+        string_or(root, "currency") != "USD" || !published || !published->is_string() ||
+        published->as_string().empty() || published->as_string().size() > 64 || !models ||
+        !models->is_object())
+        invalid_catalog();
     json::object result;
-    for (auto &entry : *models) {
+    for (auto &entry : models->as_object()) {
         std::string id(entry.key());
-        if (lite && !id.starts_with("gemini/"))
-            continue;
-        if (!entry.value().is_object())
+        if (!model_id(id) || !entry.value().is_object())
             invalid_catalog();
-        auto &item = entry.value().as_object();
-        if (lite &&
-            (string_or(item, "litellm_provider") != "gemini" || string_or(item, "mode") != "chat"))
-            continue;
-        if (lite)
-            id.erase(0, 7);
-        if (!model_id(id))
-            continue;
-        const json::object *cost = &item;
-        if (!lite) {
-            auto p = item.if_contains("cost");
-            if (!p || !p->is_object())
-                continue;
-            cost = &p->as_object();
-        }
-        std::map<std::int64_t, json::object> tiers;
-        tiers.emplace(0, tier(*cost, 0, lite));
-        if (tiers.at(0).at("input_pico").is_null() || tiers.at(0).at("output_pico").is_null())
-            continue;
-        bool supported = true;
-        if (lite) {
-            for (auto &field : *cost) {
-                std::string_view key = field.key();
-                if (!key.starts_with("input_cost_per_token_above_") &&
-                    !key.starts_with("output_cost_per_token_above_") &&
-                    !key.starts_with("cache_read_input_token_cost_above_"))
-                    continue;
-                auto start = key.find("_above_");
-                auto number = key.substr(start + 7);
-                auto end = number.find("k_tokens");
-                if (end == std::string_view::npos) {
-                    supported = false;
-                    continue;
-                }
-                // Alternate service tiers are not standard API rates.
-                if (end + 8 != number.size())
-                    continue;
-                std::int64_t threshold = 0;
-                auto parsed = std::from_chars(number.data(), number.data() + end, threshold);
-                if (parsed.ec != std::errc{} || parsed.ptr != number.data() + end ||
-                    threshold <= 0 || threshold > 1000000) {
-                    supported = false;
-                    continue;
-                }
-                threshold *= 1000;
-                tiers[threshold] = tier(*cost, threshold, true, std::string(key.substr(start)));
-            }
-        } else if (auto ts = cost->if_contains("tiers")) {
-            if (!ts->is_array())
-                invalid_catalog();
-            for (auto &t : ts->as_array()) {
-                if (!t.is_object())
-                    invalid_catalog();
-                auto condition = t.as_object().if_contains("tier");
-                if (!condition || !condition->is_object() ||
-                    string_or(condition->as_object(), "type") != "context") {
-                    supported = false;
-                    continue;
-                }
-                auto size = count(condition->as_object(), "size", true);
-                if (!size || *size <= 0)
-                    invalid_catalog();
-                if (tiers.contains(*size))
-                    invalid_catalog();
-                tiers[*size] = tier(t.as_object(), *size, false);
-            }
-        } else if (auto over = cost->if_contains("context_over_200k")) {
-            if (!over->is_object())
-                invalid_catalog();
-            tiers[200000] = tier(over->as_object(), 200000, false);
-        }
+        auto periods = entry.value().as_object().if_contains("periods");
+        if (!periods || !periods->is_array() || periods->as_array().empty())
+            invalid_catalog();
         json::array values;
-        for (auto &[threshold, value] : tiers)
-            values.emplace_back(std::move(value));
-        result[id] = json::object{
-            {"model", id},       {"source", source},       {"fetched_at", fetched_at},
-            {"currency", "USD"}, {"supported", supported}, {"tiers", std::move(values)}};
+        std::string previous;
+        for (auto &period : periods->as_array()) {
+            if (!period.is_object())
+                invalid_catalog();
+            auto &item = period.as_object();
+            auto from = item.if_contains("from");
+            // The first period has no start; later ones start on strictly
+            // increasing dates.
+            if (!from || (values.empty() ? !from->is_null()
+                                         : !from->is_string() || !iso_date(from->as_string()) ||
+                                               std::string_view(from->as_string()) <= previous))
+                invalid_catalog();
+            if (from->is_string())
+                previous = from->as_string();
+            auto tiers = item.if_contains("tiers");
+            if (!tiers || !tiers->is_array() || tiers->as_array().empty())
+                invalid_catalog();
+            json::array converted;
+            std::int64_t last = -1;
+            for (auto &tier : tiers->as_array()) {
+                if (!tier.is_object())
+                    invalid_catalog();
+                auto &t = tier.as_object();
+                auto above = count(t, "above_tokens", true);
+                if (!above || *above <= last || (converted.empty() && *above != 0))
+                    invalid_catalog();
+                last = *above;
+                converted.emplace_back(json::object{{"above_tokens", *above},
+                                                    {"input_pico", rate(t, "input", true)},
+                                                    {"output_pico", rate(t, "output", true)},
+                                                    {"cache_pico", rate(t, "cache_read", false)}});
+            }
+            values.emplace_back(json::object{{"from", *from}, {"tiers", std::move(converted)}});
+        }
+        result[id] = json::object{{"model", id},
+                                  {"source", price_source},
+                                  {"fetched_at", fetched_at},
+                                  {"published_at", *published},
+                                  {"currency", "USD"},
+                                  {"supported", true},
+                                  {"periods", std::move(values)}};
     }
     if (result.empty())
         invalid_catalog();
     return result;
+}
+
+std::string price_catalog_published(const json::object &catalog) {
+    for (auto &entry : catalog)
+        if (entry.value().is_object())
+            return string_or(entry.value().as_object(), "published_at");
+    return {};
+}
+
+json::object effective_quote(const json::object &entry, std::string_view date) {
+    auto quote = entry;
+    auto periods = quote.if_contains("periods");
+    if (!periods || !periods->is_array())
+        return {};
+    const json::object *selected = nullptr;
+    for (auto &period : periods->as_array()) {
+        auto &item = period.as_object();
+        auto &from = item.at("from");
+        if (from.is_null() || std::string_view(from.as_string()) <= date)
+            selected = &item;
+    }
+    if (!selected)
+        return {};
+    auto from = selected->at("from");
+    auto tiers = selected->at("tiers");
+    quote.erase("periods");
+    quote["effective_from"] = std::move(from);
+    quote["tiers"] = std::move(tiers);
+    return quote;
+}
+
+std::string utc_date() {
+    const auto day = std::chrono::year_month_day(
+        std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now()));
+    char text[16];
+    std::snprintf(text, sizeof text, "%04d-%02u-%02u", static_cast<int>(day.year()),
+                  static_cast<unsigned>(day.month()), static_cast<unsigned>(day.day()));
+    return text;
 }
 
 json::object estimate_tokens(const json::object &usage, const json::object &quote,

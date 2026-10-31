@@ -497,6 +497,16 @@ TEST_CASE("HTTP 200 RPC status envelopes retain scheduler error categories") {
     REQUIRE(http); CHECK(http->status == 503); CHECK(http->retry_after == 86400);
 }
 
+TEST_CASE("AI Studio internal errors are told apart from other server errors") {
+    auto internal = browser_detail::rpc_text_error(R"([[[13,"Internal error encountered."]]])");
+    REQUIRE(internal.has_value());
+    CHECK(internal->status == 500);
+    CHECK(internal->code == "upstream_internal");
+    auto other = browser_detail::rpc_text_error(R"([[[13,"Backend failed"]]])");
+    REQUIRE(other.has_value());
+    CHECK(other->code == "upstream_error");
+}
+
 TEST_CASE("generated tool arguments cannot masquerade as RPC errors") {
     json::array part{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                      json::array{"tool", json::object{{"error", {{"code", 8}, {"message", "user data"}}}, {"tuple", json::array{16, "user value"}}}}};

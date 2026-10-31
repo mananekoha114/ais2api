@@ -14,9 +14,13 @@ void summarize_request(json::object &record, bool terminal);
 
 // Joins producer completion and HTTP delivery. Either thread may finish first;
 // the stored terminal row and totals are written only after both have finished.
+// With `failed`, writes are queued without waiting (HTTP threads never block on
+// the database) and a write failure calls it; start() still waits so a request
+// does not run without its history. Without it, every write waits and throws.
 class RequestUsage {
   public:
-    RequestUsage(Store &store, std::string id, std::string endpoint);
+    RequestUsage(Store &store, std::string id, std::string endpoint,
+                 std::function<void()> failed = {});
     const std::string &id() const { return id_; }
     void configure(std::string_view model, bool stream);
     bool start();
@@ -30,12 +34,13 @@ class RequestUsage {
   private:
     Store &store_;
     const std::string id_;
+    const std::function<void()> failed_;
     std::mutex mutex_;
     json::object record_, quote_;
     bool started_ = false, producer_done_ = false, http_done_ = false, terminal_ = false;
     bool additional_ = false, attempt_open_ = false, usage_valid_ = true;
     Clock::time_point created_ = Clock::now(), started_at_ = created_;
-    void save();
+    void save(bool wait = false);
     void end_attempt_locked(std::string_view error);
 };
 } // namespace ais2api

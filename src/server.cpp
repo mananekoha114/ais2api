@@ -92,6 +92,8 @@ class Service {
             worker_.join();
         gateway_->close();
         prices_.stop();
+        // Queued request history reaches the database while logging still works.
+        try { store_.flush_requests(); } catch (...) {}
     }
     Config config() {
         std::lock_guard lock(config_mutex_);
@@ -311,7 +313,27 @@ class Service {
         // HTTP may reach only the explicitly allowlisted management routes,
         // behind the separate admin credential. IPC remains owner-only.
         auto cfg = config();
-        return manage(store_, cfg, command);
+        auto result = manage(store_, cfg, command);
+        if (action == "accounts.import")
+            discover_models_after_import(result.at("accounts").as_array());
+        return result;
+    }
+    // Model reads stay local, so an imported account without a saved catalog
+    // gets one background discovery. Best effort: the import already succeeded.
+    void discover_models_after_import(const json::array &accounts) {
+        try {
+            for (const auto &item : accounts) {
+                const auto id = string_or(item.as_object(), "id");
+                if (id.empty() || bool_or(item.as_object(), "disabled") || store_.has_model_catalog(id))
+                    continue;
+                auto operation = maintenance({{"command", "models.list"}, {"id", id}});
+                log({{"event", "model_discovery_scheduled"}, {"account_id", id},
+                     {"operation_id", operation.at("operation_id")}});
+                return;
+            }
+        } catch (const std::exception &error) {
+            log({{"event", "model_discovery_not_scheduled"}, {"reason", error.what()}});
+        }
     }
 
     std::shared_ptr<CookieImportJob> enqueue_cookie_import(json::object input,
@@ -361,6 +383,7 @@ class Service {
                     {"request_id", job->request_id}, {"imported_count", accounts.size()},
                     {"elapsed_ms", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-job->queued).count()}});
                 const auto count = accounts.size();
+                discover_models_after_import(accounts);
                 job->resolve({{"imported_count", count}, {"accounts", std::move(accounts)},
                               {"verification", "browser_identity_only"}, {"generation_verified", false},
                               {"details", std::move(verified.details)}});
@@ -487,15 +510,20 @@ class Service {
                      json::object result;
                      gateway_->reconfigure(config());
                      if (string_or(command, "command") == "models.list") {
-                         auto catalog = store_.model_catalog();
-                         if (catalog.account_id.empty())
-                             throw Error(503, "no_available_account", "No account for model discovery");
-                         const auto account = store_.account(catalog.account_id);
-                         if (account.disabled)
-                             throw Error(503, "no_available_account", "The model discovery account is disabled");
-                         auto values = gateway_->models(account, shutdown_.get_token());
+                         // Disabled, expired and cooled-down accounts are skipped;
+                         // an explicit id restricts discovery to that account.
+                         std::vector<std::string> excluded;
+                         if (auto only = string_or(command, "id"); !only.empty()) {
+                             (void)store_.account(only);
+                             for (auto &a : store_.accounts())
+                                 if (a.id != only) excluded.push_back(a.id);
+                         }
+                         auto account = store_.choose("model_discovery", excluded);
+                         if (!account)
+                             throw Error(503, "no_available_account", "No available account for model discovery");
+                         auto values = gateway_->models(*account, shutdown_.get_token());
                          check_cancel(shutdown_.get_token());
-                         auto saved = store_.save_models(account.id, std::move(values));
+                         auto saved = store_.save_models(account->id, std::move(values));
                          result = {{"models", std::move(saved.models)}, {"source", "saved"},
                                    {"account_id", saved.account_id}, {"saved_at", saved.saved_at}};
                      } else {
@@ -590,8 +618,27 @@ class Service {
                     }
             }
     }
+    // AI Studio cannot continue past its per-request output limit and fails
+    // with an internal error instead of ending with MAX_TOKENS. Take that error
+    // for the limit only when maxOutputTokens was the limit, output was already
+    // produced, and the last reported count (thinking included), if any, is
+    // near it.
+    static bool output_limit_reached(const Request &request, const Error &error, bool delivered,
+                                     const std::optional<json::object> &usage) {
+        if (!request.output_limit || !delivered || error.code != "upstream_internal") return false;
+        auto count = usage ? usage->if_contains("candidatesTokenCount") : nullptr;
+        return !count || !count->is_int64() || count->as_int64() >= request.output_limit * 9 / 10;
+    }
     void generate(const std::shared_ptr<Work> &work) {
-        if (!work->usage->start()) return;
+        try {
+            if (!work->usage->start()) return;
+        } catch (const std::exception &) {
+            // Report the real cause instead of letting the worker cancel the
+            // task as if the service were stopping.
+            usage_failure(work->usage->id());
+            work->pipe->finish(Error(503, "request_history_unavailable", "Request history could not be written"));
+            return;
+        }
         auto cfg = config();
         auto token = work->pipe->cancellation.get_token();
         struct Trace {
@@ -691,6 +738,7 @@ class Service {
                 { std::lock_guard lock(queue_mutex_); active_account_id_ = account->id; }
                 log({{"event", "generation_attempt"}, {"request_id", work->usage->id()},
                     {"account_id", account->id}, {"attempt", attempt+1}});
+                std::optional<json::object> last_usage;
                 try {
                     bool received = false;
                     bool completed = false;
@@ -698,6 +746,8 @@ class Service {
                         request, *account,
                         [&](json::object event) {
                             work->usage->event(event, has_content(event));
+                            if (auto usage = event.if_contains("usageMetadata"); usage && usage->is_object())
+                                last_usage = usage->as_object();
                             check_cancel(token);
                             for (auto &location : take_upstream_ignored(event))
                                 if (std::find(trace.upstream_ignored.begin(), trace.upstream_ignored.end(), location) ==
@@ -734,6 +784,26 @@ class Service {
                     work->pipe->finish();
                     return;
                 } catch (const Error &e) {
+                    if (output_limit_reached(request, e, delivered, last_usage) && !token.stop_requested()) {
+                        // Report the cut like the public API's MAX_TOKENS ending
+                        // and keep the partial answer.
+                        json::object event{{"candidates", json::array{json::object{
+                            {"index", 0},
+                            {"content", {{"role", "model"}, {"parts", json::array{}}}},
+                            {"finishReason", "MAX_TOKENS"}}}}};
+                        if (last_usage) event["usageMetadata"] = *last_usage;
+                        log({{"event", "output_limit_reached"}, {"request_id", work->usage->id()},
+                             {"account_id", account->id}, {"limit", request.output_limit}});
+                        work->usage->event(event, false);
+                        work->pipe->push(std::move(event),
+                                         Clock::now() + std::chrono::seconds(request.stream ? cfg.limits.stream_idle_seconds
+                                                                                            : cfg.limits.generation_seconds));
+                        store_.success(account->id, request.model);
+                        work->usage->end_attempt();
+                        work->usage->producer_done();
+                        work->pipe->finish();
+                        return;
+                    }
                     work->usage->end_attempt(e.code);
                     if (token.stop_requested() || delivered)
                         throw;
@@ -1499,9 +1569,14 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
                                : json::object{{"models", std::move(list)}});
         co_return;
     }
-    state.usage = std::make_shared<RequestUsage>(service.store(),
-        responses ? "resp_" + random_hex(16) : "chatcmpl-" + random_hex(12),
-        responses ? "responses" : openai ? "chat_completions" : "gemini");
+    {
+        // History writes from this coroutine are queued so the reactor never
+        // waits for SQLite; a failed write is logged from the database thread.
+        auto id = responses ? "resp_" + random_hex(16) : "chatcmpl-" + random_hex(12);
+        state.usage = std::make_shared<RequestUsage>(service.store(), id,
+            responses ? "responses" : openai ? "chat_completions" : "gemini",
+            [&service, id] { service.usage_failure(id); });
+    }
     auto content_type = request[http::field::content_type];
     if (!json_content_type(content_type))
         throw Error(415, "content_type", "Content-Type must be application/json");
@@ -1565,6 +1640,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
                       : openai ? openai_response(aggregate, work->model, work->usage->id(), &service.store(),
                                                work->principal)
                              : aggregate;
+        if (!responses && !openai) official_usage(output);
         co_await send_json(stream, 200, output);
         co_return;
     }
@@ -1606,7 +1682,8 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         auto output =
             openai ? openai_delta(*event, work->model, work->usage->id(), &service.store(), work->principal)
                    : *event;
-        if (openai) {
+        if (!openai) official_usage(output);
+        else {
             output["created"] = created;
             if (auto usage = output.if_contains("usage"))
                 final_usage = *usage;

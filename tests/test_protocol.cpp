@@ -650,10 +650,90 @@ TEST_CASE("Thought filtering retains attached signatures and model actions", "[p
     filter_thoughts(event);
     auto &parts = event.at("candidates").as_array()[0].as_object().at("content").as_object().at("parts").as_array();
     REQUIRE(parts.size() == 3);
-    REQUIRE(parts[0] == json::object{{"thoughtSignature", "keep"}});
+    REQUIRE(parts[0] == json::object{{"text", ""}, {"thoughtSignature", "keep"}});
     REQUIRE(parts[1].as_object().at("text") == "answer");
     REQUIRE(parts[2].as_object().if_contains("functionCall"));
     REQUIRE(parts[2].as_object().at("thoughtSignature") == "tool");
+}
+
+TEST_CASE("Native Gemini returns thoughts only on request", "[protocol]") {
+    auto body = obj(R"({"contents":[{"parts":[{"text":"x"}]}]})");
+    REQUIRE_FALSE(normalize_gemini("m", body, false, Config{}).include_thoughts);
+    REQUIRE(normalize_openai(obj(R"({"model":"m","messages":[{"role":"user","content":"x"}]})"), Config{})
+                .include_thoughts);
+    Config config;
+    config.model_defaults = obj(R"({"m":{"generationConfig":{"thinkingConfig":{"includeThoughts":true}}}})");
+    REQUIRE(normalize_gemini("m", body, false, config).include_thoughts);
+    // Upstream is still asked for thoughts so signatures and filtering stay local.
+    REQUIRE(encode_request(normalize_gemini("m", body, false, Config{}), {}, "s")[3].as_array()[16] ==
+            json::array{1, nullptr, nullptr, 3});
+}
+
+TEST_CASE("Default thinking levels and Gemini 4 thinking controls follow the published guide", "[protocol]") {
+    auto level = [](std::string model, std::string_view thinking) {
+        auto body = obj(R"({"contents":[{"parts":[{"text":"x"}]}]})");
+        if (!thinking.empty())
+            body["generationConfig"] = json::object{{"thinkingConfig", json::parse(thinking)}};
+        auto request = normalize_gemini(std::move(model), body, false, Config{});
+        return std::pair{encode_request(request, {}, "s")[3].as_array()[16].as_array()[3], request.ignored_parameters};
+    };
+    for (auto [model, wire] : {std::pair{"gemini-4-argon", 2}, {"Gemini-4-Argon-search", 2}, {"gemini-3.8-flash", 2},
+                               {"gemini-3.6-flash", 2}, {"gemini-3.1-flash-lite", 4}, {"gemini-3.5-flash-lite", 4},
+                               {"gemini-3-flash", 3}, {"gemini-2.5-pro", 3}, {"gemini-3.1-flash-lite-image", 4}})
+        REQUIRE(level(model, "").first == wire);
+    REQUIRE(level("gemini-4-argon", R"({"thinkingBudget":0})") == std::pair{json::value(1), json::array{}});
+    REQUIRE(level("gemini-4-argon", R"({"thinkingBudget":1024})") ==
+            std::pair{json::value(2), json::array{"generationConfig.thinkingConfig.thinkingBudget"}});
+    REQUIRE(level("gemini-4-argon", R"({"thinkingLevel":"high"})").first == 3);
+    // Older families keep ignoring budgets and accept both fields.
+    REQUIRE(level("gemini-3-flash", R"({"thinkingBudget":0,"thinkingLevel":"minimal"})").first == 4);
+    for (auto bad : {R"({"thinkingBudget":0,"thinkingLevel":"low"})", R"({"thinkingLevel":"MINIMAL"})"})
+        REQUIRE_THROWS_AS(level("gemini-4-argon", bad), Error);
+}
+
+TEST_CASE("Gemini 4 output stays within the AI Studio per-request limit", "[protocol]") {
+    auto max_tokens = [](std::string model, std::string_view generation) {
+        auto body = obj(R"({"contents":[{"parts":[{"text":"x"}]}]})");
+        if (!generation.empty()) body["generationConfig"] = json::parse(generation);
+        auto request = normalize_gemini(std::move(model), body, false, Config{});
+        return std::pair{encode_request(request, {}, "s")[3].as_array()[3], request.ignored_parameters};
+    };
+    REQUIRE(max_tokens("gemini-4-argon", "") == std::pair{json::value(32768), json::array{}});
+    REQUIRE(max_tokens("gemini-4-argon", R"({"maxOutputTokens":8192})") == std::pair{json::value(8192), json::array{}});
+    REQUIRE(max_tokens("gemini-4-argon", R"({"maxOutputTokens":32768})").first == 32768);
+    for (auto large : {R"({"maxOutputTokens":65536})", R"({"maxOutputTokens":18446744073709551615})"})
+        REQUIRE(max_tokens("gemini-4-argon", large) ==
+                std::pair{json::value(32768), json::array{"generationConfig.maxOutputTokens"}});
+    // Other families keep the upstream default and the caller's value.
+    REQUIRE(max_tokens("gemini-3-pro", "").first.is_null());
+    REQUIRE(max_tokens("gemini-3-pro", R"({"maxOutputTokens":65536})").first == 65536);
+    REQUIRE_THROWS_AS(max_tokens("gemini-4-argon", R"({"maxOutputTokens":-1})"), Error);
+    auto chat = normalize_openai(
+        obj(R"({"model":"gemini-4-argon","max_tokens":100000,"messages":[{"role":"user","content":"x"}]})"), Config{});
+    REQUIRE(encode_request(chat, {}, "s")[3].as_array()[3] == 32768);
+}
+
+TEST_CASE("Native usage reports visible output separately from thoughts", "[protocol]") {
+    auto event = decode_chunk(json::array{
+        nullptr, nullptr, json::array{10, 2, 15, 0, nullptr, nullptr, nullptr, nullptr, nullptr, 3}});
+    REQUIRE(event.at("usageMetadata").as_object().at("candidatesTokenCount") == 5);
+    official_usage(event);
+    REQUIRE(event.at("usageMetadata") ==
+            obj(R"({"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":15,"thoughtsTokenCount":3})"));
+    auto plain = decode_chunk(json::array{nullptr, nullptr, json::array{4, 1}});
+    official_usage(plain);
+    REQUIRE(plain.at("usageMetadata") == obj(R"({"promptTokenCount":4,"candidatesTokenCount":1,"totalTokenCount":5})"));
+}
+
+TEST_CASE("Finish reasons use the public enum numbers", "[protocol]") {
+    auto reason = [](int code) {
+        auto event = decode_chunk(json::parse("[[[null," + std::to_string(code) + "]]]"));
+        return event.at("candidates").as_array()[0].as_object().at("finishReason");
+    };
+    for (auto [code, name] : {std::pair{5, "OTHER"}, {6, "LANGUAGE"}, {12, "UNEXPECTED_TOOL_CALL"},
+                              {14, "IMAGE_PROHIBITED_CONTENT"}, {15, "IMAGE_OTHER"}, {16, "NO_IMAGE"},
+                              {17, "IMAGE_RECITATION"}, {18, "FINISH_REASON_UNSPECIFIED"}})
+        REQUIRE(reason(code) == name);
 }
 
 TEST_CASE("Executable code enums and function-response media survive request encoding",

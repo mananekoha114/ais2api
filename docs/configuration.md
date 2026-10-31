@@ -58,7 +58,7 @@
 | `search_model_drop_functions` | 布尔，`true` | 热更新 | `*-search` 模型同时收到自定义函数时：`true` 舍弃函数、保留搜索；`false` 保留函数、不加搜索。见 [搜索模型](protocol.md#search-models)。 |
 | `model_aliases` | 对象，`{}` | 热更新 | 模型别名，键为客户端使用的名称，值为实际模型 id，例如 `{"flash": "gemini-3.1-flash-lite"}`。 |
 | `model_defaults` | 对象，`{}` | 热更新 | 按模型 id 设置默认请求字段（Gemini 请求格式），客户端显式传入的字段优先。例如 `{"gemini-3.1-flash-lite": {"generationConfig": {"temperature": 0.7}}}`。 |
-| `configured_models` | 数组，`[]` | 热更新 | 手动声明的备用模型（字符串 id 或模型对象）。当前账号没有保存的发现结果时作为 `source: "configured"` 返回，不代表真实可用。实时发现失败会报错并保留旧清单，不会把备用模型保存为发现结果。 |
+| `configured_models` | 数组，`[]` | 热更新 | 手动声明的备用模型（字符串 id 或模型对象）。没有任何账号保存的发现结果时作为 `source: "configured"` 返回，不代表真实可用。实时发现失败会报错并保留旧清单，不会把备用模型保存为发现结果。 |
 
 ### 资源限额 `limits`
 
@@ -175,3 +175,4 @@ Chromium 不能直接使用带用户名密码的代理，也不支持 SOCKS 认�
 
 - `config.json` 以明文保存 `api_key`、`admin_key`、`cookie_import_key` 与代理凭据。`config show`、管理 API 与诊断输出会脱敏，但文件本身应按凭据保护。
 - Cookie 保存在权限受限的 SQLite 数据库 `data/state.sqlite3` 中，没有应用层加密。备份 `data/` 时同样应视为凭据。
+- 请求记录、累计用量、价格缓存和已保存的模型清单单独保存在 `data/usage.sqlite3`，不含 Cookie 或请求正文。`state.sqlite3` 保持旧版本可以读取的结构，因此可以回退到旧版本；删除 `usage.sqlite3` 只会清空这些统计与缓存，下次启动重新创建。曾在 `state.sqlite3` 中保存过请求记录的数据库（版本 2、3），首次启动时会把这些数据移入 `usage.sqlite3` 并恢复为版本 1。

@@ -9,8 +9,16 @@
 #include <thread>
 
 namespace ais2api {
+// Where the scheduled scraper publishes the catalog (see .github/workflows/pricing.yml).
+inline constexpr std::string_view price_catalog_url =
+    "https://raw.githubusercontent.com/mananekoha114/ais2api/pricing-data/gemini.json";
+// The catalog snapshot embedded at build time from pricing/gemini.json.
+std::string_view embedded_price_catalog();
+// Downloads the published catalog and keeps the newest of it, the stored copy
+// and the embedded snapshot.
 class PriceService {
   public:
+    // Receives the URL and the configured proxy.
     using Fetch =
         std::function<std::string(std::string_view, const std::string &, std::stop_token)>;
     PriceService(Store &store, std::function<Config()> config, bool automatic = true,
@@ -31,5 +39,6 @@ class PriceService {
     std::string error_;
     std::jthread worker_;
     void run(std::stop_token token);
+    void seed();
 };
 } // namespace ais2api

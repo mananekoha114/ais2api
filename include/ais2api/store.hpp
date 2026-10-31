@@ -6,6 +6,7 @@
 
 #pragma once
 #include "config.hpp"
+#include <functional>
 #include <memory>
 #include <limits>
 namespace ais2api {
@@ -26,6 +27,9 @@ struct BrowserFingerprint {
 // verified before it is stored (Cookie import) keeps the identity it was
 // verified with.
 unsigned default_fingerprint_seed(std::string_view account_id);
+// Where Store::backup writes the usage database: "<stem>-usage<extension>"
+// next to the state backup.
+fs::path usage_backup_path(const fs::path& target);
 struct ModelCatalog {
     std::string account_id;
     json::array models;
@@ -62,9 +66,11 @@ public:
     void remove_account(std::string_view id);
     void select_account(std::string_view id);
     void reset_account(std::string_view id);
-    // The current account, then the preferred account, then the first account.
-    // Saved information remains readable during expiry and cooldowns.
+    // The most recently saved catalog of any stored account, so switching or
+    // rotating accounts does not change the list. Saved information remains
+    // readable during expiry and cooldowns.
     ModelCatalog model_catalog();
+    bool has_model_catalog(std::string_view account_id);
     ModelCatalog save_models(std::string_view account_id, json::array models);
     json::object rotation_status();
     std::string rotate_account();
@@ -85,6 +91,13 @@ public:
     void begin_request(const json::object &record);
     // Terminal updates and lifetime aggregates commit together, exactly once.
     void save_request(const json::object &record, bool terminal);
+    // Asynchronous forms: queued behind earlier usage database work without
+    // waiting, so later reads still observe them. `failed` is called on the
+    // database thread when the write fails or the store is closing.
+    void begin_request(json::object record, std::function<void()> failed);
+    void save_request(json::object record, bool terminal, std::function<void()> failed);
+    // Waits until every queued request write has finished.
+    void flush_requests();
     json::object requests(const RequestQuery &query);
     json::object request(std::string_view id);
     void recover_requests();
@@ -92,6 +105,9 @@ public:
     json::object price_sources();
     void save_price_source(std::string_view source, const json::object &catalog,
                            std::int64_t fetched_at, std::string_view error = {});
+    // Stores a catalog that was not downloaded (fetched_at 0), keeping the
+    // download schedule and last error.
+    void seed_price_source(std::string_view source, const json::object &catalog);
     json::object price_quote(std::string_view model);
     json::array account_status();
     json::object create_key(std::string name);
@@ -105,6 +121,7 @@ public:
     std::optional<std::string> authenticate_managed(std::string_view secret);
     void put_tool(std::string_view principal, std::string_view call_id, const json::object& metadata);
     std::optional<json::object> get_tool(std::string_view principal, std::string_view call_id);
+    // Copies state.sqlite3 to `target` and usage.sqlite3 to usage_backup_path(target).
     void backup(const fs::path& target);
 private:
     struct Impl;

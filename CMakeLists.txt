@@ -33,6 +33,12 @@ add_custom_command(OUTPUT "${browser_bridge_inc}"
     "-DOUTPUT=${browser_bridge_inc}" -P "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-browser.cmake"
   DEPENDS browser/bridge.js scripts/embed-browser.cmake VERBATIM)
 target_sources(ais2api_core PRIVATE "${browser_bridge_inc}")
+set(pricing_snapshot_inc "${CMAKE_CURRENT_BINARY_DIR}/generated/pricing_snapshot.inc")
+add_custom_command(OUTPUT "${pricing_snapshot_inc}"
+  COMMAND "${CMAKE_COMMAND}" "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/pricing/gemini.json"
+    "-DOUTPUT=${pricing_snapshot_inc}" -P "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-pricing.cmake"
+  DEPENDS pricing/gemini.json scripts/embed-pricing.cmake VERBATIM)
+target_sources(ais2api_core PRIVATE "${pricing_snapshot_inc}")
 target_include_directories(ais2api_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 include(scripts/webui.cmake)
 target_include_directories(ais2api_core PUBLIC include)

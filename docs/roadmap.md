@@ -39,8 +39,8 @@
 
 - `decode64` 对每个字符线性查找字母表。
 - `rpc_text_error` 在前 16 KiB 填满后，每块仍重新解析同样的内容。
-- SQLite 在 WAL 模式下仍使用默认的 `synchronous=FULL`。
-- 存储调用在 HTTP 线程上同步等待。
+- 账号数据库 `state.sqlite3` 在 WAL 模式下仍使用默认的 `synchronous=FULL`；`usage.sqlite3` 使用 `NORMAL`。
+- 请求记录已改为后台排队写入，但鉴权、模型清单和管理接口读取等其他存储调用仍在 HTTP 线程上同步等待。
 - 每个请求多次复制整个配置。
 
 ## 已知的功能缺口

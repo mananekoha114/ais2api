@@ -10,6 +10,7 @@
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <sqlite3.h>
 #include <array>
 #include <algorithm>
 #include <atomic>
@@ -150,6 +151,14 @@ public:
             emit(calls);
             emit(finish_event());
             return;
+        }
+        if (request.model.starts_with("gemini-4-synthetic-limit")) {
+            // AI Studio's failure once output passes its per-request limit.
+            emit(text_event("hello "));
+            const auto output = request.model.ends_with("-early") ? 100 : 32000;
+            emit({{"usageMetadata", json::object{{"promptTokenCount", 4}, {"candidatesTokenCount", output},
+                                                 {"totalTokenCount", output + 4}}}});
+            throw Error(500, "upstream_internal", "Internal error encountered.");
         }
         emit(text_event("hello "));
         if (request.model == "synthetic-unfinished") return;
@@ -617,12 +626,68 @@ TEST_CASE("Client grounding options reach AI Studio wire over unary and SSE HTTP
     REQUIRE_FALSE(server.failed);
 }
 
+TEST_CASE("An internal error at the Gemini 4 output limit ends with MAX_TOKENS", "[generation][http][gemini-clients]") {
+    GenerationServer server;
+    const std::string question = R"({"contents":[{"parts":[{"text":"question"}]}]})";
+    auto unary = server.call("/v1beta/models/gemini-4-synthetic-limit:generateContent", question);
+    REQUIRE(unary.result_int() == 200);
+    auto result = json::parse(unary.body()).as_object();
+    auto candidate = result.at("candidates").as_array()[0].as_object();
+    CHECK(candidate.at("finishReason") == "MAX_TOKENS");
+    CHECK(json::serialize(candidate).find("hello ") != std::string::npos);
+    CHECK(result.at("usageMetadata").at("candidatesTokenCount") == 32000);
+    auto stream = server.call("/v1beta/models/gemini-4-synthetic-limit:streamGenerateContent", question);
+    REQUIRE(stream.result_int() == 200);
+    auto records = sse_records(stream.body());
+    REQUIRE_FALSE(records.empty());
+    CHECK(records.back().find("MAX_TOKENS") != std::string::npos);
+    CHECK(stream.body().find("error") == std::string::npos);
+    auto chat = server.call("/v1/chat/completions",
+                            R"({"model":"gemini-4-synthetic-limit","messages":[{"role":"user","content":"question"}]})");
+    REQUIRE(chat.result_int() == 200);
+    CHECK(json::parse(chat.body()).at("choices").at(0).at("finish_reason") == "length");
+    CHECK(server.state->calls == 3);
+    // Below the limit, or well before it, the same error stays an error.
+    for (const auto &[model, body] : std::vector<std::pair<std::string, std::string>>{
+             {"gemini-4-synthetic-limit", R"({"contents":[{"parts":[{"text":"q"}]}],"generationConfig":{"maxOutputTokens":1000}})"},
+             {"gemini-4-synthetic-limit-early", question}}) {
+        auto failed = server.call("/v1beta/models/" + model + ":streamGenerateContent", body);
+        INFO(model);
+        REQUIRE(failed.result_int() == 200);
+        auto events = sse_records(failed.body());
+        REQUIRE(events.size() >= 2);
+        CHECK(json::parse(events.back()).at("error").at("reason") == "upstream_internal");
+        CHECK(failed.body().find("MAX_TOKENS") == std::string::npos);
+    }
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("A request history failure at start is reported as such", "[generation][http][usage]") {
+    GenerationServer server;
+    REQUIRE(server.call("/v1beta/models/synthetic-unary:generateContent",
+                        R"({"contents":[{"parts":[{"text":"warm up"}]}]})").result_int() == 200);
+    sqlite3 *db = nullptr;
+    REQUIRE(sqlite3_open((server.config.data_dir / "usage.sqlite3").string().c_str(), &db) == SQLITE_OK);
+    REQUIRE(sqlite3_exec(db, "CREATE TRIGGER fail_start BEFORE UPDATE ON request_history WHEN NEW.status='running' "
+                             "BEGIN SELECT RAISE(ABORT,'synthetic history failure'); END",
+                         nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close(db);
+    auto response = server.call("/v1beta/models/synthetic-unary:generateContent",
+                                R"({"contents":[{"parts":[{"text":"question"}]}]})");
+    REQUIRE(response.result_int() == 503);
+    REQUIRE(response.body().find("request_history_unavailable") != std::string::npos);
+    REQUIRE(response.body().find("stopping") == std::string::npos);
+}
+
 TEST_CASE("includeThoughts filters text in unary and SSE while keeping signatures", "[generation][http][gemini-clients]") {
     GenerationServer server;
     for (bool streaming : {false, true}) {
-        for (bool include : {false, true}) {
+        // 0 omits includeThoughts, which returns no thoughts like the official API.
+        for (int mode : {0, 1, 2}) {
+            const bool include = mode == 2;
             auto body = json::parse(R"({"contents":[{"parts":[{"text":"question"}]}]})").as_object();
-            body["generationConfig"] = json::object{{"thinkingConfig", json::object{{"includeThoughts", include}}}};
+            if (mode)
+                body["generationConfig"] = json::object{{"thinkingConfig", json::object{{"includeThoughts", include}}}};
             auto target = std::string("/v1beta/models/synthetic-native-parts:") +
                           (streaming ? "streamGenerateContent?alt=sse" : "generateContent");
             auto response = server.call(target, json::serialize(body));
@@ -645,7 +710,8 @@ TEST_CASE("HTTP signatures survive streaming aggregation and next turn history",
     for (bool streaming : {false, true}) {
         auto target = std::string("/v1beta/models/synthetic-native-parts:") +
                       (streaming ? "streamGenerateContent" : "generateContent");
-        auto response = server.call(target, R"({"contents":[{"parts":[{"text":"question"}]}]})");
+        auto response = server.call(
+            target, R"({"contents":[{"parts":[{"text":"question"}]}],"generationConfig":{"thinkingConfig":{"includeThoughts":true}}})");
         REQUIRE(response.result_int() == 200);
         json::object result;
         unsigned signatures = 0;
@@ -1073,11 +1139,10 @@ TEST_CASE("Content-filtered responses retain their text across all protocols",
     GenerationServer server;
     Store store(server.config.data_dir);
     store.save_price_source(
-        "litellm",
+        "google",
         parse_price_catalog(
-            "litellm",
             json::parse(
-                R"({"gemini/synthetic-blocked":{"litellm_provider":"gemini","mode":"chat","input_cost_per_token":0.000001,"output_cost_per_token":0.000002}})"),
+                R"({"schema_version":1,"published_at":"2026-01-01T00:00:00Z","currency":"USD","models":{"synthetic-blocked":{"periods":[{"from":null,"tiers":[{"above_tokens":0,"input":1,"output":2}]}]}}})"),
             1),
         1);
     for (bool streaming : {false, true})

@@ -21,8 +21,9 @@
 模型发现与生成引导相互独立：等待所选账号身份确认后，捕获页面真实的 ListModels 请求（fetch 或 XHR），重放前检查账号槽位。它不需要提示词编辑器、Run 按钮、生成模板或快照服务。
 
 - 手动刷新每次重新请求上游；校验并完整保存后返回 `saved`，记录按账号持久保留，不随浏览器退出或服务重启消失。
-- `/v1/models`、`/v1beta/models` 及模型详情读取本地清单，不启动浏览器或排队发现。当前账号无保存记录时返回显式配置的 `configured_models`（`configured`），二者都没有时返回空列表。
-- 读取和刷新使用当前账号，其次是首选账号，均不存在时使用第一个账号。刷新失败或保存失败明确报告错误并保留旧结果，备用配置不作为发现结果保存。
+- `/v1/models`、`/v1beta/models` 及模型详情读取本地清单，不启动浏览器或排队发现。读取现存账号中最近一次保存的清单，不随账号切换或轮换变化；没有任何保存记录时返回显式配置的 `configured_models`（`configured`），二者都没有时返回空列表。
+- 刷新使用当前账号，其次是首选账号，再次是第一个账号，跳过已禁用、已过期或整体冷却中的账号。刷新失败或保存失败明确报告错误并保留旧结果，备用配置不作为发现结果保存。
+- 导入的账号尚无清单时，导入成功后在后台队列中自动发现一次（每批最多一次）。
 - 页面身份缺失或不明确，与“确认是另一个账号”是两种情况，都不允许跨账号复用结果。
 - 不会虚构模型目录或 API Key。
 
@@ -44,9 +45,11 @@
 
 ### 思考
 
-- `thinkingLevel` 不区分大小写。未指定时，文本模型默认 `HIGH`，id 中含 `image` 的模型默认 `MINIMAL`（与参考项目一致）。
-- `includeThoughts` 接受布尔值。`false` 会在聚合或 SSE 输出前移除思考文本，保留签名、函数调用和 usage；它不会关闭模型推理。
-- `thinkingBudget`（≥ -1 的整数）与 `seed`（整数）为兼容原生 Gemini 客户端而接受，但**被忽略**：私有上游没有经过验证的对应字段。字段名（不含值）记录在 `generation_parameters_ignored` 日志中。`thinkingBudget: 0` 不会关闭推理，也不会取消默认等级。
+- `thinkingLevel` 不区分大小写。未指定时按官方思考指南的模型默认值补全：`gemini-4*`、`gemini-3.6-flash*`、`gemini-3.8-flash*` 为 `MEDIUM`；`gemini-3.1-flash-lite*`、`gemini-3.5-flash-lite*` 与 id 中含 `image` 的模型为 `MINIMAL`；其他文本模型为 `HIGH`（与参考项目一致）。判断使用解析别名并去掉 `-search` 后缀的模型 id，不区分大小写。
+- `includeThoughts` 接受布尔值，与官方一致默认为 `false`：原生 Gemini 接口只在请求或 `model_defaults` 设为 `true` 时返回思考文本。被隐藏的思考在聚合或 SSE 输出前移除，带签名的思考部件变为官方使用的空文本签名部件 `{"text":"","thoughtSignature":...}`，函数调用和 usage 保留；它不会关闭模型推理。Chat Completions 与 Responses 默认仍输出思考（`reasoning_content` / reasoning 项）。
+- Gemini 4（`gemini-4*`）与官方规则一致：拒绝 `thinkingLevel: MINIMAL`；请求同时提供 `thinkingLevel` 与 `thinkingBudget` 时返回 400；只提供 `thinkingBudget: 0` 时映射为 `LOW`（无法关闭思考，取最接近的等级）。官方没有公开其他预算值到等级的阈值，因此其他单独的预算值保持模型默认等级。
+- Gemini 4 经 AI Studio 上游每次最多输出 32,768 token（含思考 token）。超过时上游以 `Internal error encountered.` 中断生成，网页端也没有官方 API 的续写机制，因此 `CONTINUATION` / `continuationToken` 无法提供，请求中的 `continuationToken` 仍按未知字段拒绝。为让超长输出以 `MAX_TOKENS`（OpenAI 为 `length`）正常截断，而不是在中途报错，未指定 `maxOutputTokens` 时补为 32768，超过 32768 时压到 32768，并把 `generationConfig.maxOutputTokens` 记入 `generation_parameters_ignored`。Chat Completions 的 `max_tokens` / `max_completion_tokens` 同样适用。上限为 32768 时，如果上游在已有输出后仍返回 `Internal error encountered.`，且最近一次报告的输出 token 数（含思考）不低于上限的 90% 或上游未报告，网关视为到达上限：以 `MAX_TOKENS` 结束并保留已输出的内容，用量为上游最后一次报告的数值，同时记录 `output_limit_reached` 日志。上限更小、尚无输出，或报告的输出明显不到上限时，该错误照常返回（无输出时按上游错误重试）。
+- 除上述 Gemini 4 映射外，`thinkingBudget`（≥ -1 的整数）与 `seed`（整数）为兼容原生 Gemini 客户端而接受，但**被忽略**：私有上游没有经过验证的对应字段。字段名（不含值）记录在 `generation_parameters_ignored` 日志中。`thinkingBudget: 0` 在其他模型上不会关闭推理，也不会取消默认等级。
 
 ### 字段别名与取值
 
@@ -223,7 +226,7 @@ OpenAI 流式数据块在 `choices[].delta.ais2api.gemini_delta` 中携带完整
 - 上游帧格式为可选的 `)]}'` XSSI 前缀，后接外层数组，内含若干批响应数据块数组。有界解析器每解析出一个深度为 3 的数据块就输出并丢弃其字节，然后才读取下一个。
 - 网络分块位置、UTF-8 码元、JSON 转义以及包含括号的字符串可以出现在任何位置。无效前缀、无效的数据块 JSON/UTF-8、嵌套过深、数据块过大、外层分隔符错误以及末尾截断都会明确失败。解析器只缓存当前数据块和两个字节的外层状态，不缓存完整响应；只有外层数组完整闭合，`finish()` 才算成功。
 - 聚合按序列化后的字节数设限。思考标志相同的相邻普通文本部件可以拼接；带签名的部件和其他原生载荷保持独立。usage 与 finish 元数据以最新快照替换，而不是累加。大小检查失败时保留之前的聚合结果不变。内容判定忽略响应 ID、usage 和仅含 finish 的元数据，从而区分元数据与第一个可见内容或模型动作。
-- 结束原因覆盖全部已知上游代码。OpenAI 把 token 用尽映射为 `length`，安全/复述拦截映射为 `content_filter`，函数调用完成映射为 `tool_calls`，其他完成映射为 `stop`。`candidatesTokenCount` 包含可见输出与思考 token，`thoughtsTokenCount` 单独提供；OpenAI 输出 `reasoning_tokens` 与 `cached_tokens` 明细。HTTP/gRPC 错误分类与重试由运行时和传输层负责，不在编解码器内。
+- 结束原因覆盖全部已知上游代码。OpenAI 把 token 用尽映射为 `length`，安全/复述拦截映射为 `content_filter`，函数调用完成映射为 `tool_calls`，其他完成映射为 `stop`。内部归一结果中 `candidatesTokenCount` 包含可见输出与思考 token，`thoughtsTokenCount` 单独提供；原生 Gemini 响应按官方口径输出，`candidatesTokenCount` 不含思考 token，为 0 的 `thoughtsTokenCount` 与 `cachedContentTokenCount` 省略。上游结束码按公开 proto 的 `FinishReason` 编号解码，未知编号记为 `FINISH_REASON_UNSPECIFIED`。OpenAI 输出 `reasoning_tokens` 与 `cached_tokens` 明细。HTTP/gRPC 错误分类与重试由运行时和传输层负责，不在编解码器内。
 
 ## HTTP 细节
 
@@ -235,7 +238,7 @@ OpenAI 流式数据块在 `choices[].delta.ais2api.gemini_delta` 中携带完整
 
 每次尝试只采用最新用量快照，跨尝试的可确认用量只归集一次。此处消费本项目解码器的归一结果：`promptTokenCount` 包含缓存输入，`candidatesTokenCount` 已包含 `thoughtsTokenCount`。计价把非缓存输入、缓存读取、可见输出和思考分列，思考按输出单价计费且不会再次增加总输出。未知消耗保留未完整状态；失败不自动等于零消耗。尚未进入任何上游尝试的拒绝请求可确认费用为零。
 
-价格来源按 LiteLLM 的 Google Gemini 直连目录、models.dev 的 Google 提供方目录排序，使用解析别名和 search 后缀后的真实模型精确匹配。单价以皮美元/token、金额以纳美元保存，每个分项四舍五入到纳美元再相加；上下文阶梯按单次尝试的完整输入量判断。执行时选定的来源、获取时间、单价和金额随请求保存，后续更新不改写历史费用。需要独立计费的搜索、非文本模态或其他无法可靠还原的维度保持未完整计价；估算不是实际账单。
+价格取自 Google 官方价格页 Standard 付费档的文本 token 单价（输入、含思考的输出、缓存读取），按解析别名和 search 后缀后的真实模型精确匹配；页面上公布的调价（如“through … / starting …”）按请求时的 UTC 日期选用对应价格。音频、图片输出、按次搜索、存储等其他维度不在目录中。单价以皮美元/token、金额以纳美元保存，每个分项四舍五入到纳美元再相加；上下文阶梯按单次尝试的完整输入量判断。执行时选定的来源、获取时间、单价和金额随请求保存，后续更新不改写历史费用。需要独立计费的搜索、非文本模态或其他无法可靠还原的维度保持未完整计价；估算不是实际账单。
 
 主请求数归属最终执行账号，已确认用量按各尝试的执行账号归集。完整费用字段只计全部尝试均完整计价的请求；已知小计另行纳入所有已确认尝试的金额，并按实际尝试账号归集，所以账号用量行可能有消耗而没有最终归属请求。`PROHIBITED_CONTENT` 等内容拦截属于生成失败，传输完成和收到上游终态不改变失败分类；已返回的正文与可确认用量仍保留。Chat Completions 使用 `content_filter`，Gemini 保留原始 `finishReason`，Responses 使用 `incomplete` / `response.incomplete`。明细到期后保留累计，旧统计单列原口径，详见[管理 API](management-api.md#请求记录与估算费用)。
 

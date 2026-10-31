@@ -510,14 +510,15 @@ void apply_extension(json::object &body, const json::object &ext) {
         }
     }
 }
+// Indexed by the Candidate.FinishReason numbers of the public generativelanguage proto.
 std::string finish_name(std::int64_t n) {
     static const char *names[] = {"FINISH_REASON_UNSPECIFIED",
                                   "STOP",
                                   "MAX_TOKENS",
                                   "SAFETY",
                                   "RECITATION",
-                                  "LANGUAGE",
                                   "OTHER",
+                                  "LANGUAGE",
                                   "BLOCKLIST",
                                   "PROHIBITED_CONTENT",
                                   "SPII",
@@ -526,9 +527,9 @@ std::string finish_name(std::int64_t n) {
                                   "UNEXPECTED_TOOL_CALL",
                                   "TOO_MANY_TOOL_CALLS",
                                   "IMAGE_PROHIBITED_CONTENT",
+                                  "IMAGE_OTHER",
                                   "NO_IMAGE",
-                                  "IMAGE_RECITATION",
-                                  "IMAGE_OTHER"};
+                                  "IMAGE_RECITATION"};
     return n >= 0 && n < 18 ? names[n] : names[0];
 }
 // Records an ignored upstream wire location once per chunk.
@@ -1114,9 +1115,35 @@ void prepare_optional_schema(json::object &owner, std::string_view key, Request 
 } // namespace
 
 namespace {
+std::string model_family(std::string model) {
+    std::transform(model.begin(), model.end(), model.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return model;
+}
+const json::object *thinking_config(const json::object &request) {
+    auto generation = request.if_contains("generationConfig");
+    if (!generation || !generation->is_object()) return nullptr;
+    auto thinking = generation->as_object().if_contains("thinkingConfig");
+    return thinking && thinking->is_object() ? &thinking->as_object() : nullptr;
+}
+// AI Studio fails a Gemini 4 generation with "Internal error encountered." once
+// output, thinking included, passes this many tokens; it has no continuation.
+constexpr std::int64_t gemini4_output_limit = 32768;
+// The level a model uses without thinkingConfig, per the published Gemini
+// thinking guide. Unlisted text models keep HIGH like the reference client.
+std::string default_thinking_level(std::string_view family, bool image) {
+    if (image || family.starts_with("gemini-3.1-flash-lite") || family.starts_with("gemini-3.5-flash-lite"))
+        return "MINIMAL";
+    if (family.starts_with("gemini-4") || family.starts_with("gemini-3.6-flash") ||
+        family.starts_with("gemini-3.8-flash"))
+        return "MEDIUM";
+    return "HIGH";
+}
 // `search` enables the `*-search` behavior for an explicit OpenAI search request.
+// `thoughts_by_default` is the includeThoughts value when no request or model
+// default sets it: the native Gemini API returns thoughts only on request.
 Request normalize_native(std::string model, const json::object &input, bool stream,
-                         const Config &config, bool search) {
+                         const Config &config, bool search, bool thoughts_by_default) {
     auto canonical = input;
     canonical_gemini(canonical);
     if (!config.ignore_unsupported_parameters && canonical.if_contains("cachedContent"))
@@ -1140,6 +1167,9 @@ Request normalize_native(std::string model, const json::object &input, bool stre
             apply_extension(r.gemini, extension);
         }
     }
+    if (auto t = thinking_config(r.gemini); t && t->if_contains("thinkingLevel") &&
+        t->if_contains("thinkingBudget") && model_family(r.model).starts_with("gemini-4"))
+        invalid("thinkingBudget cannot be combined with thinkingLevel for Gemini 4 models");
     if (auto d = config.model_defaults.if_contains(r.model)) {
         auto defaults = object(*d, "model defaults");
         canonical_gemini(defaults);
@@ -1149,12 +1179,22 @@ Request normalize_native(std::string model, const json::object &input, bool stre
     discard_search_options(r.gemini, r.ignored_parameters);
     if (search_model)
         apply_search_model(r.gemini, image, config.search_model_drop_functions, r.ignored_parameters);
-    json::object family_generation{{"thinkingConfig", json::object{{"thinkingLevel", image ? "MINIMAL" : "HIGH"}}}};
+    const auto family = model_family(r.model);
+    const bool gemini4 = family.starts_with("gemini-4");
+    auto level = default_thinking_level(family, image);
+    bool budget_mapped = false;
+    if (auto t = thinking_config(r.gemini); gemini4 && t && !t->if_contains("thinkingLevel"))
+        if (auto budget = t->if_contains("thinkingBudget"); budget && budget->is_int64() && budget->as_int64() == 0) {
+            // Gemini 4 maps a lone budget to the nearest level and cannot disable
+            // thinking, so 0 becomes the lowest level. Other budgets keep the
+            // default: their level thresholds are not published.
+            level = "LOW";
+            budget_mapped = true;
+        }
+    json::object family_generation{{"thinkingConfig", json::object{{"thinkingLevel", level}}}};
     if (image) family_generation["responseModalities"] = json::array{"IMAGE"};
+    if (gemini4) family_generation["maxOutputTokens"] = gemini4_output_limit;
     json::object family_defaults{{"generationConfig", family_generation}};
-    auto family = r.model;
-    std::transform(family.begin(), family.end(), family.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (!image && (family.starts_with("gemini-") || family.starts_with("gemma-"))) {
         json::array safety;
         for (auto category : {"HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
@@ -1163,6 +1203,15 @@ Request normalize_native(std::string model, const json::object &input, bool stre
         family_defaults["safetySettings"] = safety;
     }
     merge_request_defaults(r.gemini, family_defaults);
+    if (auto g = r.gemini.if_contains("generationConfig"); gemini4 && g && g->is_object())
+        if (auto max = g->as_object().if_contains("maxOutputTokens"); max && (max->is_int64() || max->is_uint64())) {
+            if (number(*max, INT64_MAX) > gemini4_output_limit) {
+                // Ending at the limit with MAX_TOKENS keeps the partial answer.
+                *max = gemini4_output_limit;
+                r.ignored_parameters.push_back("generationConfig.maxOutputTokens");
+            }
+            if (number(*max, 0) == gemini4_output_limit) r.output_limit = gemini4_output_limit;
+        }
     if (config.ignore_unsupported_parameters)
         discard_gemini_controls(r.gemini, r.model, r.ignored_parameters);
     // Do this once at each schema root so local references resolve against the
@@ -1187,6 +1236,7 @@ Request normalize_native(std::string model, const json::object &input, bool stre
         content_wire(object(*p, "systemInstruction"), true);
     if (auto p = r.gemini.if_contains("generationConfig"))
         generation_wire(object(*p, "generationConfig"));
+    r.include_thoughts = thoughts_by_default;
     if (auto g = r.gemini.if_contains("generationConfig")) {
         auto &generation = g->as_object();
         if (generation.if_contains("seed")) r.ignored_parameters.push_back("generationConfig.seed");
@@ -1194,8 +1244,10 @@ Request normalize_native(std::string model, const json::object &input, bool stre
             auto &thinking = p->as_object();
             if (auto include = thinking.if_contains("includeThoughts"))
                 r.include_thoughts = include->as_bool();
-            if (thinking.if_contains("thinkingBudget"))
+            if (thinking.if_contains("thinkingBudget") && !budget_mapped)
                 r.ignored_parameters.push_back("generationConfig.thinkingConfig.thinkingBudget");
+            if (gemini4 && upper(string_or(thinking, "thinkingLevel")) == "MINIMAL")
+                invalid("thinkingLevel MINIMAL is not supported by Gemini 4 models");
         }
     }
     const json::object *tc = nullptr;
@@ -1221,7 +1273,7 @@ Request normalize_native(std::string model, const json::object &input, bool stre
 
 Request normalize_gemini(std::string model, const json::object &input, bool stream,
                          const Config &config) {
-    return normalize_native(std::move(model), input, stream, config, false);
+    return normalize_native(std::move(model), input, stream, config, false, false);
 }
 
 bool lists_search_variant(std::string_view id, const json::object &entry) {
@@ -1323,8 +1375,14 @@ void filter_thoughts(json::object &event) {
             if (!it->is_object() || !bool_or(it->as_object(), "thought") ||
                 !it->as_object().if_contains("text")) { ++it; continue; }
             auto &part = it->as_object();
-            part.erase("text");
             part.erase("thought");
+            // A signature stays on an empty text part, the carrier the official API uses.
+            if (part.if_contains("thoughtSignature")) {
+                part["text"] = "";
+                ++it;
+                continue;
+            }
+            part.erase("text");
             if (part.empty()) it = items.erase(it);
             else ++it;
         }
@@ -1406,6 +1464,17 @@ json::array take_upstream_ignored(json::object &event) {
         locations = std::move(p->as_array());
     event.erase(upstream_ignored_key);
     return locations;
+}
+
+void official_usage(json::object &event) {
+    auto p = event.if_contains("usageMetadata");
+    if (!p || !p->is_object()) return;
+    auto &usage = p->as_object();
+    const auto thoughts = usage.if_contains("thoughtsTokenCount") ? number(usage.at("thoughtsTokenCount")) : 0;
+    if (auto candidates = usage.if_contains("candidatesTokenCount"))
+        *candidates = std::max<std::int64_t>(0, number(*candidates) - thoughts);
+    for (auto key : {"thoughtsTokenCount", "cachedContentTokenCount"})
+        if (auto count = usage.if_contains(key); count && number(*count) == 0) usage.erase(key);
 }
 
 bool has_content(const json::object &event) {
@@ -2152,7 +2221,7 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
         for (auto &kv : options)
             ignored_parameter(discarded, "web_search_options." + std::string(kv.key()));
     }
-    auto request = normalize_native(model, body, bool_or(input, "stream"), config, search);
+    auto request = normalize_native(model, body, bool_or(input, "stream"), config, search, true);
     for (const auto &parameter : discarded)
         ignored_parameter(request.ignored_parameters, str(parameter));
     request.protocol = Protocol::openai;

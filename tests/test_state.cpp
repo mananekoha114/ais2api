@@ -263,6 +263,7 @@ TEST_CASE("SQLite backup restores account statistics and key authentication") {
     }
     fs::create_directories(d.path / "restored");
     fs::copy_file(backup, d.path / "restored" / "state.sqlite3");
+    fs::copy_file(usage_backup_path(backup), d.path / "restored" / "usage.sqlite3");
     Store restored(d.path / "restored");
     CHECK(restored.accounts().size() == 1);
     CHECK(restored.authenticate(key));

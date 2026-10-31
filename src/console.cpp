@@ -285,6 +285,19 @@ std::optional<Line> describe(const json::object &r) {
         line.title = "后台任务失败";
         line.add(short_id(text_of(r, "operation_id")));
         line.add(text_of(r, "code"));
+    } else if (event == "output_limit_reached") {
+        line.level = Level::warning;
+        line.title = "输出达到上游单次上限，按 MAX_TOKENS 结束";
+        line.add(text_of(r, "limit") + " token");
+        line.add(short_id(text_of(r, "request_id")));
+    } else if (event == "model_discovery_scheduled") {
+        line.title = "导入的账号将获取模型列表";
+        line.add(text_of(r, "account_id"));
+        line.add(short_id(text_of(r, "operation_id")));
+    } else if (event == "model_discovery_not_scheduled") {
+        line.level = Level::warning;
+        line.title = "未能安排获取模型列表";
+        line.add(text_of(r, "reason"));
     } else if (event == "journal_rotated") {
         line.title = "日志已轮转";
     } else if (event == "setup_stage") {

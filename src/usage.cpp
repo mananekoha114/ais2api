@@ -73,7 +73,10 @@ json::object recorded_settings(const json::object &gemini) {
             thinking["thinkingBudget"] = *v;
         if (auto v = p->as_object().if_contains("includeThoughts"); v && v->is_bool())
             thinking["includeThoughts"] = *v;
+        // Levels are case-insensitive in requests.
         auto level = string_or(p->as_object(), "thinkingLevel");
+        std::transform(level.begin(), level.end(), level.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
         if (level == "LOW" || level == "HIGH" || level == "MEDIUM" || level == "MINIMAL")
             thinking["thinkingLevel"] = level;
         if (!thinking.empty())
@@ -189,8 +192,9 @@ void summarize_request(json::object &record, bool complete) {
             record["status"] = "failed";
     }
 }
-RequestUsage::RequestUsage(Store &store, std::string id, std::string endpoint)
-    : store_(store), id_(std::move(id)), record_{{"id", id_},
+RequestUsage::RequestUsage(Store &store, std::string id, std::string endpoint,
+                           std::function<void()> failed)
+    : store_(store), id_(std::move(id)), failed_(std::move(failed)), record_{{"id", id_},
                                                  {"endpoint", std::move(endpoint)},
                                                  {"created_at", now_ms()},
                                                  {"ended_at", nullptr},
@@ -212,7 +216,8 @@ RequestUsage::RequestUsage(Store &store, std::string id, std::string endpoint)
                                                  {"usage", json::object{}},
                                                  {"cost", unknown_cost("pending")}} {
     summarize_request(record_, false);
-    store_.begin_request(record_);
+    if (failed_) store_.begin_request(record_, failed_);
+    else store_.begin_request(record_);
 }
 void RequestUsage::configure(std::string_view model, bool stream) {
     std::lock_guard lock(mutex_);
@@ -229,7 +234,7 @@ bool RequestUsage::start() {
     started_at_ = Clock::now();
     record_["queue_ms"] = elapsed(created_);
     record_["status"] = "running";
-    save();
+    save(true);
     return true;
 }
 void RequestUsage::normalized(std::string_view model, const json::object &gemini) {
@@ -343,7 +348,7 @@ void RequestUsage::http_done(unsigned status, std::string_view error, bool deliv
         producer_done_ = true;
     save();
 }
-void RequestUsage::save() {
+void RequestUsage::save(bool wait) {
     if (terminal_)
         return;
     bool complete = producer_done_ && http_done_;
@@ -352,7 +357,10 @@ void RequestUsage::save() {
         record_["ended_at"] = now_ms();
         record_["duration_ms"] = elapsed(created_);
     }
-    store_.save_request(record_, complete);
+    if (failed_ && !wait)
+        store_.save_request(record_, complete, failed_);
+    else
+        store_.save_request(record_, complete);
     terminal_ = complete;
 }
 } // namespace ais2api

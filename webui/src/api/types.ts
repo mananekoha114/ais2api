@@ -184,7 +184,18 @@ export interface PriceStatus {
   currency: 'USD'
   refreshing: boolean
   error: string
-  sources: { source: string; fetched_at: number; attempted_at: number; error: string; models: number }[]
+  sources: {
+    source: string
+    url: string
+    fetched_at: number
+    attempted_at: number
+    error: string
+    models: number
+    // ISO 8601 time the catalog was scraped from Google's pricing page.
+    published_at: string
+    // Never downloaded yet: prices come from the snapshot built into this version.
+    embedded: boolean
+  }[]
 }
 
 export interface Key {

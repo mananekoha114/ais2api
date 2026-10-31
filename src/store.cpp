@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/store.hpp"
+#include "ais2api/pricing.hpp"
 #include "ais2api/region.hpp"
 #include "ais2api/usage.hpp"
 #include "../browser/rate_policy.hpp"
@@ -21,6 +22,11 @@
 namespace ais2api {
 namespace {
 void migrate_request_usage(sqlite3 *db);
+void init_usage(sqlite3 *db);
+void import_legacy_usage(sqlite3 *state, const fs::path &usage_path);
+void correct_legacy_usage(sqlite3 *usage);
+void drop_legacy_usage(sqlite3 *state);
+void finish_usage_open(sqlite3 *usage, const std::vector<std::string> &account_ids);
 std::string sqlite_path(const fs::path &path) {
     auto u = path.u8string();
     return std::string(reinterpret_cast<const char *>(u.data()), u.size());
@@ -334,94 +340,28 @@ json::object state(const json::value &input, bool *raw_header = nullptr,
         throw Error(400, "invalid_credentials", "Invalid storage origins");
     return o;
 }
-} // namespace
-struct Store::Impl {
+// One SQLite connection owned by a dedicated thread; run() executes there.
+struct Database {
     sqlite3 *db = nullptr;
     std::mutex mutex;
     std::condition_variable cv;
     std::deque<std::function<void()>> queue;
     bool stopping = false;
     std::thread worker;
-    explicit Impl(const fs::path &directory) {
-        secure_directory(directory);
-        auto path = directory / "state.sqlite3";
+    Database(const fs::path &path, std::string_view name, void (*init)(sqlite3 *)) {
         if (fs::is_symlink(fs::symlink_status(path)))
             throw Error(400, "unsafe_path", "Database cannot be a symbolic link");
         std::promise<void> ready;
         auto f = ready.get_future();
-        worker = std::thread([this, path, &ready] {
+        worker = std::thread([this, path, name, init, &ready] {
             try {
                 if (sqlite3_open_v2(sqlite_path(path).c_str(), &db,
                                     SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
                                         SQLITE_OPEN_NOMUTEX,
                                     nullptr) != SQLITE_OK)
-                    throw Error(500, "database", "Cannot open state database");
+                    throw Error(500, "database", "Cannot open " + std::string(name) + " database");
                 sqlite3_busy_timeout(db, 5000);
-                int schema_version = 0;
-                {
-                    Statement version(db, "PRAGMA user_version");
-                    if (version.row()) schema_version = sqlite3_column_int(version.p, 0);
-                    if (schema_version > 3)
-                        throw Error(500, "database_version",
-                                    "Database was created by a newer ais2api version");
-                }
-                exec(db, "PRAGMA foreign_keys=ON;PRAGMA journal_mode=WAL;CREATE TABLE IF "
-                         "NOT EXISTS accounts(id TEXT PRIMARY KEY,name TEXT,email "
-                         "TEXT,auth_user TEXT,state TEXT,disabled INTEGER DEFAULT 0,expired "
-                         "INTEGER DEFAULT 0);CREATE TABLE IF NOT EXISTS settings(k TEXT "
-                         "PRIMARY KEY,v TEXT);CREATE TABLE IF NOT EXISTS failures(account "
-                         "TEXT REFERENCES accounts(id) ON DELETE CASCADE,model TEXT,until "
-                         "INTEGER,count INTEGER,PRIMARY KEY(account,model));CREATE TABLE IF NOT EXISTS "
-                         "quota_counters(account TEXT REFERENCES accounts(id) ON DELETE CASCADE,"
-                         "model TEXT,count INTEGER NOT NULL,day INTEGER NOT NULL,cooldown_until INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(account,model));CREATE TABLE IF "
-                         "NOT EXISTS sticky(model TEXT PRIMARY KEY,account TEXT REFERENCES "
-                         "accounts(id) ON DELETE CASCADE);CREATE TABLE IF NOT EXISTS "
-                         "stats(account TEXT,model TEXT,ok INTEGER DEFAULT 0,failed INTEGER "
-                         "DEFAULT 0,usage TEXT DEFAULT '{}',PRIMARY "
-                         "KEY(account,model));CREATE TABLE IF NOT EXISTS keys(id TEXT "
-                         "PRIMARY KEY,name TEXT,hash TEXT UNIQUE,created INTEGER);CREATE TABLE IF NOT EXISTS "
-                         "managed_keys(id TEXT PRIMARY KEY,name TEXT,hash TEXT UNIQUE,created INTEGER);CREATE "
-                         "TABLE IF NOT EXISTS tools(principal TEXT,call_id TEXT,metadata "
-                         "TEXT,created INTEGER,touched INTEGER,PRIMARY "
-                         "KEY(principal,call_id));CREATE INDEX IF NOT EXISTS tools_lru ON "
-                         "tools(touched);CREATE INDEX IF NOT EXISTS tools_expiry ON "
-                         "tools(created);");
-                bool quota_deadline = false;
-                { Statement columns(db, "PRAGMA table_info(quota_counters)");
-                  while (columns.row()) if (columns.str(1) == "cooldown_until") quota_deadline = true; }
-                if (!quota_deadline) exec(db, "ALTER TABLE quota_counters ADD COLUMN cooldown_until INTEGER NOT NULL DEFAULT 0");
-                // `kind` records the Store::failure kind; `probed` marks an auth
-                // cooldown whose single probe attempt was already admitted.
-                bool failure_kind = false, failure_probed = false;
-                { Statement columns(db, "PRAGMA table_info(failures)");
-                  while (columns.row()) { failure_kind |= columns.str(1) == "kind"; failure_probed |= columns.str(1) == "probed"; } }
-                if (!failure_kind) exec(db, "ALTER TABLE failures ADD COLUMN kind TEXT NOT NULL DEFAULT ''");
-                if (!failure_probed) exec(db, "ALTER TABLE failures ADD COLUMN probed INTEGER NOT NULL DEFAULT 0");
-                // Every account owns a permanent browser fingerprint; accounts
-                // from older stores receive one the first time the store opens.
-                exec(db, "CREATE TABLE IF NOT EXISTS fingerprints(account TEXT PRIMARY KEY REFERENCES "
-                         "accounts(id) ON DELETE CASCADE,seed INTEGER NOT NULL,timezone TEXT NOT NULL "
-                         "DEFAULT '',locale TEXT NOT NULL DEFAULT '');INSERT OR IGNORE INTO "
-                         "fingerprints(account,seed) SELECT id,10000+abs(random()%90000) FROM accounts");
-                exec(db, "CREATE TABLE IF NOT EXISTS model_catalog(account TEXT PRIMARY KEY REFERENCES "
-                         "accounts(id) ON DELETE CASCADE,models TEXT NOT NULL,saved_at INTEGER NOT NULL)");
-                exec(db, "BEGIN IMMEDIATE;"
-                         "CREATE TABLE IF NOT EXISTS request_history(seq INTEGER PRIMARY KEY AUTOINCREMENT,"
-                         "id TEXT NOT NULL UNIQUE,created_at INTEGER NOT NULL,model TEXT NOT NULL DEFAULT '',"
-                         "account TEXT NOT NULL DEFAULT '',status TEXT NOT NULL,terminal INTEGER NOT NULL DEFAULT 0,"
-                         "detail TEXT NOT NULL);"
-                         "CREATE INDEX IF NOT EXISTS request_history_time ON request_history(created_at);"
-                         "CREATE INDEX IF NOT EXISTS request_history_model ON request_history(model,seq);"
-                         "CREATE INDEX IF NOT EXISTS request_history_account ON request_history(account,seq);"
-                         "CREATE INDEX IF NOT EXISTS request_history_status ON request_history(status,seq);"
-                         "CREATE TABLE IF NOT EXISTS request_totals(account TEXT NOT NULL,model TEXT NOT NULL,"
-                         "detail TEXT NOT NULL,PRIMARY KEY(account,model));"
-                         "CREATE TABLE IF NOT EXISTS price_sources(source TEXT PRIMARY KEY,catalog TEXT NOT NULL,"
-                         "fetched_at INTEGER NOT NULL,attempted_at INTEGER NOT NULL,error TEXT NOT NULL);"
-                         "INSERT OR IGNORE INTO settings(k,v) VALUES('usage_since',CAST(unixepoch()*1000 AS TEXT));"
-                         "INSERT OR IGNORE INTO settings(k,v) SELECT 'usage_detail_since',v FROM settings WHERE k='usage_since';"
-                         "COMMIT;");
-                if (schema_version < 3) migrate_request_usage(db);
+                init(db);
                 ready.set_value();
             } catch (...) {
                 ready.set_exception(std::current_exception());
@@ -452,7 +392,7 @@ struct Store::Impl {
             throw;
         }
     }
-    ~Impl() {
+    ~Database() {
         {
             std::lock_guard lock(mutex);
             stopping = true;
@@ -473,6 +413,111 @@ struct Store::Impl {
         }
         cv.notify_one();
         return future.get();
+    }
+    // Queues `f` without waiting. Work runs in submission order, so a later
+    // run() observes it. `failed` runs on the database thread, or here when
+    // the database is already closing.
+    void post(std::function<void()> f, std::function<void()> failed) {
+        auto report = [failed = std::move(failed)] {
+            if (failed) try { failed(); } catch (...) {}
+        };
+        {
+            std::lock_guard lock(mutex);
+            if (!stopping) {
+                queue.emplace_back([f = std::move(f), report] {
+                    try { f(); } catch (...) { report(); }
+                });
+                cv.notify_one();
+                return;
+            }
+        }
+        report();
+    }
+};
+int schema_version(sqlite3 *db) {
+    Statement version(db, "PRAGMA user_version");
+    return version.row() ? sqlite3_column_int(version.p, 0) : 0;
+}
+bool has_table(sqlite3 *db, const char *name) {
+    Statement s(db, "SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?");
+    s.text(1, name);
+    return s.row();
+}
+// state.sqlite3 keeps the schema (version 1) that earlier releases accept.
+// Versions 2 and 3 are the interim layout that also held request history;
+// opening such a database moves that data into usage.sqlite3 and returns it to
+// version 1, so later state schema changes must start at version 4.
+void init_state(sqlite3 *db) {
+    const auto version = schema_version(db);
+    if (version > 3)
+        throw Error(500, "database_version", "Database was created by a newer ais2api version");
+    exec(db, "PRAGMA foreign_keys=ON;PRAGMA journal_mode=WAL;CREATE TABLE IF "
+             "NOT EXISTS accounts(id TEXT PRIMARY KEY,name TEXT,email "
+             "TEXT,auth_user TEXT,state TEXT,disabled INTEGER DEFAULT 0,expired "
+             "INTEGER DEFAULT 0);CREATE TABLE IF NOT EXISTS settings(k TEXT "
+             "PRIMARY KEY,v TEXT);CREATE TABLE IF NOT EXISTS failures(account "
+             "TEXT REFERENCES accounts(id) ON DELETE CASCADE,model TEXT,until "
+             "INTEGER,count INTEGER,PRIMARY KEY(account,model));CREATE TABLE IF NOT EXISTS "
+             "quota_counters(account TEXT REFERENCES accounts(id) ON DELETE CASCADE,"
+             "model TEXT,count INTEGER NOT NULL,day INTEGER NOT NULL,cooldown_until INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(account,model));CREATE TABLE IF "
+             "NOT EXISTS sticky(model TEXT PRIMARY KEY,account TEXT REFERENCES "
+             "accounts(id) ON DELETE CASCADE);CREATE TABLE IF NOT EXISTS "
+             "stats(account TEXT,model TEXT,ok INTEGER DEFAULT 0,failed INTEGER "
+             "DEFAULT 0,usage TEXT DEFAULT '{}',PRIMARY "
+             "KEY(account,model));CREATE TABLE IF NOT EXISTS keys(id TEXT "
+             "PRIMARY KEY,name TEXT,hash TEXT UNIQUE,created INTEGER);CREATE TABLE IF NOT EXISTS "
+             "managed_keys(id TEXT PRIMARY KEY,name TEXT,hash TEXT UNIQUE,created INTEGER);CREATE "
+             "TABLE IF NOT EXISTS tools(principal TEXT,call_id TEXT,metadata "
+             "TEXT,created INTEGER,touched INTEGER,PRIMARY "
+             "KEY(principal,call_id));CREATE INDEX IF NOT EXISTS tools_lru ON "
+             "tools(touched);CREATE INDEX IF NOT EXISTS tools_expiry ON "
+             "tools(created);");
+    bool quota_deadline = false;
+    { Statement columns(db, "PRAGMA table_info(quota_counters)");
+      while (columns.row()) if (columns.str(1) == "cooldown_until") quota_deadline = true; }
+    if (!quota_deadline) exec(db, "ALTER TABLE quota_counters ADD COLUMN cooldown_until INTEGER NOT NULL DEFAULT 0");
+    // `kind` records the Store::failure kind; `probed` marks an auth
+    // cooldown whose single probe attempt was already admitted.
+    bool failure_kind = false, failure_probed = false;
+    { Statement columns(db, "PRAGMA table_info(failures)");
+      while (columns.row()) { failure_kind |= columns.str(1) == "kind"; failure_probed |= columns.str(1) == "probed"; } }
+    if (!failure_kind) exec(db, "ALTER TABLE failures ADD COLUMN kind TEXT NOT NULL DEFAULT ''");
+    if (!failure_probed) exec(db, "ALTER TABLE failures ADD COLUMN probed INTEGER NOT NULL DEFAULT 0");
+    // Every account owns a permanent browser fingerprint; accounts
+    // from older stores receive one the first time the store opens.
+    exec(db, "CREATE TABLE IF NOT EXISTS fingerprints(account TEXT PRIMARY KEY REFERENCES "
+             "accounts(id) ON DELETE CASCADE,seed INTEGER NOT NULL,timezone TEXT NOT NULL "
+             "DEFAULT '',locale TEXT NOT NULL DEFAULT '');INSERT OR IGNORE INTO "
+             "fingerprints(account,seed) SELECT id,10000+abs(random()%90000) FROM accounts");
+    if (version <= 1)
+        exec(db, "PRAGMA user_version=1");
+}
+fs::path secured(const fs::path &directory) {
+    secure_directory(directory);
+    return directory;
+}
+} // namespace
+struct Store::Impl : Database {
+    // Request history, price caches and discovered model catalogs. Kept apart
+    // from accounts and credentials; see init_usage().
+    std::unique_ptr<Database> usage;
+    explicit Impl(const fs::path &directory)
+        : Database(secured(directory) / "state.sqlite3", "state", init_state),
+          usage(std::make_unique<Database>(directory / "usage.sqlite3", "usage", init_usage)) {
+        if (run([&] { return has_table(db, "request_history"); })) {
+            // Each step commits on its own and is safe to repeat after a crash;
+            // the state tables are dropped only after the copy is complete.
+            run([&] { import_legacy_usage(db, directory / "usage.sqlite3"); });
+            usage->run([&] { correct_legacy_usage(usage->db); });
+            run([&] { drop_legacy_usage(db); });
+        }
+        auto ids = run([&] {
+            std::vector<std::string> result;
+            Statement s(db, "SELECT id FROM accounts");
+            while (s.row()) result.push_back(s.str(0));
+            return result;
+        });
+        usage->run([&] { finish_usage_open(usage->db, ids); });
     }
     void put(const Account &a) {
         Statement s(db, "INSERT INTO accounts(id,name,email,auth_user,state,disabled) "
@@ -693,6 +738,13 @@ json::array Store::import_accounts(const json::value &input, std::string name) {
     });
 }
 void Store::remove_account(std::string_view id) {
+    // The catalog goes first: a leftover one could be shown for a later
+    // account with the same id. Opening the store also removes orphans.
+    impl_->usage->run([&] {
+        Statement s(impl_->usage->db, "DELETE FROM model_catalog WHERE account=?");
+        s.text(1, id);
+        s.row();
+    });
     impl_->run([&] {
         Statement s(impl_->db, "DELETE FROM accounts WHERE id=?");
         s.text(1, id);
@@ -781,30 +833,50 @@ std::optional<Account> Store::choose(std::string_view model,
     });
 }
 ModelCatalog Store::model_catalog() {
-    return impl_->run([&] {
+    const auto accounts = impl_->run([&] {
+        std::set<std::string, std::less<>> ids;
+        Statement row(impl_->db, "SELECT id FROM accounts");
+        while (row.row()) ids.insert(row.str(0));
+        return ids;
+    });
+    return impl_->usage->run([&] {
         ModelCatalog result;
-        Statement row(impl_->db,
-            "SELECT a.id,m.models,m.saved_at FROM accounts a LEFT JOIN model_catalog m ON m.account=a.id "
-            "ORDER BY (a.id=(SELECT v FROM settings WHERE k='current')) DESC,"
-            "(a.id=(SELECT v FROM settings WHERE k='selected')) DESC,a.rowid LIMIT 1");
-        if (row.row()) {
-            result.account_id = row.str(0);
-            auto models = row.str(1);
-            if (!models.empty()) {
-                result.models = json::parse(models).as_array();
-                result.saved_at = sqlite3_column_int64(row.p, 2);
-            }
+        // Account removal deletes its catalog first; skipping unknown accounts
+        // only matters if a removal was interrupted between the databases.
+        Statement row(impl_->usage->db, "SELECT account,models,saved_at FROM model_catalog "
+                                        "ORDER BY saved_at DESC,rowid DESC");
+        while (row.row()) {
+            auto account = row.str(0);
+            if (!accounts.contains(account)) continue;
+            result.account_id = std::move(account);
+            result.models = json::parse(row.str(1)).as_array();
+            result.saved_at = sqlite3_column_int64(row.p, 2);
+            break;
         }
         return result;
     });
 }
+bool Store::has_model_catalog(std::string_view account_id) {
+    return impl_->usage->run([&] {
+        Statement row(impl_->usage->db, "SELECT 1 FROM model_catalog WHERE account=?");
+        row.text(1, account_id);
+        return row.row();
+    });
+}
 ModelCatalog Store::save_models(std::string_view account_id, json::array models) {
     auto values = discovered_models(std::move(models));
-    return impl_->run([&] {
+    const bool exists = impl_->run([&] {
+        Statement s(impl_->db, "SELECT 1 FROM accounts WHERE id=?");
+        s.text(1, account_id);
+        return s.row();
+    });
+    if (!exists)
+        throw Error(404, "account_not_found", "Account not found");
+    return impl_->usage->run([&] {
         const auto saved_at = unix_seconds();
         // One statement replaces the entire snapshot in an implicit transaction.
-        Statement save(impl_->db, "INSERT INTO model_catalog(account,models,saved_at) VALUES(?,?,?) "
-                                 "ON CONFLICT(account) DO UPDATE SET models=excluded.models,saved_at=excluded.saved_at");
+        // REPLACE inserts a new row, so the rowid orders saves within a second.
+        Statement save(impl_->usage->db, "INSERT OR REPLACE INTO model_catalog(account,models,saved_at) VALUES(?,?,?)");
         save.text(1, account_id);
         save.text(2, json::serialize(values));
         save.integer(3, saved_at);
@@ -870,15 +942,17 @@ void Store::clear_cooldown(std::string_view id, std::string_view model) {
     });
 }
 void Store::reset_stats() {
-    impl_->run([&] {
-        exec(impl_->db, "BEGIN IMMEDIATE");
+    auto &usage = *impl_->usage;
+    usage.run([&] {
+        exec(usage.db, "BEGIN IMMEDIATE");
         try {
-            Statement active(impl_->db, "SELECT 1 FROM request_history WHERE terminal=0 LIMIT 1");
+            Statement active(usage.db, "SELECT 1 FROM request_history WHERE terminal=0 LIMIT 1");
             if (active.row()) throw Error(409, "requests_active", "Wait for active requests before resetting statistics");
-            exec(impl_->db, "DELETE FROM stats;DELETE FROM request_history;DELETE FROM request_totals;"
-                            "UPDATE settings SET v=CAST(unixepoch()*1000 AS TEXT) WHERE k IN ('usage_since','usage_detail_since');COMMIT");
-        } catch (...) { exec(impl_->db, "ROLLBACK"); throw; }
+            exec(usage.db, "DELETE FROM request_history;DELETE FROM request_totals;"
+                           "UPDATE meta SET v=CAST(unixepoch()*1000 AS TEXT) WHERE k IN ('usage_since','usage_detail_since');COMMIT");
+        } catch (...) { exec(usage.db, "ROLLBACK"); throw; }
     });
+    impl_->run([&] { exec(impl_->db, "DELETE FROM stats"); });
 }
 void Store::failure(std::string_view id, std::string_view model, std::string_view kind,
                     unsigned retry) {
@@ -1110,7 +1184,150 @@ void migrate_request_usage(sqlite3 *db) {
             put.text(3, string_or(corrected, "id"));
             put.row();
         }
-        exec(db, "PRAGMA user_version=3;COMMIT");
+        exec(db, "DELETE FROM meta WHERE k='legacy_correction';COMMIT");
+    } catch (...) {
+        exec(db, "ROLLBACK");
+        throw;
+    }
+}
+// usage.sqlite3 holds request history and totals, price catalogs, discovered
+// model catalogs and the history time range. Unlike accounts it can be deleted
+// to start over, so it trades a little durability for fewer disk syncs.
+void init_usage(sqlite3 *db) {
+    if (schema_version(db) > 1)
+        throw Error(500, "database_version", "Usage database was created by a newer ais2api version");
+    exec(db, "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;BEGIN IMMEDIATE;"
+             "CREATE TABLE IF NOT EXISTS request_history(seq INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "id TEXT NOT NULL UNIQUE,created_at INTEGER NOT NULL,model TEXT NOT NULL DEFAULT '',"
+             "account TEXT NOT NULL DEFAULT '',status TEXT NOT NULL,terminal INTEGER NOT NULL DEFAULT 0,"
+             "detail TEXT NOT NULL);"
+             "CREATE INDEX IF NOT EXISTS request_history_time ON request_history(created_at);"
+             "CREATE INDEX IF NOT EXISTS request_history_model ON request_history(model,seq);"
+             "CREATE INDEX IF NOT EXISTS request_history_account ON request_history(account,seq);"
+             "CREATE INDEX IF NOT EXISTS request_history_status ON request_history(status,seq);"
+             "CREATE TABLE IF NOT EXISTS request_totals(account TEXT NOT NULL,model TEXT NOT NULL,"
+             "detail TEXT NOT NULL,PRIMARY KEY(account,model));"
+             "CREATE TABLE IF NOT EXISTS price_sources(source TEXT PRIMARY KEY,catalog TEXT NOT NULL,"
+             "fetched_at INTEGER NOT NULL,attempted_at INTEGER NOT NULL,error TEXT NOT NULL);"
+             // Third-party catalogs used before the official-page catalog.
+             "DELETE FROM price_sources WHERE source IN ('litellm','models.dev');"
+             "CREATE TABLE IF NOT EXISTS model_catalog(account TEXT PRIMARY KEY,models TEXT NOT NULL,"
+             "saved_at INTEGER NOT NULL);"
+             "CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY,v TEXT NOT NULL);"
+             "INSERT OR IGNORE INTO meta(k,v) VALUES('usage_since',CAST(unixepoch()*1000 AS TEXT));"
+             "INSERT OR IGNORE INTO meta(k,v) SELECT 'usage_detail_since',v FROM meta WHERE k='usage_since';"
+             "PRAGMA user_version=1;COMMIT;");
+}
+// Copies the interim state.sqlite3 tables into usage.sqlite3 in one usage
+// transaction. `legacy_imported` makes a repeat after a crash a no-op; rows
+// already in usage.sqlite3 (a later downgrade and upgrade) are merged.
+void import_legacy_usage(sqlite3 *db, const fs::path &usage_path) {
+    const auto version = schema_version(db);
+    {
+        Statement attach(db, "ATTACH DATABASE ? AS target");
+        attach.text(1, sqlite_path(usage_path));
+        attach.row();
+    }
+    struct Detach {
+        sqlite3 *db;
+        ~Detach() { sqlite3_exec(db, "DETACH DATABASE target", nullptr, nullptr, nullptr); }
+    } detach{db};
+    exec(db, "BEGIN IMMEDIATE");
+    try {
+        bool imported = false;
+        {
+            Statement done(db, "SELECT 1 FROM target.meta WHERE k='legacy_imported'");
+            imported = done.row();
+        }
+        if (!imported) {
+            exec(db, "INSERT OR IGNORE INTO target.request_history(id,created_at,model,account,status,terminal,detail) "
+                     "SELECT id,created_at,model,account,status,terminal,detail FROM main.request_history ORDER BY seq");
+            if (has_table(db, "request_totals")) {
+                Statement rows(db, "SELECT account,model,detail FROM main.request_totals");
+                while (rows.row()) {
+                    auto total = json::parse(rows.str(2)).as_object();
+                    Statement existing(db, "SELECT detail FROM target.request_totals WHERE account=? AND model=?");
+                    existing.text(1, rows.str(0));
+                    existing.text(2, rows.str(1));
+                    if (existing.row()) {
+                        auto merged = json::parse(existing.str(0)).as_object();
+                        merge_total(merged, total);
+                        total = std::move(merged);
+                    }
+                    Statement put(db, "INSERT INTO target.request_totals VALUES(?,?,?) ON CONFLICT(account,model) "
+                                      "DO UPDATE SET detail=excluded.detail");
+                    put.text(1, rows.str(0));
+                    put.text(2, rows.str(1));
+                    put.text(3, json::serialize(total));
+                    put.row();
+                }
+            }
+            if (has_table(db, "price_sources"))
+                exec(db, "INSERT INTO target.price_sources(source,catalog,fetched_at,attempted_at,error) "
+                         "SELECT source,catalog,fetched_at,attempted_at,error FROM main.price_sources WHERE 1 "
+                         "ON CONFLICT(source) DO UPDATE SET catalog=excluded.catalog,fetched_at=excluded.fetched_at,"
+                         "attempted_at=excluded.attempted_at,error=excluded.error WHERE excluded.fetched_at>fetched_at");
+            if (has_table(db, "model_catalog"))
+                exec(db, "INSERT INTO target.model_catalog(account,models,saved_at) "
+                         "SELECT account,models,saved_at FROM main.model_catalog WHERE 1 "
+                         "ON CONFLICT(account) DO UPDATE SET models=excluded.models,saved_at=excluded.saved_at "
+                         "WHERE excluded.saved_at>saved_at");
+            exec(db, "INSERT INTO target.meta(k,v) SELECT k,v FROM main.settings "
+                     "WHERE k IN ('usage_since','usage_detail_since') ON CONFLICT(k) DO UPDATE SET "
+                     "v=CASE WHEN CAST(excluded.v AS INTEGER)<CAST(v AS INTEGER) THEN excluded.v ELSE v END");
+            exec(db, "INSERT OR REPLACE INTO target.meta(k,v) VALUES('legacy_imported','1')");
+            // Version 2 records predate the version 3 summary correction.
+            if (version == 2)
+                exec(db, "INSERT OR REPLACE INTO target.meta(k,v) VALUES('legacy_correction','1')");
+        }
+        exec(db, "COMMIT");
+    } catch (...) {
+        exec(db, "ROLLBACK");
+        throw;
+    }
+}
+void correct_legacy_usage(sqlite3 *db) {
+    {
+        Statement pending(db, "SELECT 1 FROM meta WHERE k='legacy_correction'");
+        if (!pending.row())
+            return;
+    }
+    migrate_request_usage(db);
+}
+// Returns state.sqlite3 to the version 1 schema once the data is in usage.sqlite3.
+void drop_legacy_usage(sqlite3 *db) {
+    exec(db, "BEGIN IMMEDIATE");
+    try {
+        exec(db, "DROP TABLE IF EXISTS request_history;DROP TABLE IF EXISTS request_totals;"
+                 "DROP TABLE IF EXISTS price_sources;DROP TABLE IF EXISTS model_catalog;"
+                 "DELETE FROM settings WHERE k IN ('usage_since','usage_detail_since')");
+        if (has_table(db, "sqlite_sequence"))
+            exec(db, "DELETE FROM sqlite_sequence WHERE name='request_history'");
+        exec(db, "PRAGMA user_version=1;COMMIT");
+    } catch (...) {
+        exec(db, "ROLLBACK");
+        throw;
+    }
+}
+// Clears the finished import marker and catalogs of accounts that no longer
+// exist; usage.sqlite3 cannot reference accounts with foreign keys.
+void finish_usage_open(sqlite3 *db, const std::vector<std::string> &account_ids) {
+    exec(db, "BEGIN IMMEDIATE");
+    try {
+        exec(db, "DELETE FROM meta WHERE k='legacy_imported'");
+        std::vector<std::string> orphans;
+        {
+            Statement catalogs(db, "SELECT account FROM model_catalog");
+            while (catalogs.row())
+                if (std::find(account_ids.begin(), account_ids.end(), catalogs.str(0)) == account_ids.end())
+                    orphans.push_back(catalogs.str(0));
+        }
+        for (auto &account : orphans) {
+            Statement remove(db, "DELETE FROM model_catalog WHERE account=?");
+            remove.text(1, account);
+            remove.row();
+        }
+        exec(db, "COMMIT");
     } catch (...) {
         exec(db, "ROLLBACK");
         throw;
@@ -1148,44 +1365,58 @@ void bind_query(Statement &s, const RequestQuery &q) {
 }
 json::object usage_metadata(sqlite3 *db) {
     json::object result;
-    Statement s(db, "SELECT k,CAST(v AS INTEGER) FROM settings WHERE k IN ('usage_since','usage_detail_since')");
+    Statement s(db, "SELECT k,CAST(v AS INTEGER) FROM meta WHERE k IN ('usage_since','usage_detail_since')");
     while (s.row()) result[s.str(0) == "usage_since" ? "since" : "detail_since"] = sqlite3_column_int64(s.p, 1);
     return result;
 }
 }
+void insert_request_row(sqlite3 *db, const json::object &record) {
+    Statement s(db, "INSERT INTO request_history(id,created_at,status,detail) VALUES(?,?,'queued',?)");
+    s.text(1, string_or(record, "id")); s.integer(2, integer(record, "created_at"));
+    s.text(3, json::serialize(record)); s.row();
+}
+void save_request_transaction(sqlite3 *db, const json::object &record, bool terminal) {
+    exec(db, "BEGIN IMMEDIATE");
+    try { save_request_row(db, record, terminal); exec(db, "COMMIT"); }
+    catch (...) { exec(db, "ROLLBACK"); throw; }
+}
 void Store::begin_request(const json::object &record) {
-    impl_->run([&] {
-        Statement s(impl_->db, "INSERT INTO request_history(id,created_at,status,detail) VALUES(?,?,'queued',?)");
-        s.text(1, string_or(record, "id")); s.integer(2, integer(record, "created_at"));
-        s.text(3, json::serialize(record)); s.row();
-    });
+    impl_->usage->run([&] { insert_request_row(impl_->usage->db, record); });
+}
+void Store::begin_request(json::object record, std::function<void()> failed) {
+    auto *usage = impl_->usage.get();
+    usage->post([usage, record = std::move(record)] { insert_request_row(usage->db, record); }, std::move(failed));
 }
 void Store::save_request(const json::object &record, bool terminal) {
-    impl_->run([&] {
-        exec(impl_->db, "BEGIN IMMEDIATE");
-        try { save_request_row(impl_->db, record, terminal); exec(impl_->db, "COMMIT"); }
-        catch (...) { exec(impl_->db, "ROLLBACK"); throw; }
-    });
+    impl_->usage->run([&] { save_request_transaction(impl_->usage->db, record, terminal); });
+}
+void Store::save_request(json::object record, bool terminal, std::function<void()> failed) {
+    auto *usage = impl_->usage.get();
+    usage->post([usage, record = std::move(record), terminal] { save_request_transaction(usage->db, record, terminal); },
+                std::move(failed));
+}
+void Store::flush_requests() {
+    impl_->usage->run([] {});
 }
 json::object Store::request(std::string_view id) {
-    return impl_->run([&] {
-        Statement s(impl_->db, "SELECT detail FROM request_history WHERE id=?"); s.text(1, id);
+    return impl_->usage->run([&] {
+        Statement s(impl_->usage->db, "SELECT detail FROM request_history WHERE id=?"); s.text(1, id);
         if (!s.row()) throw Error(404, "request_not_found", "Request record not found or expired");
         return json::parse(s.str(0)).as_object();
     });
 }
 json::object Store::requests(const RequestQuery &query) {
-    return impl_->run([&] {
-        auto result = usage_metadata(impl_->db);
+    return impl_->usage->run([&] {
+        auto result = usage_metadata(impl_->usage->db);
         validate_query(query);
         auto snapshot = query.snapshot;
         if (!snapshot) {
-            Statement last(impl_->db, "SELECT COALESCE(MAX(seq),0) FROM request_history"); last.row();
+            Statement last(impl_->usage->db, "SELECT COALESCE(MAX(seq),0) FROM request_history"); last.row();
             snapshot = sqlite3_column_int64(last.p, 0);
         }
         auto sql = std::string("SELECT seq,detail FROM request_history") + request_where +
             " AND seq<=? AND (?=0 OR seq<?) ORDER BY seq DESC LIMIT ?";
-        Statement s(impl_->db, sql.c_str()); bind_query(s, query); s.integer(13, snapshot);
+        Statement s(impl_->usage->db, sql.c_str()); bind_query(s, query); s.integer(13, snapshot);
         s.integer(14, query.before); s.integer(15, query.before); s.integer(16, query.limit + 1);
         json::array rows;
         std::int64_t last = 0;
@@ -1199,7 +1430,7 @@ json::object Store::requests(const RequestQuery &query) {
             rows.push_back(std::move(row));
         }
         auto count_sql = std::string("SELECT COUNT(*) FROM request_history") + request_where + " AND seq<=?";
-        Statement count(impl_->db, count_sql.c_str()); bind_query(count, query); count.integer(13, snapshot); count.row();
+        Statement count(impl_->usage->db, count_sql.c_str()); bind_query(count, query); count.integer(13, snapshot); count.row();
         result["total"] = sqlite3_column_int64(count.p, 0); result["snapshot"] = snapshot;
         result["next_cursor"] = more ? json::value(last) : json::value(nullptr);
         result["records"] = std::move(rows);
@@ -1207,8 +1438,8 @@ json::object Store::requests(const RequestQuery &query) {
     });
 }
 json::object Store::stats(const std::optional<RequestQuery> &query) {
-    return impl_->run([&] {
-        auto result = usage_metadata(impl_->db);
+    auto result = impl_->usage->run([&] {
+        auto result = usage_metadata(impl_->usage->db);
         const bool cumulative = !query || query->cumulative;
         if (query) validate_query(*query);
         if (query && cumulative && (query->from || query->to || !query->id.empty() || !query->status.empty()))
@@ -1219,13 +1450,13 @@ json::object Store::stats(const std::optional<RequestQuery> &query) {
             auto sql = std::string("SELECT detail FROM request_history") + request_where + " AND terminal=1";
             auto selection = *query;
             selection.account.clear();
-            Statement s(impl_->db, sql.c_str()); bind_query(s, selection);
+            Statement s(impl_->usage->db, sql.c_str()); bind_query(s, selection);
             while (s.row()) for (auto &[key, value] : request_contributions(json::parse(s.str(0)).as_object())) {
                 if (!query->account.empty() && key.first != (query->account == ":unassigned" ? "" : query->account)) continue;
                 auto &total = groups[key]; if (total.empty()) total = empty_total(); merge_total(total, value);
             }
         } else {
-            Statement s(impl_->db, "SELECT account,model,detail FROM request_totals WHERE (?='' OR model=?) AND (?='' OR account=?) ORDER BY account,model");
+            Statement s(impl_->usage->db, "SELECT account,model,detail FROM request_totals WHERE (?='' OR model=?) AND (?='' OR account=?) ORDER BY account,model");
             const auto model = query ? query->model : std::string{};
             const auto account = query ? query->account : std::string{};
             s.text(1, model); s.text(2, model); s.text(3, account); s.text(4, account == ":unassigned" ? "" : account);
@@ -1237,62 +1468,65 @@ json::object Store::stats(const std::optional<RequestQuery> &query) {
             merge_total(totals, value); value["account"] = key.first; value["model"] = key.second; rows.push_back(std::move(value));
         }
         result["records"] = std::move(rows); result["totals"] = std::move(totals);
-        json::array legacy;
-        Statement s(impl_->db, "SELECT account,model,ok,failed,usage FROM stats "
-                               "ORDER BY account,model");
-        while (s.row())
-            legacy.push_back(json::object{{"account", s.str(0)},
-                                        {"model", s.str(1)},
-                                        {"success", sqlite3_column_int64(s.p, 2)},
-                                        {"failure", sqlite3_column_int64(s.p, 3)},
-                                        {"usage", json::parse(s.str(4))}});
-        result["legacy_records"] = std::move(legacy);
         return result;
     });
+    // Counters from releases before request history stay in state.sqlite3.
+    result["legacy_records"] = impl_->run([&] {
+        json::array legacy;
+        Statement s(impl_->db, "SELECT account,model,ok,failed,usage FROM stats ORDER BY account,model");
+        while (s.row())
+            legacy.push_back(json::object{{"account", s.str(0)},
+                                          {"model", s.str(1)},
+                                          {"success", sqlite3_column_int64(s.p, 2)},
+                                          {"failure", sqlite3_column_int64(s.p, 3)},
+                                          {"usage", json::parse(s.str(4))}});
+        return legacy;
+    });
+    return result;
 }
 void Store::recover_requests() {
-    impl_->run([&] {
-        exec(impl_->db, "BEGIN IMMEDIATE");
+    impl_->usage->run([&] {
+        exec(impl_->usage->db, "BEGIN IMMEDIATE");
         try {
-            Statement s(impl_->db, "SELECT detail FROM request_history WHERE terminal=0");
+            Statement s(impl_->usage->db, "SELECT detail FROM request_history WHERE terminal=0");
             std::vector<json::object> records;
             while (s.row()) records.push_back(json::parse(s.str(0)).as_object());
             for (auto &record : records) {
                 record["status"] = "interrupted"; record["error"] = "service_interrupted";
                 record["ended_at"] = unix_seconds() * 1000;
                 summarize_request(record, true);
-                save_request_row(impl_->db, record, true);
+                save_request_row(impl_->usage->db, record, true);
             }
-            exec(impl_->db, "COMMIT");
-        } catch (...) { exec(impl_->db, "ROLLBACK"); throw; }
+            exec(impl_->usage->db, "COMMIT");
+        } catch (...) { exec(impl_->usage->db, "ROLLBACK"); throw; }
     });
 }
 void Store::prune_requests(std::int64_t before) {
-    impl_->run([&] {
-        exec(impl_->db, "BEGIN IMMEDIATE");
+    impl_->usage->run([&] {
+        exec(impl_->usage->db, "BEGIN IMMEDIATE");
         try {
-            Statement s(impl_->db, "DELETE FROM request_history WHERE seq IN (SELECT seq FROM request_history WHERE terminal=1 AND created_at<? LIMIT 1000)");
+            Statement s(impl_->usage->db, "DELETE FROM request_history WHERE seq IN (SELECT seq FROM request_history WHERE terminal=1 AND created_at<? LIMIT 1000)");
             s.integer(1, before); s.row();
-            if (sqlite3_changes(impl_->db)) {
-                Statement m(impl_->db, "UPDATE settings SET v=CAST(MAX(CAST(v AS INTEGER),?) AS TEXT) WHERE k='usage_detail_since'");
+            if (sqlite3_changes(impl_->usage->db)) {
+                Statement m(impl_->usage->db, "UPDATE meta SET v=CAST(MAX(CAST(v AS INTEGER),?) AS TEXT) WHERE k='usage_detail_since'");
                 m.integer(1, before); m.row();
             }
-            exec(impl_->db, "COMMIT");
-        } catch (...) { exec(impl_->db, "ROLLBACK"); throw; }
+            exec(impl_->usage->db, "COMMIT");
+        } catch (...) { exec(impl_->usage->db, "ROLLBACK"); throw; }
     });
 }
 json::object Store::price_sources() {
-    return impl_->run([&] {
+    return impl_->usage->run([&] {
         json::object result;
-        Statement s(impl_->db, "SELECT source,catalog,fetched_at,attempted_at,error FROM price_sources");
+        Statement s(impl_->usage->db, "SELECT source,catalog,fetched_at,attempted_at,error FROM price_sources");
         while (s.row()) result[s.str(0)] = json::object{{"catalog", json::parse(s.str(1))},
             {"fetched_at", sqlite3_column_int64(s.p, 2)}, {"attempted_at", sqlite3_column_int64(s.p, 3)}, {"error", s.str(4)}};
         return result;
     });
 }
 void Store::save_price_source(std::string_view source, const json::object &catalog, std::int64_t fetched_at, std::string_view error) {
-    impl_->run([&] {
-        Statement s(impl_->db, "INSERT INTO price_sources VALUES(?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET "
+    impl_->usage->run([&] {
+        Statement s(impl_->usage->db, "INSERT INTO price_sources VALUES(?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET "
             "catalog=CASE WHEN excluded.error='' THEN excluded.catalog ELSE price_sources.catalog END,"
             "fetched_at=CASE WHEN excluded.error='' THEN excluded.fetched_at ELSE price_sources.fetched_at END,"
             "attempted_at=excluded.attempted_at,error=excluded.error");
@@ -1300,12 +1534,22 @@ void Store::save_price_source(std::string_view source, const json::object &catal
         s.integer(4, unix_seconds()); s.text(5, error); s.row();
     });
 }
+void Store::seed_price_source(std::string_view source, const json::object &catalog) {
+    impl_->usage->run([&] {
+        Statement s(impl_->usage->db, "INSERT INTO price_sources VALUES(?,?,0,0,'') ON CONFLICT(source) DO UPDATE SET "
+            "catalog=excluded.catalog,fetched_at=0");
+        s.text(1, source); s.text(2, json::serialize(catalog)); s.row();
+    });
+}
 json::object Store::price_quote(std::string_view model) {
-    return impl_->run([&] {
-        Statement s(impl_->db, "SELECT catalog FROM price_sources ORDER BY CASE source WHEN 'litellm' THEN 0 ELSE 1 END");
-        while (s.row()) {
+    const auto today = utc_date();
+    return impl_->usage->run([&] {
+        Statement s(impl_->usage->db, "SELECT catalog FROM price_sources WHERE source=?");
+        s.text(1, price_source);
+        if (s.row()) {
             auto catalog = json::parse(s.str(0)).as_object();
-            if (auto quote = catalog.if_contains(model); quote && quote->is_object()) return quote->as_object();
+            if (auto entry = catalog.if_contains(model); entry && entry->is_object())
+                return effective_quote(entry->as_object(), today);
         }
         return json::object{};
     });
@@ -1519,31 +1763,49 @@ std::optional<json::object> Store::get_tool(std::string_view principal, std::str
         return result;
     });
 }
-void Store::backup(const fs::path &target) {
-    impl_->run([&] {
-        if (fs::exists(target) || fs::is_symlink(fs::symlink_status(target)))
-            throw Error(409, "backup_exists", "Backup target already exists");
-        if (!target.parent_path().empty())
-            secure_directory(target.parent_path());
-        sqlite3 *dest = nullptr;
-        if (sqlite3_open(sqlite_path(target).c_str(), &dest) != SQLITE_OK) {
-            if (dest)
-                sqlite3_close(dest);
-            throw Error(500, "backup", "Cannot open backup target");
-        }
-        auto b = sqlite3_backup_init(dest, "main", impl_->db, "main");
-        if (!b) {
+fs::path usage_backup_path(const fs::path &target) {
+    auto name = target.stem();
+    name += "-usage";
+    name += target.extension();
+    return target.parent_path() / name;
+}
+namespace {
+void backup_database(sqlite3 *source, const fs::path &target) {
+    sqlite3 *dest = nullptr;
+    if (sqlite3_open(sqlite_path(target).c_str(), &dest) != SQLITE_OK) {
+        if (dest)
             sqlite3_close(dest);
-            fs::remove(target);
-            throw Error(500, "backup", "Cannot initialize database backup");
-        }
-        auto rc = sqlite3_backup_step(b, -1);
-        auto end = sqlite3_backup_finish(b);
+        throw Error(500, "backup", "Cannot open backup target");
+    }
+    auto b = sqlite3_backup_init(dest, "main", source, "main");
+    if (!b) {
         sqlite3_close(dest);
-        if (rc != SQLITE_DONE || end != SQLITE_OK) {
-            fs::remove(target);
-            throw Error(500, "backup", "Database backup failed");
-        }
-    });
+        fs::remove(target);
+        throw Error(500, "backup", "Cannot initialize database backup");
+    }
+    auto rc = sqlite3_backup_step(b, -1);
+    auto end = sqlite3_backup_finish(b);
+    sqlite3_close(dest);
+    if (rc != SQLITE_DONE || end != SQLITE_OK) {
+        fs::remove(target);
+        throw Error(500, "backup", "Database backup failed");
+    }
+}
+} // namespace
+void Store::backup(const fs::path &target) {
+    const auto usage_target = usage_backup_path(target);
+    for (auto &path : {target, usage_target})
+        if (fs::exists(path) || fs::is_symlink(fs::symlink_status(path)))
+            throw Error(409, "backup_exists", "Backup target already exists");
+    if (!target.parent_path().empty())
+        secure_directory(target.parent_path());
+    impl_->run([&] { backup_database(impl_->db, target); });
+    try {
+        impl_->usage->run([&] { backup_database(impl_->usage->db, usage_target); });
+    } catch (...) {
+        std::error_code ignored;
+        fs::remove(target, ignored);
+        throw;
+    }
 }
 } // namespace ais2api

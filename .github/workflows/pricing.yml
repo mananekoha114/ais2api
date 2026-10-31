@@ -1,0 +1,53 @@
+# Copyright (c) 2026 ais2api contributors
+# SPDX-License-Identifier: MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# Scrapes Google's official Gemini API pricing page and publishes the catalog
+# to the orphan pricing-data branch, which running services download. Commits
+# happen only when prices change, and a page layout the scraper does not
+# recognize fails the job instead of publishing.
+name: Pricing
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: pricing-data
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check scraper
+        run: python3 -m unittest discover -s tests -p 'test_pricing_scraper.py'
+      - name: Check out pricing-data
+        run: |
+          if git ls-remote --exit-code --heads origin pricing-data >/dev/null; then
+            git fetch --depth=1 origin pricing-data
+            git worktree add --detach data FETCH_HEAD
+          else
+            git worktree add --detach data
+            git -C data checkout --orphan pricing-data
+            git -C data rm -rf --quiet .
+          fi
+      - name: Scrape official prices
+        run: python3 -I scripts/scrape-gemini-pricing.py --output data/gemini.json --keep-unchanged
+      - name: Publish changed prices
+        working-directory: data
+        run: |
+          git add gemini.json
+          if git diff --cached --quiet; then
+            echo "Prices unchanged"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit --quiet -m "Update Gemini prices from the official pricing page"
+          git push origin HEAD:refs/heads/pricing-data

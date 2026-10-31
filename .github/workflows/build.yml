@@ -32,6 +32,7 @@ jobs:
           sh -n launcher/start.sh
           python3 -m unittest discover -s tests -p 'test_launcher.py'
           python3 -m unittest discover -s tests -p 'test_check_package.py'
+          python3 -m unittest discover -s tests -p 'test_pricing_scraper.py'
           node --check browser/bridge.js
           node --check browser/test_cookie_runtime.cjs
           node --test browser/test_bridge.cjs

@@ -81,9 +81,9 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 
 `GET /models` 返回 `models`、`source`（`saved`、`configured` 或 `none`）、`account_id`（账号不存在时为 `null`）以及 `saved_at`（Unix 秒，未保存时为 `null`）。模型对象中的 `source` 同样标明 `saved` 或 `configured`。
 
-读取按当前账号、首选账号、首个账号的顺序选择一个账号，过期或冷却不会删除其保存记录；不会借用另一账号的结果。当前账号无保存结果时才使用 `configured_models`。OpenAI/Gemini 客户端的模型列表和详情也读取这份本地清单，首次为空时可在管理页面执行实时发现。
+读取返回现存账号中最近一次成功保存的清单，切换、轮换账号或账号过期、冷却都不会改变它，直到下次刷新成功。清单仍按账号分别保存，`account_id` 标明来源账号。没有任何保存结果时才使用 `configured_models`。OpenAI/Gemini 客户端的模型列表和详情也读取这份本地清单。导入账号（手动导入或 Cookie 导入）成功后，若该批次中有尚无清单的账号，会为其中第一个排队执行一次后台发现（会启动浏览器）；队列已满等情况只记录日志，不影响导入结果。
 
-刷新使用同一账号并强制重新访问上游，继续返回 HTTP 202，通过操作接口轮询。只有校验及数据库保存均成功时，操作才标为 `done`，其 `result` 与模型列表使用相同字段。无账号或账号被禁用、发现失败、无有效模型的异常结果以及保存失败均报告操作失败，旧清单与保存时间保持不变。删除账号同时删除该账号的清单。已保存不等于当前调用权限已验证。
+刷新按当前账号、首选账号、首个账号的顺序选择可用账号，跳过已禁用、已过期或整体冷却中的账号，并强制重新访问上游，继续返回 HTTP 202，通过操作接口轮询。只有校验及数据库保存均成功时，操作才标为 `done`，其 `result` 与模型列表使用相同字段。没有可用账号（`no_available_account`）、发现失败、无有效模型的异常结果以及保存失败均报告操作失败，旧清单与保存时间保持不变。删除账号同时删除该账号的清单。已保存不等于当前调用权限已验证。
 
 ### 密钥
 
@@ -129,9 +129,11 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 
 `totals.priced` / `unpriced` 分别表示完整计价和未完整计价请求数，`partially_priced` 是其中有已知费用的未完整计价请求数，完全未知数量为 `unpriced-partially_priced`。`amount_nano` 仍为完整计价请求的小计；新增 `known_amount_nano` 累加所有可确认的尝试金额，包含未完整计价请求的已知部分。单条 `cost.known_amount_nano` 为已知小计，无可知尝试时为 null；`unpriced_attempts` 为未完整计价的尝试数。已知零保留为零。请求失败不妨碍有依据的用量和金额入账，内部重试缺少用量也不推定免费。单条详情保留选定价表与计算分项，不因后台刷新重算。统计重置删除新旧累计及已结束请求明细；存在活动记录时返回 `409 requests_active`。
 
-数据库版本 3 会沿用原尝试的价格和金额，修正可查历史的费用与内容拦截分类，并按贡献差额更新累计。已到期删除的明细无法补回未知部分，原累计继续保留；不会用当前价格重估旧请求。
+请求记录、累计、价格缓存和模型清单保存在 `data/usage.sqlite3`，与账号数据库 `state.sqlite3` 分开。请求记录在后台按顺序写入，HTTP 处理不等待数据库；随后的查询总能看到之前排队的写入。写入失败时记录 `request_history_error` 日志，`/status` 中的 `usage_healthy` 变为 `false`，请求本身不受影响；开始生成时的写入仍同步进行，失败则以 503 `request_history_unavailable` 拒绝该请求。来自过渡版本（版本 2）的记录在移入时会沿用原尝试的价格和金额，修正可查历史的费用与内容拦截分类，并按贡献差额更新累计。已到期删除的明细无法补回未知部分，原累计继续保留；不会用当前价格重估旧请求。
 
-`POST /pricing/refresh` 不带参数或提交空对象，返回 202 和当前刷新状态。价格更新在独立后台线程中运行，不占生成队列；固定来源为 [LiteLLM 模型价格目录](https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json) 和 [models.dev API](https://models.dev/api.json)，使用配置代理，不发送请求正文或凭据。目录缺失或超过 24 小时自动更新，失败保留各来源的旧有效版本并显示错误，失败来源最早一小时后自动重试。单次下载最多 32 MiB、30 秒，停止服务可取消。
+`POST /pricing/refresh` 不带参数或提交空对象，返回 202 和当前刷新状态。价格更新在独立后台线程中运行，不占生成队列。唯一来源是本项目仓库的 GitHub Actions 每 6 小时从 [Google 官方价格页](https://ai.google.dev/gemini-api/docs/pricing) 抓取、发布在 `pricing-data` 分支的 [gemini.json](https://raw.githubusercontent.com/mananekoha114/ais2api/pricing-data/gemini.json)，只在价格变化时提交；页面结构无法识别时抓取失败，不会发布残缺目录。下载使用配置代理，不发送请求正文或凭据。每个版本内置构建时的快照（源码 `pricing/gemini.json`），从未联网成功时也能估算；联网后保留发布时间较新的一份，落后的下载不会覆盖较新的价格。目录缺失或超过 24 小时自动更新，失败保留旧有效版本并显示错误，最早一小时后自动重试。单次下载最多 4 MiB、30 秒，停止服务可取消。
+
+`GET /pricing` 的 `sources` 只有一项 `google`：`url` 为下载地址，`published_at` 为该价格目录的抓取时间（ISO 8601 UTC），`embedded` 为 `true` 表示仍在使用内置快照，`fetched_at` / `attempted_at` 为最近一次成功和尝试的下载时间（Unix 秒），`error` 为最近一次失败的代码。
 
 ## 配置保存与重启
 

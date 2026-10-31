@@ -89,7 +89,8 @@ docker compose up -d --build
 | 路径 | 内容 |
 |---|---|
 | `/data/config.json` | 配置，包含明文密钥 |
-| `/data/state.sqlite3` | 账号、Cookie、统计与冷却状态 |
+| `/data/state.sqlite3` | 账号、Cookie、冷却状态与旧版统计 |
+| `/data/usage.sqlite3` | 请求记录、累计用量、价格缓存与已保存的模型清单 |
 | `/data/management.log` | 管理日志 |
 | `/data/logs/` | 浏览器日志 |
 | `/data/runtime/` | 浏览器资料目录与下载缓存 |

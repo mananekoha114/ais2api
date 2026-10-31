@@ -45,7 +45,7 @@ json::array models(std::string id = "gemini-first") {
 }
 void sql(const fs::path &directory, const char *text) {
     sqlite3 *db = nullptr;
-    REQUIRE(sqlite3_open((directory / "state.sqlite3").string().c_str(), &db) == SQLITE_OK);
+    REQUIRE(sqlite3_open((directory / "usage.sqlite3").string().c_str(), &db) == SQLITE_OK);
     const auto status = sqlite3_exec(db, text, nullptr, nullptr, nullptr);
     sqlite3_close(db);
     REQUIRE(status == SQLITE_OK);
@@ -175,7 +175,7 @@ struct ModelServer {
 };
 } // namespace
 
-TEST_CASE("model snapshots survive reopen and failed replacements without crossing accounts",
+TEST_CASE("the newest model snapshot survives reopen, failed replacements and account changes",
           "[models][store]") {
     Directory directory;
     {
@@ -204,24 +204,38 @@ TEST_CASE("model snapshots survive reopen and failed replacements without crossi
         CHECK_THROWS_AS(store.save_models("a", models("gemini-replacement")), Error);
         CHECK(store.model_catalog().models == saved.models);
         sql(directory.path, "DROP TRIGGER fail_models");
+        sql(directory.path, "UPDATE model_catalog SET saved_at=saved_at-10 WHERE account='a'");
         store.select_account("b");
-        CHECK(store.model_catalog().account_id == "b");
-        CHECK(store.model_catalog().models.empty());
+        CHECK(store.model_catalog().account_id == "a");
+        CHECK(store.model_catalog().models == saved.models);
+        CHECK(store.has_model_catalog("a"));
+        CHECK_FALSE(store.has_model_catalog("b"));
         store.save_models("b", models("gemini-second"));
+        CHECK(store.has_model_catalog("b"));
         CHECK(string_or(store.model_catalog().models[0].as_object(), "id") == "gemini-second");
         store.select_account("a");
-        store.failure("a", "*", "login_expired");
-        CHECK(store.model_catalog().models == saved.models);
+        store.failure("b", "*", "login_expired");
+        CHECK(store.model_catalog().account_id == "b");
+        // Saves within the same second still order by when they happened.
+        store.save_models("a", models("gemini-third"));
+        store.save_models("b", models("gemini-second"));
+        CHECK(store.model_catalog().account_id == "b");
+        store.save_models("a", models());
+        CHECK(store.model_catalog().account_id == "a");
+        sql(directory.path, "UPDATE model_catalog SET saved_at=saved_at-10 WHERE account='a'");
     }
     {
         Store reopened(directory.path);
+        CHECK(reopened.model_catalog().account_id == "b");
+        CHECK(string_or(reopened.model_catalog().models[0].as_object(), "id") == "gemini-second");
+        reopened.remove_account("b");
         CHECK(reopened.model_catalog().account_id == "a");
         CHECK(string_or(reopened.model_catalog().models[0].as_object(), "id") == "gemini-first");
         reopened.remove_account("a");
-        CHECK(reopened.model_catalog().account_id == "b");
-        CHECK(string_or(reopened.model_catalog().models[0].as_object(), "id") == "gemini-second");
+        CHECK(reopened.model_catalog().account_id.empty());
+        CHECK(reopened.model_catalog().models.empty());
         reopened.put_account(account("a"));
-        reopened.select_account("a");
+        CHECK_FALSE(reopened.has_model_catalog("a"));
         CHECK(reopened.model_catalog().models.empty());
     }
 }
@@ -287,10 +301,53 @@ TEST_CASE(
         Store store(server.config.data_dir);
         store.select_account("b");
     }
-    CHECK(string_or(server.catalog(), "source") == "configured");
-    CHECK(server.call("/v1/models/gemini-0-new").result_int() == 404);
+    // Choosing another account leaves the list alone until the next refresh,
+    // which discovers through the preferred account.
+    CHECK(string_or(server.catalog(), "account_id") == "a");
+    CHECK(server.call("/v1/models/gemini-0-new").result_int() == 200);
     CHECK(string_or(server.refresh(), "status") == "done");
+    CHECK(string_or(server.catalog(), "account_id") == "b");
     CHECK(server.call("/v1/models/gemini-1-new").result_int() == 200);
+    CHECK(server.call("/v1/models/gemini-0-new").result_int() == 404);
+    // A disabled preferred account is skipped instead of failing discovery.
+    REQUIRE(bool_or(local_call(server.config, {{"command", "accounts.update"}, {"id", "b"},
+                                               {"disabled", true}}), "ok"));
+    server.state->mode = 0;
+    CHECK(string_or(server.refresh(), "status") == "done");
+    CHECK(string_or(server.catalog(), "account_id") == "a");
+    CHECK(server.call("/v1/models/gemini-0-old").result_int() == 200);
+    REQUIRE(bool_or(local_call(server.config, {{"command", "accounts.update"}, {"id", "a"},
+                                               {"disabled", true}}), "ok"));
+    const auto refused = server.refresh();
+    CHECK(string_or(refused, "status") == "failed");
+    CHECK(string_or(refused.at("error").as_object(), "code") == "no_available_account");
+    CHECK(string_or(server.catalog(), "account_id") == "a");
+    REQUIRE_FALSE(server.failure);
+}
+
+TEST_CASE("an imported account without a saved catalog discovers models once in the background",
+          "[models][http]") {
+    ModelServer server;
+    server.start();
+    json::array batch;
+    for (auto index : {"0", "1"}) {
+        auto entry = account("unused", index).storage_state;
+        entry["auth_user"] = index;
+        batch.push_back(std::move(entry));
+    }
+    const auto imported = local_call(server.config, {{"command", "accounts.import"}, {"input", batch}});
+    REQUIRE(imported.at("accounts").as_array().size() == 2);
+    const auto id = string_or(imported.at("accounts").as_array()[0].as_object(), "id");
+    for (const auto until = Clock::now() + 5s;
+         string_or(server.catalog(), "source") != "saved" && Clock::now() < until;)
+        std::this_thread::sleep_for(10ms);
+    const auto catalog = server.catalog();
+    CHECK(string_or(catalog, "source") == "saved");
+    CHECK(string_or(catalog, "account_id") == id);
+    CHECK(server.call("/v1/models/gemini-0-old").result_int() == 200);
+    // One discovery per import batch, even when several accounts lack a catalog.
+    std::this_thread::sleep_for(200ms);
+    CHECK(server.state->calls == 1);
     REQUIRE_FALSE(server.failure);
 }
 
