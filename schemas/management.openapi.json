@@ -3813,6 +3813,11 @@
       "RequestFields": {
         "type": "object",
         "properties": {
+          "initial_prompt_tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Input tokens of the initial generation round, distinct from cumulative consumption; absent in older records."
+          },
           "id": {
             "type": "string"
           },
@@ -3970,6 +3975,10 @@
       "RequestAttempt": {
         "type": "object",
         "properties": {
+          "kind": {
+            "enum": ["initial", "retry", "continuation"],
+            "description": "Execution type. Optional for history recorded before native continuation support."
+          },
           "account": {
             "type": "string"
           },

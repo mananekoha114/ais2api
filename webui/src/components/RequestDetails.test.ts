@@ -29,7 +29,7 @@ it('shows a failed generation independently of its known cost and completed deli
   const view = mount(RequestDetails, { props: { record, open: true, error: '', loading: false, accountName: id => id }, global: { stubs: { Teleport: true } } })
   expect(view.text()).toContain('失败 · 上游内容拦截')
   expect(view.text()).toContain('已知 $0.17208')
-  expect(view.text()).toContain('1 次尝试未完整计价')
+  expect(view.text()).toContain('1 轮未完整计价')
   expect(view.text()).toContain('传输 完成 · HTTP 200')
   expect(view.text()).toContain('首次权限错误，随后再次执行')
   expect(view.findAll('.generation-setting').map(item => item.text())).toEqual(['最大输出 Tokens65,535', '显示思考开启'])

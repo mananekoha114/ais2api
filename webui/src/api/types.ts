@@ -161,6 +161,7 @@ export interface RequestRecord {
   first_token_ms: number | null
   generation_ms: number | null
   duration_ms: number | null
+  initial_prompt_tokens?: number
   usage: Record<string, number>
   cost: RequestEstimate
   attempt_count: number
@@ -168,6 +169,7 @@ export interface RequestRecord {
 export interface RequestDetail extends Omit<RequestRecord, 'attempt_count'> {
   settings: Record<string, number | boolean | string | Record<string, number | boolean | string>>
   attempts: {
+    kind?: 'initial' | 'retry' | 'continuation'
     account: string; started_at: number; ended_at: number | null; completed: boolean
     finish_reason: string; error: string; usage: Record<string, number>; cost: RequestCost
   }[]

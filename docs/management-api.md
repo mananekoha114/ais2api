@@ -119,6 +119,10 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 
 ## 请求记录与估算费用
 
+详情的 `attempts[].kind` 区分 `initial`（首轮）、`retry`（无输出失败后的重试）与 `continuation`（同一回答自动续接）。列表的 `attempt_count` 仍统计全部实际执行轮次；续接不会新增客户端请求数。旧记录可以缺少 `kind`，界面保留“尝试”的旧显示，不把旧数据猜测为续接。此扩展保存在既有 JSON 记录中，不改变 SQLite schema 版本。
+
+可选的 `initial_prompt_tokens` 为最初生成轮次的最终输入快照；发生失败重试时使用随后初始轮的快照，续接不覆盖它。旧记录或缺少用量时可以不返回。`usage` 是各轮累计消费，包含续接中再次处理的上下文，不表示原始输入长度。每轮使用该轮输入量选取价格阶梯，再把各轮金额相加；完整结束且用量可确认的首轮仍可计价，即使随后的续接失败。客户端可在详情中查看各轮结束原因与已知费用。
+
 上述路径沿用管理 Bearer 鉴权。请求时间戳使用 Unix **毫秒**，价表的 `fetched_at` / `attempted_at` 使用 Unix **秒**。金额 `amount_nano` 为整数纳美元，单价 `*_pico` / `rate_pico` 为整数皮美元/token；`null` 表示未知，不能当作免费。
 
 列表支持 `from`（包含）、`to`（不包含）、实际 `model`、最终执行 `account`、`status`、完整 `id`。`account=:unassigned` 只匹配未分配账号的请求。`limit` 为 1–100，默认 100。首次返回 `snapshot` 和 `next_cursor`，后续传同一 `snapshot` 及 `before=next_cursor`，按进入服务的序号倒序读取；新插入请求不会挤动后续页。已执行完的记录不可变，活动记录的状态仍会更新；到期清理可以移除旧记录。`total` 为该边界内全部匹配条数，`next_cursor=null` 表示没有下一页。
