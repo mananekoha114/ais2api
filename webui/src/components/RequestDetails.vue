@@ -64,7 +64,7 @@ const endpoint = { chat_completions: 'Chat Completions', responses: 'Responses',
       </details>
       <p class="t-caption t-secondary">{{ estimateCoverage(record.cost) }}</p>
       <p v-if="record.attempts.length > 1" class="t-caption t-secondary">{{ attemptsSummary(record.attempts) }}</p>
-      <p v-if="record.attempts.some(attempt => attempt.kind === 'continuation')" class="t-caption t-secondary">续接沿用同一个回答。累计输入包含各轮处理的上下文，费用按每轮用量分别估算。</p>
+      <p v-if="record.attempts.some(attempt => attempt.kind === 'continuation' || attempt.kind === 'continuation_retry')" class="t-caption t-secondary">续接沿用同一个回答。累计输入包含各次执行处理的上下文，费用按每次执行用量分别估算。</p>
       <section v-for="(attempt, index) in record.attempts" :key="index" class="attempt">
         <div class="row wrap">
           <h3 class="t-body-strong grow">{{ attemptLabel(attempt, index) }} · {{ accountName(attempt.account) }}</h3>

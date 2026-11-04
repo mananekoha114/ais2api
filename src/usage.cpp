@@ -266,7 +266,8 @@ void RequestUsage::event(const json::object &event, bool content) {
         record_["first_token_ms"] = elapsed(created_);
     if (auto p = event.if_contains("usageMetadata"); p && p->is_object()) {
         attempt["usage"] = allowed_usage(p->as_object(), usage_valid_);
-        if (string_or(attempt, "kind") != "continuation")
+        const auto kind = string_or(attempt, "kind");
+        if (kind != "continuation" && kind != "continuation_retry")
             if (auto count = attempt.at("usage").as_object().if_contains("promptTokenCount"))
                 record_["initial_prompt_tokens"] = *count;
     }

@@ -737,14 +737,21 @@ class Service {
                         request, *account,
                         [&](GenerationEvent next) {
                             check_cancel(token);
-                            if (next.kind == GenerationEvent::Kind::continuation_started) {
+                            if (next.kind == GenerationEvent::Kind::continuation_failed) {
+                                work->usage->end_attempt(string_or(next.data, "error"));
+                                last_usage.reset();
+                                return;
+                            }
+                            if (next.kind == GenerationEvent::Kind::continuation_started ||
+                                next.kind == GenerationEvent::Kind::continuation_retry_started) {
                                 continuing = true;
                                 ++trace.attempts;
-                                work->usage->begin_attempt(account->id, "continuation");
-                                log({{"event", "generation_continuation"},
+                                const bool retry = next.kind == GenerationEvent::Kind::continuation_retry_started;
+                                work->usage->begin_attempt(account->id, retry ? "continuation_retry" : "continuation");
+                                log({{"event", retry ? "generation_continuation_retry" : "generation_continuation"},
                                      {"request_id", work->usage->id()},
                                      {"account_id", account->id},
-                                     {"round", trace.attempts}});
+                                     {"attempt", trace.attempts}});
                                 return;
                             }
                             auto event = std::move(next.data);

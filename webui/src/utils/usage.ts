@@ -59,15 +59,17 @@ const attemptErrors: Record<string, string> = { permission_denied: '权限错误
   client_disconnected: '客户端断开', browser_incompatible: '浏览器会话异常', transient_rpc_route: '上游路由异常',
   upstream_no_content: '上游未返回内容', session_expired: '会话过期' }
 type AttemptInfo = Pick<RequestDetail['attempts'][number], 'kind' | 'error'>
-const attemptKinds = { initial: '首轮', retry: '失败重试', continuation: '自动续接' }
+const attemptKinds = { initial: '首轮', retry: '失败重试', continuation: '自动续接', continuation_retry: '续接重试' }
 export const attemptLabel = (attempt: Pick<AttemptInfo, 'kind'>, index: number) =>
-  attempt.kind ? `第 ${index + 1} 轮 · ${attemptKinds[attempt.kind]}` : `尝试 ${index + 1}`
+  attempt.kind ? `第 ${index + 1} 次执行 · ${attemptKinds[attempt.kind]}` : `尝试 ${index + 1}`
 export function attemptsSummary(attempts: AttemptInfo[]) {
   if (attempts.some(attempt => attempt.kind)) {
     const retries = attempts.filter(attempt => attempt.kind === 'retry').length
     const continuations = attempts.filter(attempt => attempt.kind === 'continuation').length
-    return `共 ${attempts.length} 轮执行` + (retries ? ` · ${retries} 次失败重试` : '')
+    const continuationRetries = attempts.filter(attempt => attempt.kind === 'continuation_retry').length
+    return `共 ${attempts.length} 次执行` + (retries ? ` · ${retries} 次失败重试` : '')
       + (continuations ? ` · ${continuations} 次自动续接` : '')
+      + (continuationRetries ? ` · ${continuationRetries} 次续接重试` : '')
   }
   const first = attempts[0]?.error
   return `共 ${attempts.length} 次尝试` + (attempts.length > 1 && first ? ` · 首次${attemptErrors[first] ?? first}，随后再次执行` : '')

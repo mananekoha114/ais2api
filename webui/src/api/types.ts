@@ -169,7 +169,7 @@ export interface RequestRecord {
 export interface RequestDetail extends Omit<RequestRecord, 'attempt_count'> {
   settings: Record<string, number | boolean | string | Record<string, number | boolean | string>>
   attempts: {
-    kind?: 'initial' | 'retry' | 'continuation'
+    kind?: 'initial' | 'retry' | 'continuation' | 'continuation_retry'
     account: string; started_at: number; ended_at: number | null; completed: boolean
     finish_reason: string; error: string; usage: Record<string, number>; cost: RequestCost
   }[]

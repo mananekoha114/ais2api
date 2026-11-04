@@ -23,7 +23,8 @@ struct Request {
     json::object gemini;
 };
 struct GenerationEvent {
-    enum class Kind { chunk, round_finished, continuation_started };
+    enum class Kind { chunk, round_finished, continuation_started, continuation_failed,
+                      continuation_retry_started };
     Kind kind = Kind::chunk;
     json::object data;
     GenerationEvent(json::object value) : data(std::move(value)) {}

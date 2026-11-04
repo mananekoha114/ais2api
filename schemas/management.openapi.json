@@ -3976,7 +3976,7 @@
         "type": "object",
         "properties": {
           "kind": {
-            "enum": ["initial", "retry", "continuation"],
+            "enum": ["initial", "retry", "continuation", "continuation_retry"],
             "description": "Execution type. Optional for history recorded before native continuation support."
           },
           "account": {
