@@ -16,6 +16,7 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <tuple>
@@ -761,12 +762,20 @@ TEST_CASE("A request history failure at start is reported as such", "[generation
     GenerationServer server;
     REQUIRE(server.call("/v1beta/models/synthetic-unary:generateContent",
                         R"({"contents":[{"parts":[{"text":"warm up"}]}]})").result_int() == 200);
-    sqlite3 *db = nullptr;
-    REQUIRE(sqlite3_open((server.config.data_dir / "usage.sqlite3").string().c_str(), &db) == SQLITE_OK);
-    REQUIRE(sqlite3_exec(db, "CREATE TRIGGER fail_start BEFORE UPDATE ON request_history WHEN NEW.status='running' "
-                             "BEGIN SELECT RAISE(ABORT,'synthetic history failure'); END",
-                         nullptr, nullptr, nullptr) == SQLITE_OK);
-    sqlite3_close(db);
+    sqlite3 *connection = nullptr;
+    const auto opened =
+        sqlite3_open((server.config.data_dir / "usage.sqlite3").string().c_str(), &connection);
+    std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(connection, sqlite3_close);
+    REQUIRE(opened == SQLITE_OK);
+    REQUIRE(sqlite3_busy_timeout(db.get(), 5000) == SQLITE_OK);
+    const auto trigger = sqlite3_exec(
+        db.get(),
+        "CREATE TRIGGER fail_start BEFORE UPDATE ON request_history WHEN NEW.status='running' "
+        "BEGIN SELECT RAISE(ABORT,'synthetic history failure'); END",
+        nullptr, nullptr, nullptr);
+    INFO(sqlite3_errmsg(db.get()));
+    REQUIRE(trigger == SQLITE_OK);
+    db.reset();
     auto response = server.call("/v1beta/models/synthetic-unary:generateContent",
                                 R"({"contents":[{"parts":[{"text":"question"}]}]})");
     REQUIRE(response.result_int() == 503);
