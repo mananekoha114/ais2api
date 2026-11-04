@@ -15,16 +15,20 @@ Request budget(std::int64_t count) {
 }
 json::object checkpoint(std::int64_t output, std::string token = "checkpoint-1",
                         std::string finish = "MAX_TOKENS", std::int64_t thoughts = 0) {
+    json::array parts;
+    parts.push_back(json::array{nullptr, "text"});
     json::array candidate(9);
-    candidate[0] = json::array{json::array{json::array{nullptr, "text"}}, "model"};
+    candidate[0] = json::array{std::move(parts), "model"};
     candidate[1] = finish == "STOP" ? 1 : finish == "PROHIBITED_CONTENT" ? 8 : 2;
     candidate[8] = token;
+    json::array candidates;
+    candidates.push_back(std::move(candidate));
     json::array usage(10);
     usage[0] = 10;
     usage[1] = output - thoughts;
     usage[2] = output + 10;
     usage[9] = thoughts;
-    return decode_chunk(json::array{json::array{candidate}, nullptr, usage, nullptr, nullptr,
+    return decode_chunk(json::array{std::move(candidates), nullptr, usage, nullptr, nullptr,
                                     nullptr, nullptr, "round-id"});
 }
 std::string error_code(const std::function<void()> &operation) {

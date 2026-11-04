@@ -52,12 +52,16 @@ inline json::object denied(int status = 403, std::string tier = "pro") {
 }
 inline json::array reply(std::string text, int output, int finish, std::string checkpoint = {},
                          int prompt = 44976) {
+    json::array parts;
+    parts.push_back(json::array{nullptr, text});
     json::array candidate(9);
-    candidate[0] = json::array{json::array{json::array{nullptr, text}}, "model"};
+    candidate[0] = json::array{std::move(parts), "model"};
     candidate[1] = finish;
     if (!checkpoint.empty())
         candidate[8] = checkpoint;
-    return {json::array{candidate},
+    json::array candidates;
+    candidates.push_back(std::move(candidate));
+    return {std::move(candidates),
             nullptr,
             json::array{prompt, output, prompt + output},
             nullptr,
