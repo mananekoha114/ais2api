@@ -5,7 +5,6 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/backend.hpp"
-#include "ais2api/continuation.hpp"
 #include "ais2api/runtime.hpp"
 #include "ais2api/pricing.hpp"
 #include "browser_generation_fixture.hpp"
@@ -18,6 +17,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <tuple>
 
@@ -110,21 +110,67 @@ public:
             error.quota_scope = "minute";
             throw error;
         }
-        if (request.model.starts_with("gemini-4-synthetic-continuation-denied-")) {
+        if (request.model.starts_with("gemini-4-synthetic-continuation")) {
             namespace gf = generation_fixture;
             std::stop_callback on_cancel(cancel, [state = state_] { state->cancelled = true; });
             gf::Script script;
-            script.attempts = {gf::first(), {gf::denied()}, gf::last()};
-            if (request.model.ends_with("-twice"))
-                script.attempts.insert(script.attempts.begin() + 2, std::vector<json::value>{gf::denied()});
-            if (request.model.ends_with("-always"))
-                script.attempts[2] = {gf::denied()};
-            else if (request.model.ends_with("-partial")) {
-                auto closed = gf::done();
-                closed["error"] = "ERR_CONNECTION_CLOSED";
-                script.attempts[2] = {gf::pending(gf::stream(gf::reply("world", 1, 0, {}, 77744))),
-                                      closed};
+            if (request.model.starts_with("gemini-4-synthetic-continuation-denied-")) {
+                script.attempts = {gf::first(), {gf::denied()}, gf::last()};
+                if (request.model.ends_with("-twice"))
+                    script.attempts.insert(script.attempts.begin() + 2,
+                                           std::vector<json::value>{gf::denied()});
+                if (request.model.ends_with("-always"))
+                    script.attempts[2] = {gf::denied()};
+                else if (request.model.ends_with("-partial")) {
+                    auto closed = gf::done();
+                    closed["error"] = "ERR_CONNECTION_CLOSED";
+                    script.attempts[2] = {
+                        gf::pending(gf::stream(gf::reply("world", 1, 0, {}, 77744))), closed};
+                }
+            } else {
+                if (request.model.ends_with("-retry") && attempt == 1)
+                    throw Error(404, "transient_rpc_route", "Synthetic first attempt failed");
+                const unsigned rounds = request.model.ends_with("-three") ? 3 : 2;
+                for (unsigned round = 0; round < rounds; ++round) {
+                    const auto prompt = 44976 + round * 32768;
+                    const bool last = round + 1 == rounds;
+                    auto terminal =
+                        gf::reply("", last ? 11955 : 32768, last ? 1 : 2,
+                                  !last && !request.model.ends_with("-missing")
+                                      ? "private-synthetic-checkpoint-" + std::to_string(round)
+                                      : "",
+                                  prompt);
+                    terminal.at(0).at(0).as_array()[0] = nullptr;
+                    auto text = gf::reply(round ? round == 1 ? "world" : "!" : "hello ", 0, 0);
+                    text[2] = nullptr;
+                    text[7] = "synthetic-response";
+                    // Split before usage/checkpoint delivery so disconnects can
+                    // still interrupt an unfinished round after its text arrives.
+                    auto prefix = ")]}'\n[[" + json::serialize(text) + ",";
+                    auto suffix = json::serialize(json::array{
+                                      nullptr, nullptr, json::array{prompt, 100, prompt + 100}}) +
+                                  "," + json::serialize(terminal) + "]]";
+                    script.attempts.push_back(
+                        {gf::pending(prefix), gf::pending(suffix, 2), gf::done()});
+                }
             }
+            script.before_next = [&](std::size_t round, std::size_t position) {
+                if (position != 1)
+                    return;
+                if (!round && request.model.ends_with("-gated")) {
+                    const auto deadline = Clock::now() + 5s;
+                    while (!state_->continue_stream.load()) {
+                        check_cancel(cancel);
+                        if (Clock::now() > deadline)
+                            throw Error(504, "synthetic_gate_timeout", "Client gate timed out");
+                        std::this_thread::sleep_for(5ms);
+                    }
+                    state_->stream_continued = true;
+                }
+                if (round && request.model.ends_with("-failed"))
+                    throw Error(502, "synthetic_continuation_failure",
+                                "Synthetic continuation failed");
+            };
             auto io = script.io(request);
             auto start = io.start;
             io.start = [&, start](std::string_view body, const std::function<void()> &check) {
@@ -140,57 +186,8 @@ public:
                     state_->continuation_denied = true;
                 return value;
             };
-            return browser_detail::run_generation(request, config_.limits,
-                                                  config_.continuation_retry_enabled, io, emit, cancel);
-        }
-        if (request.model.starts_with("gemini-4-synthetic-continuation")) {
-            if (request.model.ends_with("-retry") && attempt == 1)
-                throw Error(404, "transient_rpc_route", "Synthetic first attempt failed");
-            std::stop_callback on_cancel(cancel, [state = state_] { state->cancelled = true; });
-            NativeContinuation continuation(request);
-            unsigned round = 0;
-            for (;;) {
-                check_cancel(cancel);
-                if (round)
-                    emit(GenerationEvent(GenerationEvent::Kind::continuation_started));
-                ++state_->rounds;
-                continuation.push(text_event(round ? round == 1 ? "world" : "!" : "hello "), emit);
-                if (!round && request.model.ends_with("-gated")) {
-                    const auto deadline = Clock::now() + 5s;
-                    while (!state_->continue_stream.load()) {
-                        check_cancel(cancel);
-                        if (Clock::now() > deadline)
-                            throw Error(504, "synthetic_gate_timeout", "Client gate timed out");
-                        std::this_thread::sleep_for(5ms);
-                    }
-                    state_->stream_continued = true;
-                }
-                if (round && request.model.ends_with("-failed"))
-                    throw Error(502, "synthetic_continuation_failure",
-                                "Synthetic continuation failed");
-                const bool last = round == (request.model.ends_with("-three") ? 2u : 1u);
-                auto terminal = finish_event();
-                auto &candidate = terminal.at("candidates").as_array()[0].as_object();
-                candidate["finishReason"] = last ? "STOP" : "MAX_TOKENS";
-                if (!last && !request.model.ends_with("-missing"))
-                    candidate[continuation_token_key] =
-                        "private-synthetic-checkpoint-" + std::to_string(round);
-                const auto prompt = 44976 + round * 32768;
-                const auto output = last ? 11955 : 32768;
-                terminal["usageMetadata"] = json::object{{"promptTokenCount", prompt},
-                                                         {"candidatesTokenCount", output},
-                                                         {"totalTokenCount", prompt + output}};
-                // Multiple snapshots in a round must not be added together.
-                continuation.push(json::object{{"usageMetadata",
-                                                json::object{{"promptTokenCount", prompt},
-                                                             {"candidatesTokenCount", 100},
-                                                             {"totalTokenCount", prompt + 100}}}},
-                                  emit);
-                continuation.push(terminal, emit);
-                if (!continuation.finish(emit))
-                    return;
-                ++round;
-            }
+            return browser_detail::run_generation(
+                request, config_.limits, config_.continuation_retry_enabled, io, emit, cancel);
         }
         if (request.model == "synthetic-cancel") {
             // emit waits for downstream acknowledgment and may itself throw on
