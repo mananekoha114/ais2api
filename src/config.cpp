@@ -150,6 +150,7 @@ json::object Config::to_json(bool portable_paths) const {
           {"headless", headless},
           {"ignore_unsupported_parameters", ignore_unsupported_parameters},
           {"search_model_drop_functions", search_model_drop_functions},
+          {"continuation_retry_enabled", continuation_retry_enabled},
           {"browser_idle_seconds", browser_idle_seconds},
           {"request_retention_days", request_retention_days},
           {"limits",
@@ -160,7 +161,8 @@ json::object Config::to_json(bool portable_paths) const {
             {"queue_seconds", limits.queue_seconds},
             {"generation_seconds", limits.generation_seconds},
             {"stream_idle_seconds", limits.stream_idle_seconds},
-            {"max_attempts", limits.max_attempts}}},
+            {"max_attempts", limits.max_attempts},
+            {"max_continuation_retries", limits.max_continuation_retries}}},
           {"model_aliases", model_aliases},
           {"configured_models", configured_models},
           {"model_defaults", model_defaults}};
@@ -223,6 +225,7 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
         {"AIS2API_BROWSER_SITE_ISOLATION", "browser_site_isolation"},
         {"AIS2API_IGNORE_UNSUPPORTED_PARAMETERS", "ignore_unsupported_parameters"},
         {"AIS2API_SEARCH_MODEL_DROP_FUNCTIONS", "search_model_drop_functions"},
+        {"AIS2API_CONTINUATION_RETRY_ENABLED", "continuation_retry_enabled"},
         {"AIS2API_BROWSER_IDLE_SECONDS", "browser_idle_seconds"},
         {"AIS2API_REQUEST_RETENTION_DAYS", "request_retention_days"}}) {
     auto v = env(pair.first);
@@ -256,7 +259,8 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
                     {"AIS2API_QUEUE_SECONDS", "queue_seconds"},
                     {"AIS2API_GENERATION_SECONDS", "generation_seconds"},
                     {"AIS2API_STREAM_IDLE_SECONDS", "stream_idle_seconds"},
-                    {"AIS2API_MAX_ATTEMPTS", "max_attempts"}}) {
+                    {"AIS2API_MAX_ATTEMPTS", "max_attempts"},
+                    {"AIS2API_MAX_CONTINUATION_RETRIES", "max_continuation_retries"}}) {
     auto value = env(pair.first);
     if (env_exists(pair.first)) {
       try {
@@ -289,7 +293,7 @@ static Config parse_config(Config c, json::object o, bool explicit_browser) {
   fields(o, {"version", "bind", "port", "api_key", "admin_key", "admin_origins", "cookie_import_key",
              "cookie_import_max_accounts", "cookie_import_timeout_seconds", "data_dir", "browser_executable",
              "proxy", "browser_proxy_relay", "browser_remote_allow_origins", "browser_site_isolation", "headless", "ignore_unsupported_parameters", "search_model_drop_functions", "browser_idle_seconds", "limits", "model_aliases",
-             "configured_models", "model_defaults", "request_retention_days"});
+             "configured_models", "model_defaults", "request_retention_days", "continuation_retry_enabled"});
   auto text = [&](const char *k) {
     if (!o.at(k).is_string())
       throw Error(400, "invalid_config", "Expected string: " + std::string(k));
@@ -342,6 +346,9 @@ static Config parse_config(Config c, json::object o, bool explicit_browser) {
   if (!o.at("search_model_drop_functions").is_bool())
     throw Error(400, "invalid_config", "search_model_drop_functions must be boolean");
   c.search_model_drop_functions = o.at("search_model_drop_functions").as_bool();
+  if (!o.at("continuation_retry_enabled").is_bool())
+    throw Error(400, "invalid_config", "continuation_retry_enabled must be boolean");
+  c.continuation_retry_enabled = o.at("continuation_retry_enabled").as_bool();
   const auto idle = number(o.at("browser_idle_seconds"));
   if (idle > 86400)
     throw Error(400, "invalid_config", "browser_idle_seconds must be 0 or 10..86400");
@@ -357,7 +364,7 @@ static Config parse_config(Config c, json::object o, bool explicit_browser) {
   auto &l = o.at("limits").as_object();
   fields(l, {"request_bytes", "object_bytes", "relay_bytes", "queue_size",
              "queue_seconds", "generation_seconds", "stream_idle_seconds",
-             "max_attempts"});
+             "max_attempts", "max_continuation_retries"});
   auto n = [&](const char *k) {
     auto x = number(l.at(k));
     if (!x || x > std::numeric_limits<unsigned>::max())
@@ -372,6 +379,7 @@ static Config parse_config(Config c, json::object o, bool explicit_browser) {
   c.limits.generation_seconds = n("generation_seconds");
   c.limits.stream_idle_seconds = n("stream_idle_seconds");
   c.limits.max_attempts = n("max_attempts");
+  c.limits.max_continuation_retries = n("max_continuation_retries");
   c.model_aliases = o.at("model_aliases").as_object();
   c.configured_models = o.at("configured_models").as_array();
   c.model_defaults = o.at("model_defaults").as_object();
@@ -494,6 +502,8 @@ void Config::validate() const {
       !limits.max_attempts || limits.max_attempts > 16 ||
       limits.queue_size > 4096 || limits.relay_bytes > limits.object_bytes)
     throw Error(400, "invalid_config", "Inconsistent resource limits");
+  if (!limits.max_continuation_retries || limits.max_continuation_retries > 16)
+    throw Error(400, "invalid_config", "max_continuation_retries must be 1..16");
 }
 std::optional<std::string> Config::authenticate(std::string_view secret) const {
   if (api_key.empty() || secret.empty() || secret.size() > 4096)

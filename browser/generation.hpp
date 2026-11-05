@@ -17,7 +17,7 @@ struct GenerationIO {
     std::function<void()> completed;
 };
 // Production and controlled transports share parsing, backpressure, continuation
-// and the single empty-403 retry. Only completed rounds advance the checkpoint.
-void run_generation(const Request &request, const Limits &limits, const GenerationIO &io,
-                    const EventSink &sink, std::stop_token cancel);
+// and bounded empty-403 retries. Only completed rounds advance the checkpoint.
+void run_generation(const Request &request, const Limits &limits, bool retry_enabled,
+                    const GenerationIO &io, const EventSink &sink, std::stop_token cancel);
 } // namespace ais2api::browser_detail

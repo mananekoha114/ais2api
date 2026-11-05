@@ -51,11 +51,11 @@ bool known_benefit(const json::object &state) {
 }
 } // namespace
 
-void run_generation(const Request &request, const Limits &limits, const GenerationIO &io,
-                    const EventSink &sink, std::stop_token cancel) {
+void run_generation(const Request &request, const Limits &limits, bool retry_enabled,
+                    const GenerationIO &io, const EventSink &sink, std::stop_token cancel) {
     const auto deadline = Clock::now() + std::chrono::seconds(limits.generation_seconds);
     NativeContinuation continuation(request, deadline, cancel);
-    bool retried = false;
+    unsigned retries = 0;
     for (;;) {
         continuation.check();
         if (!continuation.token().empty())
@@ -179,7 +179,8 @@ void run_generation(const Request &request, const Limits &limits, const Generati
                     }
                 }
             } catch (const Error &error) {
-                if (!empty_http_denial || retried || continuation.token().empty() ||
+                if (!retry_enabled || !empty_http_denial ||
+                    retries >= limits.max_continuation_retries || continuation.token().empty() ||
                     error.status != 403 || error.code != "permission_denied")
                     throw;
                 continuation.check();
@@ -187,7 +188,7 @@ void run_generation(const Request &request, const Limits &limits, const Generati
                 const auto ready = Clock::now() + delay;
                 if (ready >= *activity + idle || (!request.stream && ready >= deadline))
                     throw;
-                retried = true;
+                ++retries;
                 sink(GenerationEvent(GenerationEvent::Kind::continuation_failed,
                                      {{"error", error.code}}));
                 std::mutex wait_mutex;

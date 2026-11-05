@@ -117,6 +117,8 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 | GET | `/diagnostics` | 脱敏诊断快照 |
 | POST | `/diagnostics/export` | 导出脱敏诊断快照 |
 
+`continuation_retry_enabled` 默认开启；`limits.max_continuation_retries` 默认 1、允许 1–16，整条回答共享额外补试次数。两项可通过配置 PATCH 保存并从下一次生成生效；当前回答保持开始时的设置。关闭开关仍保留次数，不关闭正常续接；其余保存和待重启规则相同。补试条件见[协议合同](protocol.md#总输出预算与自动续接)。
+
 ## 请求记录与估算费用
 
 详情的 `attempts[].kind` 区分 `initial`（首轮）、`retry`（无输出失败后的普通重试）、`continuation`（同一回答自动续接）与 `continuation_retry`（原续轮失败后的一次补试）。列表的 `attempt_count` 统计执行尝试数，续接与补试都不会新增客户端请求数。准备阶段失败也可能形成尝试记录，该数字不保证等于 Google 实际收到的请求数。旧记录可以缺少 `kind`，界面保留“尝试”的旧显示，不把旧数据猜测为续接。此扩展保存在既有 JSON 记录中，不改变 SQLite schema 版本。

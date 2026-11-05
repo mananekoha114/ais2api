@@ -13,7 +13,7 @@ import { session, signIn } from '../stores/session'
 import { confirm, copyText, notify, notifyError } from '../stores/ui'
 import { formatBytes } from '../utils/format'
 
-type ScalarKey = 'bind' | 'port' | 'proxy' | 'browser_proxy_relay' | 'browser_remote_allow_origins' | 'browser_site_isolation' | 'data_dir' | 'browser_executable' | 'headless' | 'ignore_unsupported_parameters' | 'search_model_drop_functions' | 'browser_idle_seconds' | 'cookie_import_max_accounts' | 'cookie_import_timeout_seconds'
+type ScalarKey = 'bind' | 'port' | 'proxy' | 'browser_proxy_relay' | 'browser_remote_allow_origins' | 'browser_site_isolation' | 'data_dir' | 'browser_executable' | 'headless' | 'ignore_unsupported_parameters' | 'search_model_drop_functions' | 'continuation_retry_enabled' | 'browser_idle_seconds' | 'cookie_import_max_accounts' | 'cookie_import_timeout_seconds'
 
 interface FieldDef {
   key: ScalarKey | `limits.${keyof Limits}`
@@ -25,6 +25,7 @@ interface FieldDef {
   max?: number
   unit?: 'bytes' | 's'
   placeholder?: string
+  enabledBy?: ScalarKey
 }
 
 const U32 = 4294967295
@@ -35,6 +36,14 @@ const groups: { title: string; icon: IconName; fields: FieldDef[] }[] = [
     fields: [
       { key: 'ignore_unsupported_parameters', label: '忽略不支持的参数', desc: '默认关闭。开启后，数据 API 会丢弃上游明确不支持的可选参数；保存后立即生效。', type: 'bool' },
       { key: 'search_model_drop_functions', label: '搜索模型舍弃自定义函数', desc: '默认开启。上游不允许 Google 搜索与自定义函数同时使用：开启时，*-search 模型收到自定义函数会舍弃函数、保留搜索；关闭时保留客户端传来的工具，不再自动加入搜索。保存后立即生效。', type: 'bool' },
+    ],
+  },
+  {
+    title: '续接重试',
+    icon: 'arrow_sync',
+    fields: [
+      { key: 'continuation_retry_enabled', label: '续接失败自动重试', desc: '默认开启。续接尚未收到生成数据时，遇到符合条件的 403 拒绝可自动补试；关闭不影响正常续接。保存后从下一次生成生效。', type: 'bool' },
+      { key: 'limits.max_continuation_retries', label: '最大重试次数', desc: '默认 1 次，可设 1–16 次。整条回答共享额外补试次数，不含每轮首次发送；关闭自动重试时保留此值。', type: 'number', min: 1, max: 16, enabledBy: 'continuation_retry_enabled' },
     ],
   },
   {
@@ -339,6 +348,7 @@ const bytesHint = (field: FieldDef) => (field.unit === 'bytes' && typeof form[fi
                   :inputmode="field.type === 'number' ? 'numeric' : undefined"
                   :min="field.min"
                   :max="field.max"
+                  :disabled="field.enabledBy !== undefined && !form[field.enabledBy]"
                   :placeholder="field.placeholder"
                   :aria-invalid="!!fieldError(field) || undefined"
                   autocomplete="off"

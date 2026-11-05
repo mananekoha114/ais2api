@@ -21,10 +21,11 @@ Request request(bool streaming = false) {
         streaming, Config{});
 }
 std::string run(gf::Script &script, const Request &r, std::vector<GenerationEvent> &events,
-                Limits limits = {}, std::stop_token cancel = {}, EventSink observe = {}) {
+                Limits limits = {}, std::stop_token cancel = {}, EventSink observe = {},
+                bool retry_enabled = true) {
     try {
         browser_detail::run_generation(
-            r, limits, script.io(r),
+            r, limits, retry_enabled, script.io(r),
             [&](GenerationEvent event) {
                 if (observe)
                     observe(event);
@@ -130,6 +131,49 @@ TEST_CASE("The continuation retry budget belongs to the whole generation",
     CHECK(run(script, r, events) == "permission_denied");
     CHECK(script.bodies.size() == script.attempts.size());
     CHECK(count(events, GenerationEvent::Kind::continuation_retry_started) == 1);
+}
+
+TEST_CASE("Disabling continuation retries preserves normal continuation", "[browser][continuation][continuation-retry]") {
+    gf::Script script;
+    std::vector<GenerationEvent> events;
+    SECTION("an empty denial is returned without another attempt") {
+        script.attempts = {gf::first(), {gf::denied()}};
+        CHECK(run(script, request(), events, {}, {}, {}, false) == "permission_denied");
+    }
+    SECTION("a successful continuation still finishes") {
+        script.attempts = {gf::first(), gf::last()};
+        CHECK(run(script, request(), events, {}, {}, {}, false).empty());
+    }
+    CHECK(script.bodies.size() == 2);
+    CHECK(count(events, GenerationEvent::Kind::continuation_retry_started) == 0);
+}
+
+TEST_CASE("Configured continuation retries share an exact whole-answer budget", "[browser][continuation][continuation-retry]") {
+    gf::Script script;
+    auto r = request();
+    Limits limits;
+    limits.max_continuation_retries = 2;
+    std::string expected = "permission_denied";
+    SECTION("two denials can recover at the same checkpoint") {
+        script.attempts = {gf::first(), {gf::denied()}, {gf::denied()}, gf::last()};
+        expected.clear();
+    }
+    SECTION("a third denial cannot allocate another attempt") {
+        script.attempts = {gf::first(), {gf::denied()}, {gf::denied()}, {gf::denied()}};
+    }
+    SECTION("a later checkpoint shares the remaining budget") {
+        r.output_budget = 100000;
+        script.attempts = {gf::first(), {gf::denied()},
+                           gf::response(gf::reply("world", 32768, 2, "next-checkpoint", 77744)),
+                           {gf::denied()}, {gf::denied()}};
+    }
+    std::vector<GenerationEvent> events;
+    CHECK(run(script, r, events, limits) == expected);
+    REQUIRE(script.bodies.size() == script.attempts.size());
+    CHECK(script.bodies[1] == script.bodies[2]);
+    CHECK(script.bodies[script.bodies.size() - 2] == script.bodies.back());
+    CHECK(count(events, GenerationEvent::Kind::continuation_retry_started) == 2);
+    CHECK(count(events, GenerationEvent::Kind::continuation_failed) == 2);
 }
 
 TEST_CASE("Only an unambiguous empty ordinary continuation HTTP 403 can retry",

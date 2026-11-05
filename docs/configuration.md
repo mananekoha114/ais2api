@@ -56,11 +56,14 @@
 |---|---|---|---|
 | `ignore_unsupported_parameters` | 布尔，`false` | 热更新 | 舍弃已知不支持的可选参数后继续生成，而不是报错。舍弃清单见 [协议合同](protocol.md#optional-unsupported-parameter-dropping)。 |
 | `search_model_drop_functions` | 布尔，`true` | 热更新 | `*-search` 模型同时收到自定义函数时：`true` 舍弃函数、保留搜索；`false` 保留函数、不加搜索。见 [搜索模型](protocol.md#search-models)。 |
+| `continuation_retry_enabled` | 布尔，`true` | 热更新 | 续接失败自动重试开关；只控制符合条件的无生成数据 403 补试，不关闭正常续接。 |
 | `model_aliases` | 对象，`{}` | 热更新 | 模型别名，键为客户端使用的名称，值为实际模型 id，例如 `{"flash": "gemini-3.1-flash-lite"}`。 |
 | `model_defaults` | 对象，`{}` | 热更新 | 按模型 id 设置默认请求字段（Gemini 请求格式），客户端显式传入的字段优先。例如 `{"gemini-3.1-flash-lite": {"generationConfig": {"temperature": 0.7}}}`。 |
 | `configured_models` | 数组，`[]` | 热更新 | 手动声明的备用模型（字符串 id 或模型对象）。没有任何账号保存的发现结果时作为 `source: "configured"` 返回，不代表真实可用。实时发现失败会报错并保留旧清单，不会把备用模型保存为发现结果。 |
 
 ### 资源限额 `limits`
+
+控制台“续接重试”中的 `continuation_retry_enabled` 默认开启，关闭时只停止失败后的补试，不影响正常自动续接。`limits.max_continuation_retries` 默认 1，允许 1–16，表示整条回答共享的额外补试次数，不包含每个续轮的首次发送；关闭开关会保留次数。两项保存后从下一条生成生效，正在执行的回答保持原设置。仅符合[续接恢复条件](protocol.md#总输出预算与自动续接)的无生成数据 HTTP 403 可以补试，次数增大不保证恢复，也可能增加等待和未知消耗。
 
 | 字段 | 默认值 | 生效方式 | 说明 |
 |---|---|---|---|
@@ -72,6 +75,7 @@
 | `generation_seconds` | 240 | 重启 | 非流式生成的总时限。 |
 | `stream_idle_seconds` | 240 | 重启 | 流式生成两次收到数据之间的最长间隔；只要数据持续到达，流式请求可以超过 `generation_seconds`。 |
 | `max_attempts` | 3（1–16） | 热更新 | 单个请求在没有输出任何内容前的最大尝试次数。 |
+| `max_continuation_retries` | 1（1–16） | 热更新 | 整条回答共用的续接额外补试次数，由 `continuation_retry_enabled` 控制是否启用。 |
 
 ## 环境变量与命令行参数
 
@@ -93,6 +97,8 @@
 | `request_retention_days` | `AIS2API_REQUEST_RETENTION_DAYS` | — |
 | `ignore_unsupported_parameters` | `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS` | — |
 | `search_model_drop_functions` | `AIS2API_SEARCH_MODEL_DROP_FUNCTIONS` | — |
+| `continuation_retry_enabled` | `AIS2API_CONTINUATION_RETRY_ENABLED` | — |
+| `limits.max_continuation_retries` | `AIS2API_MAX_CONTINUATION_RETRIES` | — |
 | `model_aliases` | `AIS2API_MODEL_ALIASES`（JSON） | — |
 | `model_defaults` | `AIS2API_MODEL_DEFAULTS`（JSON） | — |
 | `configured_models` | `AIS2API_CONFIGURED_MODELS`（JSON） | — |

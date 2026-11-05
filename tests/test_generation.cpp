@@ -115,6 +115,8 @@ public:
             std::stop_callback on_cancel(cancel, [state = state_] { state->cancelled = true; });
             gf::Script script;
             script.attempts = {gf::first(), {gf::denied()}, gf::last()};
+            if (request.model.ends_with("-twice"))
+                script.attempts.insert(script.attempts.begin() + 2, std::vector<json::value>{gf::denied()});
             if (request.model.ends_with("-always"))
                 script.attempts[2] = {gf::denied()};
             else if (request.model.ends_with("-partial")) {
@@ -138,9 +140,8 @@ public:
                     state_->continuation_denied = true;
                 return value;
             };
-            Limits limits;
-            limits.generation_seconds = limits.stream_idle_seconds = 5;
-            return browser_detail::run_generation(request, limits, io, emit, cancel);
+            return browser_detail::run_generation(request, config_.limits,
+                                                  config_.continuation_retry_enabled, io, emit, cancel);
         }
         if (request.model.starts_with("gemini-4-synthetic-continuation")) {
             if (request.model.ends_with("-retry") && attempt == 1)
@@ -275,6 +276,7 @@ public:
         return {{"ok", true}, {"status", "ok"}};
     }
     json::object diagnostics() override { return {{"synthetic", true}}; }
+    void reconfigure(const Config& config) override { config_ = config; }
     void close() override { ++state_->browser_closes; }
     bool release_idle() override {
         ++state_->idle_checks;
@@ -287,6 +289,7 @@ public:
 
 private:
     std::shared_ptr<BackendState> state_;
+    Config config_;
 };
 
 void receive_timeout(tcp::socket& socket) {
@@ -309,7 +312,8 @@ struct GenerationServer {
     std::atomic<bool> failed{false};
 
     explicit GenerationServer(bool browser_file_present = false, unsigned browser_idle_seconds = 0,
-                              unsigned queue_size = 8, unsigned queue_seconds = 5) {
+                              unsigned queue_size = 8, unsigned queue_seconds = 5,
+                              unsigned generation_seconds = 5) {
         net::io_context io;
         tcp::acceptor available(io, {tcp::v4(), 0});
         config.port = available.local_endpoint().port();
@@ -324,8 +328,8 @@ struct GenerationServer {
         config.limits.relay_bytes = 1024;
         config.limits.queue_seconds = queue_seconds;
         config.limits.queue_size = queue_size;
-        config.limits.generation_seconds = 5;
-        config.limits.stream_idle_seconds = 5;
+        config.limits.generation_seconds = generation_seconds;
+        config.limits.stream_idle_seconds = generation_seconds;
         config.limits.max_attempts = 3;
         config.browser_idle_seconds = browser_idle_seconds;
         fs::create_directories(directory);
@@ -943,6 +947,46 @@ continuation_request(int client, bool streaming,
     return {target, json::serialize(body)};
 }
 } // namespace
+
+TEST_CASE("Saved continuation retry settings affect subsequent HTTP generations", "[generation][http][continuation-retry]") {
+    for (int client : {0, 1, 2})
+        for (bool streaming : {false, true}) {
+            INFO("client=" << client << " streaming=" << streaming);
+            GenerationServer server(false, 0, 8, 5, 15);
+            const auto patch = [&](bool enabled) {
+                auto changed = server.call("/api/admin/v1/config",
+                    json::serialize(json::object{{"continuation_retry_enabled", enabled},
+                        {"limits", json::object{{"max_continuation_retries", 2}}}}), http::verb::patch);
+                REQUIRE(changed.result_int() == 200);
+                auto result = json::parse(changed.body()).as_object();
+                REQUIRE(bool_or(result, "applied"));
+                REQUIRE_FALSE(bool_or(result, "restart_required"));
+            };
+            auto [target, body] = continuation_request(client, streaming,
+                "gemini-4-synthetic-continuation-denied-twice");
+            patch(false);
+            auto failed = server.call(target, body);
+            CHECK(failed.body().find("permission_denied") != std::string::npos);
+            CHECK(server.state->rounds == 2);
+            patch(true);
+            auto recovered = server.call(target, body);
+            REQUIRE(recovered.result_int() == 200);
+            CHECK(recovered.body().find("hello") != std::string::npos);
+            CHECK(recovered.body().find("world") != std::string::npos);
+            CHECK(recovered.body().find("permission_denied") == std::string::npos);
+            CHECK(server.state->rounds == 6);
+            auto rows = finished_history(server);
+            Store store(server.config.data_dir);
+            auto detail = store.request(string_or(rows.front().as_object(), "id"));
+            const auto& attempts = detail.at("attempts").as_array();
+            REQUIRE(attempts.size() == 4);
+            CHECK(attempts[1].at("error") == "permission_denied");
+            CHECK(attempts[2].at("kind") == "continuation_retry");
+            CHECK(attempts[2].at("error") == "permission_denied");
+            CHECK(attempts[3].at("kind") == "continuation_retry");
+            CHECK(detail.at("initial_prompt_tokens") == 44976);
+        }
+}
 
 TEST_CASE("Native continuation is one answer with summed usage across all HTTP protocols",
           "[generation][http][continuation][continuation-retry]") {

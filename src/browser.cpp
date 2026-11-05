@@ -817,9 +817,11 @@ bool BrowserGateway::release_idle() {
 void BrowserGateway::reconfigure(const Config& config) {
     std::lock_guard lock(impl_->mutex);
     // Transport/lifecycle settings require a service restart. These fields are
-    // the model policy that config.reload may atomically replace.
+    // the generation policy that config.reload may atomically replace.
     impl_->config.model_aliases = config.model_aliases;
     impl_->config.model_defaults = config.model_defaults;
+    impl_->config.continuation_retry_enabled = config.continuation_retry_enabled;
+    impl_->config.limits.max_continuation_retries = config.limits.max_continuation_retries;
 }
 json::object BrowserGateway::diagnostics() {
     std::unique_lock lock(impl_->mutex, std::try_to_lock);
@@ -927,7 +929,8 @@ void BrowserGateway::generate(const Request &request, const Account &account, co
             if (large_body)
                 impl_->collect_garbage();
         };
-        browser_detail::run_generation(request, impl_->config.limits, io, sink, cancel);
+        browser_detail::run_generation(request, impl_->config.limits,
+                                       impl_->config.continuation_retry_enabled, io, sink, cancel);
     } catch (...) {
         try {
             impl_->eval("globalThis.__ais2bridge.abort()", {}, 3s);
