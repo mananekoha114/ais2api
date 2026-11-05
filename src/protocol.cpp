@@ -276,7 +276,21 @@ json::array encode_part(const json::object &p) {
     if (auto v = p.if_contains("inlineData")) {
         auto &x = object(*v, "inlineData");
         keys(x, {"mimeType", "data"}, "inlineData");
-        put(out, 2, json::array{required_string(x, "mimeType"), required_string(x, "data")});
+        auto data = required_string(x, "data");
+        data.erase(std::remove_if(data.begin(), data.end(),
+                                  [](unsigned char c) { return std::isspace(c) != 0; }),
+                   data.end());
+        for (char &c : data) {
+            if (c == '-')
+                c = '+';
+            else if (c == '_')
+                c = '/';
+        }
+        if (data.size() % 4 == 2)
+            data.append("==");
+        else if (data.size() % 4 == 3)
+            data.push_back('=');
+        put(out, 2, json::array{required_string(x, "mimeType"), std::move(data)});
         ++payloads;
     }
     for (auto [key, index] : {std::pair{"functionCall", 10}, std::pair{"functionResponse", 11}})

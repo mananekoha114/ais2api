@@ -91,6 +91,17 @@ TEST_CASE("JSPB contents contain typed Struct values and individual signatures",
     REQUIRE(decoded.at("usageMetadata").as_object().at("thoughtsTokenCount") == 3);
 }
 
+TEST_CASE("Inline media base64 drops transport whitespace and normalizes urlsafe alphabet", "[protocol]") {
+    Config cfg;
+    auto request = normalize_gemini(
+        "x",
+        obj(R"({"contents":[{"parts":[{"inlineData":{"mimeType":"image/png","data":"-_8\r\n "}}]}]})"),
+        false, cfg);
+    auto wire = encode_request(request, {}, "");
+    auto part = wire[1].as_array()[0].as_array()[0].as_array()[0].as_array();
+    REQUIRE(part[2].as_array()[1] == "+/8=");
+}
+
 TEST_CASE("Schemas encode recursive properties union and constraints without metadata injection",
           "[protocol]") {
     auto s = encode_schema(obj(

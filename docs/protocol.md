@@ -32,6 +32,7 @@
 支持的 Gemini 内容部件：`text`、`inlineData`、`functionCall`、`functionResponse`、`executableCode`、`codeExecutionResult`。
 
 - 每个部件保留各自的 `thought` 标志和 `thoughtSignature`。
+- `inlineData.data` 输出为标准 Base64；编码前移除传输中的空白字符，并将 URL-safe Base64 字符还原为标准字母表并补齐填充。
 - 函数值使用带类型的 protobuf Struct/Value 编码，正确处理 null、嵌套对象、布尔值、空列表与单元素列表。
 - `fileData` 与 Files API 明确不支持。
 - 每条 content 作为独立的 user/model 消息保留在原位置，包括连续的同角色消息。
