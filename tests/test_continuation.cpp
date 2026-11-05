@@ -66,6 +66,24 @@ TEST_CASE("Private checkpoints stay internal and only the last finish reaches cl
         CHECK(json::serialize(e.data).find("checkpoint-1") == std::string::npos);
 }
 
+TEST_CASE("Completed rounds carry the latest usage independently of the terminal chunk",
+          "[continuation][usage][round-snapshot]") {
+    NativeContinuation state(budget(65536));
+    std::vector<GenerationEvent> events;
+    EventSink sink = [&](GenerationEvent event) { events.push_back(std::move(event)); };
+    const auto usage = checkpoint(32768).at("usageMetadata").as_object();
+    state.push({{"usageMetadata", checkpoint(100).at("usageMetadata")}}, sink);
+    state.push({{"usageMetadata", usage}}, sink);
+    auto terminal = checkpoint(32768);
+    terminal.erase("usageMetadata");
+    state.push(std::move(terminal), sink);
+    REQUIRE(state.finish(sink));
+    REQUIRE(events.back().kind == GenerationEvent::Kind::round_finished);
+    CHECK(events.back().data.at("usageMetadata") == usage);
+    CHECK(events.back().data.at("candidates").at(0).at("finishReason") == "MAX_TOKENS");
+    CHECK(json::serialize(events.back().data).find("checkpoint-1") == std::string::npos);
+}
+
 TEST_CASE("Continuation obeys the total output budget including thought tokens", "[continuation]") {
     std::vector<GenerationEvent> events;
     EventSink sink = [&](GenerationEvent e) { events.push_back(std::move(e)); };

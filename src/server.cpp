@@ -727,7 +727,6 @@ class Service {
                 { std::lock_guard lock(queue_mutex_); active_account_id_ = account->id; }
                 log({{"event", "generation_attempt"}, {"request_id", work->usage->id()},
                     {"account_id", account->id}, {"attempt", attempt+1}});
-                std::optional<json::object> last_usage;
                 json::object completed_usage;
                 bool continuing = false;
                 try {
@@ -739,7 +738,6 @@ class Service {
                             check_cancel(token);
                             if (next.kind == GenerationEvent::Kind::continuation_failed) {
                                 work->usage->end_attempt(string_or(next.data, "error"));
-                                last_usage.reset();
                                 return;
                             }
                             if (next.kind == GenerationEvent::Kind::continuation_started ||
@@ -756,14 +754,14 @@ class Service {
                             }
                             auto event = std::move(next.data);
                             work->usage->event(event, has_content(event));
-                            if (auto usage = event.if_contains("usageMetadata"); usage && usage->is_object())
-                                last_usage = usage->as_object();
                             if (next.kind == GenerationEvent::Kind::round_finished) {
                                 continuing = true;
                                 work->usage->end_attempt();
-                                if (last_usage)
-                                    completed_usage = add_usage(completed_usage, *last_usage);
-                                last_usage.reset();
+                                // The completed round carries its latest usage snapshot.
+                                if (auto usage = event.if_contains("usageMetadata");
+                                    usage && usage->is_object())
+                                    completed_usage =
+                                        add_usage(completed_usage, usage->as_object());
                                 return;
                             }
                             check_cancel(token);
