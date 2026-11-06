@@ -691,7 +691,8 @@ TEST_CASE("Default thinking levels and Gemini 4 thinking controls follow the pub
         REQUIRE_THROWS_AS(level("gemini-4-argon", bad), Error);
 }
 
-TEST_CASE("Gemini 4 output stays within the AI Studio per-request limit", "[protocol]") {
+TEST_CASE("Gemini 4 retains the total budget and caps only the first wire request",
+          "[protocol][continuation]") {
     auto max_tokens = [](std::string model, std::string_view generation) {
         auto body = obj(R"({"contents":[{"parts":[{"text":"x"}]}]})");
         if (!generation.empty()) body["generationConfig"] = json::parse(generation);
@@ -701,9 +702,10 @@ TEST_CASE("Gemini 4 output stays within the AI Studio per-request limit", "[prot
     REQUIRE(max_tokens("gemini-4-argon", "") == std::pair{json::value(32768), json::array{}});
     REQUIRE(max_tokens("gemini-4-argon", R"({"maxOutputTokens":8192})") == std::pair{json::value(8192), json::array{}});
     REQUIRE(max_tokens("gemini-4-argon", R"({"maxOutputTokens":32768})").first == 32768);
-    for (auto large : {R"({"maxOutputTokens":65536})", R"({"maxOutputTokens":18446744073709551615})"})
-        REQUIRE(max_tokens("gemini-4-argon", large) ==
-                std::pair{json::value(32768), json::array{"generationConfig.maxOutputTokens"}});
+    REQUIRE(max_tokens("gemini-4-argon", R"({"maxOutputTokens":65536})") ==
+            std::pair{json::value(32768), json::array{}});
+    REQUIRE_THROWS_AS(max_tokens("gemini-4-argon", R"({"maxOutputTokens":18446744073709551615})"),
+                      Error);
     // Other families keep the upstream default and the caller's value.
     REQUIRE(max_tokens("gemini-3-pro", "").first.is_null());
     REQUIRE(max_tokens("gemini-3-pro", R"({"maxOutputTokens":65536})").first == 65536);
@@ -711,6 +713,25 @@ TEST_CASE("Gemini 4 output stays within the AI Studio per-request limit", "[prot
     auto chat = normalize_openai(
         obj(R"({"model":"gemini-4-argon","max_tokens":100000,"messages":[{"role":"user","content":"x"}]})"), Config{});
     REQUIRE(encode_request(chat, {}, "s")[3].as_array()[3] == 32768);
+    REQUIRE(chat.gemini.at("generationConfig").at("maxOutputTokens") == 100000);
+    json::array stale(17);
+    stale[16] = "old-checkpoint";
+    auto first = encode_request(chat, stale, "snapshot");
+    REQUIRE(first.size() <= 16);
+    REQUIRE(first[10].is_null());
+    REQUIRE(first[3].as_array()[45] == 1);
+    auto second = encode_request(chat, stale, "snapshot", "UTC", "new-checkpoint");
+    REQUIRE(second[16] == "new-checkpoint");
+    REQUIRE(second[3].as_array()[3] == 100000);
+    REQUIRE(second[3].as_array()[45] == 1);
+    REQUIRE(second[1] == first[1]);
+    REQUIRE(second[4] == first[4]);
+    Config defaults;
+    defaults.model_defaults["gemini-4-argon"] =
+        obj(R"({"generationConfig":{"maxOutputTokens":65536}})");
+    auto native = normalize_gemini(
+        "gemini-4-argon", obj(R"({"contents":[{"parts":[{"text":"x"}]}]})"), false, defaults);
+    REQUIRE(native.output_budget == 65536);
 }
 
 TEST_CASE("Native usage reports visible output separately from thoughts", "[protocol]") {

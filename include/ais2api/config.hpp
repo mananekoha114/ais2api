@@ -20,6 +20,7 @@ struct Limits {
     unsigned generation_seconds = 240;
     unsigned stream_idle_seconds = 240;
     unsigned max_attempts = 3;
+    unsigned max_continuation_retries = 1;
 };
 struct Config {
     int version = 1;
@@ -51,6 +52,8 @@ struct Config {
     // them to keep Google Search (true) or keeps the caller's tools unchanged
     // without injecting search (false); upstream rejects mixing the two.
     bool search_model_drop_functions = true;
+    // Retry empty ordinary continuation HTTP denials within one answer.
+    bool continuation_retry_enabled = true;
     // Optional memory saving: stop the browser after this many seconds without
     // work (0 = keep it running). The next request starts it again.
     unsigned browser_idle_seconds = 0;

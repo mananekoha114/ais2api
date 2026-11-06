@@ -161,6 +161,7 @@ export interface RequestRecord {
   first_token_ms: number | null
   generation_ms: number | null
   duration_ms: number | null
+  initial_prompt_tokens?: number
   usage: Record<string, number>
   cost: RequestEstimate
   attempt_count: number
@@ -168,6 +169,7 @@ export interface RequestRecord {
 export interface RequestDetail extends Omit<RequestRecord, 'attempt_count'> {
   settings: Record<string, number | boolean | string | Record<string, number | boolean | string>>
   attempts: {
+    kind?: 'initial' | 'retry' | 'continuation' | 'continuation_retry'
     account: string; started_at: number; ended_at: number | null; completed: boolean
     finish_reason: string; error: string; usage: Record<string, number>; cost: RequestCost
   }[]
@@ -228,6 +230,7 @@ export interface Limits {
   generation_seconds?: number
   stream_idle_seconds?: number
   max_attempts?: number
+  max_continuation_retries?: number
 }
 
 export interface Config {
@@ -247,6 +250,7 @@ export interface Config {
   headless?: boolean
   ignore_unsupported_parameters?: boolean
   search_model_drop_functions?: boolean
+  continuation_retry_enabled?: boolean
   browser_idle_seconds?: number
   request_retention_days?: number
   model_aliases?: Record<string, string>

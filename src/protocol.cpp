@@ -1126,9 +1126,6 @@ const json::object *thinking_config(const json::object &request) {
     auto thinking = generation->as_object().if_contains("thinkingConfig");
     return thinking && thinking->is_object() ? &thinking->as_object() : nullptr;
 }
-// AI Studio fails a Gemini 4 generation with "Internal error encountered." once
-// output, thinking included, passes this many tokens; it has no continuation.
-constexpr std::int64_t gemini4_output_limit = 32768;
 // The level a model uses without thinkingConfig, per the published Gemini
 // thinking guide. Unlisted text models keep HIGH like the reference client.
 std::string default_thinking_level(std::string_view family, bool image) {
@@ -1193,7 +1190,8 @@ Request normalize_native(std::string model, const json::object &input, bool stre
         }
     json::object family_generation{{"thinkingConfig", json::object{{"thinkingLevel", level}}}};
     if (image) family_generation["responseModalities"] = json::array{"IMAGE"};
-    if (gemini4) family_generation["maxOutputTokens"] = gemini4_output_limit;
+    if (gemini4)
+        family_generation["maxOutputTokens"] = studio_round_tokens;
     json::object family_defaults{{"generationConfig", family_generation}};
     if (!image && (family.starts_with("gemini-") || family.starts_with("gemma-"))) {
         json::array safety;
@@ -1205,12 +1203,9 @@ Request normalize_native(std::string model, const json::object &input, bool stre
     merge_request_defaults(r.gemini, family_defaults);
     if (auto g = r.gemini.if_contains("generationConfig"); gemini4 && g && g->is_object())
         if (auto max = g->as_object().if_contains("maxOutputTokens"); max && (max->is_int64() || max->is_uint64())) {
-            if (number(*max, INT64_MAX) > gemini4_output_limit) {
-                // Ending at the limit with MAX_TOKENS keeps the partial answer.
-                *max = gemini4_output_limit;
-                r.ignored_parameters.push_back("generationConfig.maxOutputTokens");
-            }
-            if (number(*max, 0) == gemini4_output_limit) r.output_limit = gemini4_output_limit;
+            if (number(*max, INT64_MAX) > 1048576)
+                invalid("Gemini 4 maxOutputTokens exceeds the 1048576-token context ceiling");
+            r.output_budget = number(*max, 0);
         }
     if (config.ignore_unsupported_parameters)
         discard_gemini_controls(r.gemini, r.model, r.ignored_parameters);
@@ -1295,7 +1290,7 @@ bool lists_search_variant(std::string_view id, const json::object &entry) {
 }
 
 json::array encode_request(const Request &r, const json::array &base, std::string_view snapshot,
-                           std::string_view timezone) {
+                           std::string_view timezone, std::string_view continuation_token) {
     json::array out = base;
     put(out, 0, json::value("models/" + r.model));
     auto c = r.gemini.if_contains("contents");
@@ -1304,10 +1299,22 @@ json::array encode_request(const Request &r, const json::array &base, std::strin
     put(out, 1, encode_contents(array(*c, "contents")));
     put(out, 4, json::value(snapshot));
     put(out, 10, 1);
-    for (auto i : {2, 3, 5, 6, 7, 11, 13})
+    for (auto i : {2, 3, 5, 6, 7, 11, 13, 16})
         put(out, i, nullptr);
     if (auto p = r.gemini.if_contains("generationConfig"))
         put(out, 3, generation_wire(object(*p, "generationConfig")));
+    if (r.output_budget) {
+        auto &generation = out.at(3).as_array();
+        put(generation, 3,
+            continuation_token.empty() ? std::min(*r.output_budget, studio_round_tokens)
+                                       : *r.output_budget);
+        put(generation, 45, 1);
+        put(out, 10, nullptr);
+        if (!continuation_token.empty())
+            put(out, 16, json::value(continuation_token));
+    } else if (!continuation_token.empty())
+        throw Error(500, "invalid_continuation",
+                    "Continuation is unavailable for this model family");
     if (auto p = r.gemini.if_contains("systemInstruction"))
         put(out, 5, content_wire(object(*p, "systemInstruction"), true));
     const json::object *tc = nullptr;
@@ -1406,7 +1413,8 @@ json::object decode_chunk(const json::value &wire) {
                 continue;
             auto &c = v.as_array();
             for (std::size_t i = 0; i < c.size(); ++i)
-                if (!c[i].is_null() && i != 0 && i != 1 && i != 3 && i != 4)
+                if (!c[i].is_null() && i != 0 && i != 1 && i != 3 && i != 4 &&
+                    !(i == 8 && c[i].is_string()))
                     note_ignored(ignored, "candidate[" + std::to_string(i) + "]");
             json::object candidate{{"index", index++}};
             if (at(c, 0).is_array()) {
@@ -1428,6 +1436,10 @@ json::object decode_chunk(const json::value &wire) {
                 candidate["finishReason"] = finish_name(number(c[1]));
             if (at(c, 3).is_string())
                 candidate["finishMessage"] = c[3];
+            // Only a string is a checkpoint. Other values stay ignored for every
+            // model family; a continuation that needs one fails as missing.
+            if (at(c, 8).is_string())
+                candidate[continuation_token_key] = c[8];
             if (at(c, 4).is_array() && !c[4].as_array().empty())
                 candidate["ais2api"] = json::object{{"wireSafetyRatings", c[4]}};
             candidates.push_back(candidate);
@@ -1456,6 +1468,29 @@ json::object decode_chunk(const json::value &wire) {
         out[upstream_ignored_key] = std::move(locations);
     }
     return out;
+}
+
+json::object add_usage(const json::object &completed, const json::object &current) {
+    json::object result;
+    for (auto key : {"promptTokenCount", "candidatesTokenCount", "totalTokenCount",
+                     "cachedContentTokenCount", "thoughtsTokenCount", "toolUsePromptTokenCount"}) {
+        auto left = completed.if_contains(key), right = current.if_contains(key);
+        if (!left && !right)
+            continue;
+        auto count = [](const json::value *v) -> std::int64_t {
+            if (!v)
+                return 0;
+            if ((v->is_int64() && v->as_int64() >= 0) ||
+                (v->is_uint64() && v->as_uint64() <= INT64_MAX))
+                return v->to_number<std::int64_t>();
+            throw Error(502, "invalid_upstream", "Invalid token usage counts");
+        };
+        const auto a = count(left), b = count(right);
+        if (b > INT64_MAX - a)
+            throw Error(502, "invalid_upstream", "Token usage overflow");
+        result[key] = a + b;
+    }
+    return result;
 }
 
 json::array take_upstream_ignored(json::object &event) {

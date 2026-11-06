@@ -33,6 +33,7 @@ std::map<std::string, std::string> child_overrides(const Config &effective) {
                       {"browser_remote_allow_origins", "AIS2API_BROWSER_REMOTE_ALLOW_ORIGINS"},
                       {"browser_site_isolation", "AIS2API_BROWSER_SITE_ISOLATION"},
                       {"headless", "AIS2API_HEADLESS"},
+                      {"continuation_retry_enabled", "AIS2API_CONTINUATION_RETRY_ENABLED"},
                       {"browser_idle_seconds", "AIS2API_BROWSER_IDLE_SECONDS"},
                       {"limits", "AIS2API_LIMITS"},
                       {"model_aliases", "AIS2API_MODEL_ALIASES"},
@@ -52,7 +53,8 @@ std::map<std::string, std::string> child_overrides(const Config &effective) {
                       {"queue_seconds", "AIS2API_QUEUE_SECONDS"},
                       {"generation_seconds", "AIS2API_GENERATION_SECONDS"},
                       {"stream_idle_seconds", "AIS2API_STREAM_IDLE_SECONDS"},
-                      {"max_attempts", "AIS2API_MAX_ATTEMPTS"}}) {
+                      {"max_attempts", "AIS2API_MAX_ATTEMPTS"},
+                      {"max_continuation_retries", "AIS2API_MAX_CONTINUATION_RETRIES"}}) {
         if (limits.at(pair.first) != base_limits.at(pair.first))
             result[pair.second] = json::serialize(limits.at(pair.first));
     }

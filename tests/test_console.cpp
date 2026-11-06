@@ -40,6 +40,12 @@ TEST_CASE("Console log lines describe service events in Chinese", "[console]") {
           "错误 生成失败        chatcmpl-1  m  session_expired  3 次尝试");
     CHECK(body(R"({"event":"generation","request_id":"chatcmpl-1","model":"m","generation_ms":12,"error":"cancelled"})") ==
           "警告 生成已取消      chatcmpl-1  m  耗时 12ms");
+    CHECK(body(R"({"event":"generation_continuation","request_id":"chatcmpl-1","account_id":"acc_1","attempt":2,"round":2})") ==
+          "信息 继续生成        第 2 轮  chatcmpl-1");
+    CHECK(body(R"({"event":"generation_continuation_retry","request_id":"chatcmpl-1","account_id":"acc_1","attempt":3,"round":2})") ==
+          "警告 续接重试        第 2 轮  chatcmpl-1");
+    CHECK(body(R"({"event":"output_budget_exceeded","request_id":"chatcmpl-1","account_id":"acc_1","budget":40000,"output":40001})") ==
+          "警告 输出超过总预算  40001 / 40000 token  chatcmpl-1");
     CHECK(body(R"({"event":"generation_parameters_ignored","request_id":"chatcmpl-1","parameters":["tools.functionDeclarations","web_search_options.user_location"]})") ==
           "提示 已忽略参数      chatcmpl-1  tools.functionDeclarations, web_search_options.user_location");
     CHECK(body(R"({"event":"upstream_fields_ignored","request_id":"chatcmpl-1","locations":["part[25]","part[26]","candidate[7]"]})") ==

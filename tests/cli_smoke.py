@@ -173,11 +173,16 @@ class Smoke:
         self.config.write_text(json.dumps(configuration), encoding="utf-8")
 
         self.current = "start_effective_override"
+        self.environment["AIS2API_CONTINUATION_RETRY_ENABLED"] = "false"
+        self.environment["AIS2API_MAX_CONTINUATION_RETRIES"] = "2"
         self.started = True  # Even a start timeout must trigger finally cleanup.
         status = self.cli("start", "--port", str(self.port))
         self.check("start_reports_running", status.get("running") is True)
         code, health = self.http("/health")
         self.check("start_port_override_reaches_http", code == 200 and health.get("status") == "alive")
+        effective = self.cli("config", "show").get("config", {})
+        self.check("start_continuation_retry_disabled", effective.get("continuation_retry_enabled") is False)
+        self.check("start_continuation_retry_budget", effective.get("limits", {}).get("max_continuation_retries") == 2)
 
         self.current = "online_account_import"
         imported = self.cli("accounts", "import", "--stdin", "--name", "Synthetic smoke account",

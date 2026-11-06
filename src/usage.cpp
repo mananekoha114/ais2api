@@ -137,13 +137,7 @@ void summarize_request(json::object &record, bool complete) {
     std::int64_t unpriced = 0, priced_attempts = 0;
     for (auto &a : record.at("attempts").as_array()) {
         auto &attempt = a.as_object();
-        for (auto &field : attempt.at("usage").as_object()) {
-            if (!field.value().is_number())
-                continue;
-            auto n = field.value().to_number<std::int64_t>();
-            auto old = usage.if_contains(field.key());
-            usage[field.key()] = n + (old ? old->to_number<std::int64_t>() : 0);
-        }
+        usage = add_usage(usage, attempt.at("usage").as_object());
         auto &cost = attempt.at("cost").as_object();
         if (string_or(cost, "status") != "priced")
             ++unpriced;
@@ -245,14 +239,17 @@ void RequestUsage::normalized(std::string_view model, const json::object &gemini
     additional_ = extra_dimensions(gemini);
     save();
 }
-void RequestUsage::begin_attempt(std::string_view account) {
+void RequestUsage::begin_attempt(std::string_view account, std::string_view kind) {
     std::lock_guard lock(mutex_);
+    if (kind.empty())
+        kind = record_.at("attempts").as_array().empty() ? "initial" : "retry";
     record_["account"] = identifier(account);
     usage_valid_ = true;
     attempt_open_ = true;
     record_.at("attempts")
         .as_array()
         .push_back(json::object{{"account", identifier(account)},
+                                {"kind", kind},
                                 {"started_at", now_ms()},
                                 {"ended_at", nullptr},
                                 {"completed", false},
@@ -267,8 +264,13 @@ void RequestUsage::event(const json::object &event, bool content) {
     auto &attempt = record_.at("attempts").as_array().back().as_object();
     if (content && record_.at("first_token_ms").is_null())
         record_["first_token_ms"] = elapsed(created_);
-    if (auto p = event.if_contains("usageMetadata"); p && p->is_object())
+    if (auto p = event.if_contains("usageMetadata"); p && p->is_object()) {
         attempt["usage"] = allowed_usage(p->as_object(), usage_valid_);
+        const auto kind = string_or(attempt, "kind");
+        if (kind != "continuation" && kind != "continuation_retry")
+            if (auto count = attempt.at("usage").as_object().if_contains("promptTokenCount"))
+                record_["initial_prompt_tokens"] = *count;
+    }
     if (auto candidates = event.if_contains("candidates"); candidates && candidates->is_array())
         for (auto &candidate : candidates->as_array())
             if (candidate.is_object()) {

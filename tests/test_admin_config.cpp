@@ -11,9 +11,9 @@ struct AdminDirectory {
     ~AdminDirectory() { std::error_code ec; fs::remove_all(path, ec); }
 };
 struct CompatibilityEnvironment {
-    static constexpr const char* key = "AIS2API_IGNORE_UNSUPPORTED_PARAMETERS";
+    const char* key;
     std::optional<std::string> previous;
-    CompatibilityEnvironment() {
+    explicit CompatibilityEnvironment(const char* name = "AIS2API_IGNORE_UNSUPPORTED_PARAMETERS") : key(name) {
         if (const auto* value = std::getenv(key)) previous = value;
         set("");
     }
@@ -92,6 +92,52 @@ TEST_CASE("search model function policy defaults to dropping functions and updat
     for (const auto& invalid : json::array{0, "false", nullptr, json::object{}})
         CHECK_THROWS_AS(cfg.patched({{"search_model_drop_functions", invalid}}), Error);
 }
+TEST_CASE("continuation retry settings persist, validate and reload without restart", "[config][admin][continuation-retry]") {
+    CompatibilityEnvironment enabled_env("AIS2API_CONTINUATION_RETRY_ENABLED");
+    CompatibilityEnvironment count_env("AIS2API_MAX_CONTINUATION_RETRIES");
+    AdminDirectory dir;
+    auto cfg = Config::load(dir.path / "config.json");
+    CHECK(cfg.continuation_retry_enabled);
+    CHECK(cfg.limits.max_continuation_retries == 1);
+    auto disabled = cfg.patched({{"continuation_retry_enabled", false},
+                                 {"limits", json::object{{"max_continuation_retries", 3}}}});
+    CHECK_FALSE(disabled.continuation_retry_enabled);
+    CHECK(disabled.limits.max_continuation_retries == 3);
+    CHECK_FALSE(restart_required(cfg, disabled));
+    disabled.save();
+    auto loaded = Config::load(cfg.config_file);
+    CHECK_FALSE(loaded.continuation_retry_enabled);
+    CHECK(loaded.limits.max_continuation_retries == 3);
+    CHECK(loaded.patched({{"continuation_retry_enabled", true}}).limits.max_continuation_retries == 3);
+    for (const auto& invalid : json::array{0, 1, "true", nullptr, json::array{}, json::object{}})
+        CHECK_THROWS_AS(cfg.patched({{"continuation_retry_enabled", invalid}}), Error);
+    for (const auto& invalid : json::array{0, 17, -1, 4294967296LL, true, "3", nullptr, 1.5})
+        CHECK_THROWS_AS(disabled.patched({{"limits", json::object{{"max_continuation_retries", invalid}}}}), Error);
+    for (unsigned count : {1u, 16u}) {
+        auto valid = cfg.patched({{"limits", json::object{{"max_continuation_retries", count}}}});
+        CHECK(valid.limits.max_continuation_retries == count);
+    }
+    Config direct = disabled;
+    direct.limits.max_continuation_retries = 0;
+    CHECK_THROWS_AS(direct.validate(), Error);
+    direct.limits.max_continuation_retries = 17;
+    CHECK_THROWS_AS(direct.validate(), Error);
+    enabled_env.set("true");
+    count_env.set("2");
+    auto overridden = Config::load(cfg.config_file);
+    CHECK(overridden.continuation_retry_enabled);
+    CHECK(overridden.limits.max_continuation_retries == 2);
+    CHECK_FALSE(Config::load(cfg.config_file, {{"continuation_retry_enabled", false}}).continuation_retry_enabled);
+    count_env.set("17");
+    CHECK_THROWS_AS(Config::load(cfg.config_file), Error);
+    count_env.set("1");
+    enabled_env.set("1");
+    CHECK_THROWS_AS(Config::load(cfg.config_file), Error);
+    auto persisted = json::parse(read_file(cfg.config_file));
+    CHECK(persisted.at("continuation_retry_enabled") == false);
+    CHECK(persisted.at("limits").at("max_continuation_retries") == 3);
+}
+
 TEST_CASE("idle browser release is off by default and updates without restart", "[config][admin][idle-release]") {
     AdminDirectory dir;
     auto cfg = Config::load(dir.path / "config.json");

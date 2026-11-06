@@ -7,6 +7,7 @@
 #include "ais2api/backend.hpp"
 #include "ais2api/runtime.hpp"
 #include "ais2api/pricing.hpp"
+#include "browser_generation_fixture.hpp"
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -14,7 +15,11 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <fstream>
+#include <iterator>
+#include <memory>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <tuple>
 
@@ -45,14 +50,17 @@ json::object finish_event() {
 
 struct BackendState {
     std::atomic<unsigned> calls{0};
+    std::atomic<unsigned> rounds{0};
     std::atomic<bool> cancelled{false};
     std::atomic<bool> continue_stream{false};
     std::atomic<bool> stream_continued{false};
+    std::atomic<bool> continuation_denied{false};
     std::mutex mutex;
     json::object request;
     json::array wire;
     std::string account_id;
     std::vector<std::string> attempted_accounts;
+    std::vector<std::string> generation_bodies;
     std::vector<std::string> probed_accounts;
     std::atomic<unsigned> session_resets{0};
     std::atomic<unsigned> browser_closes{0};
@@ -104,6 +112,85 @@ public:
             error.quota_scope = "minute";
             throw error;
         }
+        if (request.model.starts_with("gemini-4-synthetic-continuation")) {
+            namespace gf = generation_fixture;
+            std::stop_callback on_cancel(cancel, [state = state_] { state->cancelled = true; });
+            gf::Script script;
+            if (request.model.starts_with("gemini-4-synthetic-continuation-denied-")) {
+                script.attempts = {gf::first(), {gf::denied()}, gf::last()};
+                if (request.model.ends_with("-twice"))
+                    script.attempts.insert(script.attempts.begin() + 2,
+                                           std::vector<json::value>{gf::denied()});
+                if (request.model.ends_with("-always"))
+                    script.attempts[2] = {gf::denied()};
+                else if (request.model.ends_with("-partial")) {
+                    auto closed = gf::done();
+                    closed["error"] = "ERR_CONNECTION_CLOSED";
+                    script.attempts[2] = {
+                        gf::pending(gf::stream(gf::reply("world", 1, 0, {}, 77744))), closed};
+                }
+            } else {
+                if (request.model.ends_with("-retry") && attempt == 1)
+                    throw Error(404, "transient_rpc_route", "Synthetic first attempt failed");
+                const unsigned rounds = request.model.ends_with("-three") ? 3 : 2;
+                for (unsigned round = 0; round < rounds; ++round) {
+                    const auto prompt = 44976 + round * 32768;
+                    const bool last = round + 1 == rounds;
+                    auto terminal =
+                        gf::reply("", last ? 11955 : 32768, last ? 1 : 2,
+                                  !last && !request.model.ends_with("-missing")
+                                      ? "private-synthetic-checkpoint-" + std::to_string(round)
+                                      : "",
+                                  prompt);
+                    terminal.at(0).at(0).as_array()[0] = nullptr;
+                    auto text = gf::reply(round ? round == 1 ? "world" : "!" : "hello ", 0, 0);
+                    text[2] = nullptr;
+                    text[7] = "synthetic-response";
+                    // Split before usage/checkpoint delivery so disconnects can
+                    // still interrupt an unfinished round after its text arrives.
+                    auto prefix = ")]}'\n[[" + json::serialize(text) + ",";
+                    auto suffix = json::serialize(json::array{
+                                      nullptr, nullptr, json::array{prompt, 100, prompt + 100}}) +
+                                  "," + json::serialize(terminal) + "]]";
+                    script.attempts.push_back(
+                        {gf::pending(prefix), gf::pending(suffix, 2), gf::done()});
+                }
+            }
+            script.before_next = [&](std::size_t round, std::size_t position) {
+                if (position != 1)
+                    return;
+                if (!round && request.model.ends_with("-gated")) {
+                    const auto deadline = Clock::now() + 5s;
+                    while (!state_->continue_stream.load()) {
+                        check_cancel(cancel);
+                        if (Clock::now() > deadline)
+                            throw Error(504, "synthetic_gate_timeout", "Client gate timed out");
+                        std::this_thread::sleep_for(5ms);
+                    }
+                    state_->stream_continued = true;
+                }
+                if (round && request.model.ends_with("-failed"))
+                    throw Error(502, "synthetic_continuation_failure",
+                                "Synthetic continuation failed");
+            };
+            auto io = script.io(request);
+            auto start = io.start;
+            io.start = [&, start](std::string_view body, const std::function<void()> &check) {
+                start(body, check);
+                ++state_->rounds;
+                std::lock_guard lock(state_->mutex);
+                state_->generation_bodies.emplace_back(body);
+            };
+            auto next = io.next;
+            io.next = [&, next](std::uint64_t acknowledgment) {
+                auto value = next(acknowledgment);
+                if (value.at("status") == 403)
+                    state_->continuation_denied = true;
+                return value;
+            };
+            return browser_detail::run_generation(
+                request, config_.limits, config_.continuation_retry_enabled, io, emit, cancel);
+        }
         if (request.model == "synthetic-cancel") {
             // emit waits for downstream acknowledgment and may itself throw on
             // disconnect. Observe cancellation before publishing the first event
@@ -152,12 +239,21 @@ public:
             emit(finish_event());
             return;
         }
+        if (request.model == "gemini-4-synthetic-overrun") {
+            // The final round reports one token beyond the caller's total budget.
+            namespace gf = generation_fixture;
+            gf::Script script;
+            script.attempts = {gf::response(gf::reply("hello", 1001, 1))};
+            return browser_detail::run_generation(request, config_.limits, true,
+                                                  script.io(request), emit, cancel);
+        }
         if (request.model.starts_with("gemini-4-synthetic-limit")) {
             // AI Studio's failure once output passes its per-request limit.
             emit(text_event("hello "));
             const auto output = request.model.ends_with("-early") ? 100 : 32000;
-            emit({{"usageMetadata", json::object{{"promptTokenCount", 4}, {"candidatesTokenCount", output},
-                                                 {"totalTokenCount", output + 4}}}});
+            emit(json::object{{"usageMetadata", json::object{{"promptTokenCount", 4},
+                                                             {"candidatesTokenCount", output},
+                                                             {"totalTokenCount", output + 4}}}});
             throw Error(500, "upstream_internal", "Internal error encountered.");
         }
         emit(text_event("hello "));
@@ -187,6 +283,7 @@ public:
         return {{"ok", true}, {"status", "ok"}};
     }
     json::object diagnostics() override { return {{"synthetic", true}}; }
+    void reconfigure(const Config& config) override { config_ = config; }
     void close() override { ++state_->browser_closes; }
     bool release_idle() override {
         ++state_->idle_checks;
@@ -199,6 +296,7 @@ public:
 
 private:
     std::shared_ptr<BackendState> state_;
+    Config config_;
 };
 
 void receive_timeout(tcp::socket& socket) {
@@ -221,7 +319,8 @@ struct GenerationServer {
     std::atomic<bool> failed{false};
 
     explicit GenerationServer(bool browser_file_present = false, unsigned browser_idle_seconds = 0,
-                              unsigned queue_size = 8, unsigned queue_seconds = 5) {
+                              unsigned queue_size = 8, unsigned queue_seconds = 5,
+                              unsigned generation_seconds = 5) {
         net::io_context io;
         tcp::acceptor available(io, {tcp::v4(), 0});
         config.port = available.local_endpoint().port();
@@ -236,8 +335,8 @@ struct GenerationServer {
         config.limits.relay_bytes = 1024;
         config.limits.queue_seconds = queue_seconds;
         config.limits.queue_size = queue_size;
-        config.limits.generation_seconds = 5;
-        config.limits.stream_idle_seconds = 5;
+        config.limits.generation_seconds = generation_seconds;
+        config.limits.stream_idle_seconds = generation_seconds;
         config.limits.max_attempts = 3;
         config.browser_idle_seconds = browser_idle_seconds;
         fs::create_directories(directory);
@@ -626,26 +725,59 @@ TEST_CASE("Client grounding options reach AI Studio wire over unary and SSE HTTP
     REQUIRE_FALSE(server.failed);
 }
 
-TEST_CASE("An internal error at the Gemini 4 output limit ends with MAX_TOKENS", "[generation][http][gemini-clients]") {
+TEST_CASE("A reported Gemini 4 budget overrun is logged without failing the delivered answer",
+          "[generation][http][continuation]") {
+    GenerationServer server;
+    auto response = server.call(
+        "/v1beta/models/gemini-4-synthetic-overrun:generateContent",
+        R"({"contents":[{"parts":[{"text":"question"}]}],"generationConfig":{"maxOutputTokens":1000}})");
+    REQUIRE(response.result_int() == 200);
+    auto result = json::parse(response.body()).as_object();
+    CHECK(result.at("candidates").at(0).at("finishReason") == "STOP");
+    CHECK(result.at("usageMetadata").at("candidatesTokenCount") == 1001);
+    // Service logs are written asynchronously.
+    std::string journal;
+    for (const auto until = Clock::now() + 5s; Clock::now() < until;
+         std::this_thread::sleep_for(20ms)) {
+        std::ifstream in(server.config.data_dir / "management.log", std::ios::binary);
+        journal.assign(std::istreambuf_iterator<char>(in), {});
+        if (journal.find("output_budget_exceeded") != std::string::npos)
+            break;
+    }
+    CHECK(journal.find(R"("event":"output_budget_exceeded")") != std::string::npos);
+    CHECK(journal.find(R"("budget":1000)") != std::string::npos);
+    CHECK(journal.find(R"("output":1001)") != std::string::npos);
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("Internal errors at the Gemini 4 limit remain errors and preserve partial output",
+          "[generation][http][gemini-clients][continuation]") {
     GenerationServer server;
     const std::string question = R"({"contents":[{"parts":[{"text":"question"}]}]})";
     auto unary = server.call("/v1beta/models/gemini-4-synthetic-limit:generateContent", question);
-    REQUIRE(unary.result_int() == 200);
+    REQUIRE(unary.result_int() == 500);
     auto result = json::parse(unary.body()).as_object();
-    auto candidate = result.at("candidates").as_array()[0].as_object();
-    CHECK(candidate.at("finishReason") == "MAX_TOKENS");
+    auto partial = result.at("ais2api").at("partial_response").as_object();
+    auto candidate = partial.at("candidates").as_array()[0].as_object();
+    CHECK_FALSE(candidate.contains("finishReason"));
     CHECK(json::serialize(candidate).find("hello ") != std::string::npos);
-    CHECK(result.at("usageMetadata").at("candidatesTokenCount") == 32000);
+    CHECK(partial.at("usageMetadata").at("candidatesTokenCount") == 32000);
     auto stream = server.call("/v1beta/models/gemini-4-synthetic-limit:streamGenerateContent", question);
     REQUIRE(stream.result_int() == 200);
     auto records = sse_records(stream.body());
     REQUIRE_FALSE(records.empty());
-    CHECK(records.back().find("MAX_TOKENS") != std::string::npos);
-    CHECK(stream.body().find("error") == std::string::npos);
+    CHECK(records.back().find("upstream_internal") != std::string::npos);
+    CHECK(stream.body().find("MAX_TOKENS") == std::string::npos);
     auto chat = server.call("/v1/chat/completions",
                             R"({"model":"gemini-4-synthetic-limit","messages":[{"role":"user","content":"question"}]})");
-    REQUIRE(chat.result_int() == 200);
-    CHECK(json::parse(chat.body()).at("choices").at(0).at("finish_reason") == "length");
+    REQUIRE(chat.result_int() == 500);
+    CHECK(json::parse(chat.body())
+              .at("ais2api")
+              .at("partial_response")
+              .at("choices")
+              .at(0)
+              .at("finish_reason")
+              .is_null());
     CHECK(server.state->calls == 3);
     // Below the limit, or well before it, the same error stays an error.
     for (const auto &[model, body] : std::vector<std::pair<std::string, std::string>>{
@@ -666,12 +798,20 @@ TEST_CASE("A request history failure at start is reported as such", "[generation
     GenerationServer server;
     REQUIRE(server.call("/v1beta/models/synthetic-unary:generateContent",
                         R"({"contents":[{"parts":[{"text":"warm up"}]}]})").result_int() == 200);
-    sqlite3 *db = nullptr;
-    REQUIRE(sqlite3_open((server.config.data_dir / "usage.sqlite3").string().c_str(), &db) == SQLITE_OK);
-    REQUIRE(sqlite3_exec(db, "CREATE TRIGGER fail_start BEFORE UPDATE ON request_history WHEN NEW.status='running' "
-                             "BEGIN SELECT RAISE(ABORT,'synthetic history failure'); END",
-                         nullptr, nullptr, nullptr) == SQLITE_OK);
-    sqlite3_close(db);
+    sqlite3 *connection = nullptr;
+    const auto opened =
+        sqlite3_open((server.config.data_dir / "usage.sqlite3").string().c_str(), &connection);
+    std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(connection, sqlite3_close);
+    REQUIRE(opened == SQLITE_OK);
+    REQUIRE(sqlite3_busy_timeout(db.get(), 5000) == SQLITE_OK);
+    const auto trigger = sqlite3_exec(
+        db.get(),
+        "CREATE TRIGGER fail_start BEFORE UPDATE ON request_history WHEN NEW.status='running' "
+        "BEGIN SELECT RAISE(ABORT,'synthetic history failure'); END",
+        nullptr, nullptr, nullptr);
+    INFO(sqlite3_errmsg(db.get()));
+    REQUIRE(trigger == SQLITE_OK);
+    db.reset();
     auto response = server.call("/v1beta/models/synthetic-unary:generateContent",
                                 R"({"contents":[{"parts":[{"text":"question"}]}]})");
     REQUIRE(response.result_int() == 503);
@@ -808,6 +948,367 @@ json::array response_events(std::string_view body) {
     }
     return events;
 }
+}
+
+namespace {
+std::pair<std::string, std::string>
+continuation_request(int client, bool streaming,
+                     std::string model = "gemini-4-synthetic-continuation", int limit = 65536) {
+    json::object body;
+    std::string target;
+    if (client == 0) {
+        body = {{"contents", json::array{json::object{
+                                 {"parts", json::array{json::object{{"text", "question"}}}}}}},
+                {"generationConfig", json::object{{"maxOutputTokens", limit}}}};
+        target =
+            "/v1beta/models/" + model + (streaming ? ":streamGenerateContent" : ":generateContent");
+    } else {
+        body = {{"model", model}, {"stream", streaming}};
+        if (client == 1) {
+            target = "/v1/chat/completions";
+            body["messages"] = json::array{json::object{{"role", "user"}, {"content", "question"}}};
+            body["max_completion_tokens"] = limit;
+            if (streaming)
+                body["stream_options"] = json::object{{"include_usage", true}};
+        } else {
+            target = "/v1/responses";
+            body["input"] = "question";
+            body["max_output_tokens"] = limit;
+        }
+    }
+    return {target, json::serialize(body)};
+}
+} // namespace
+
+TEST_CASE("Saved continuation retry settings affect subsequent HTTP generations", "[generation][http][continuation-retry]") {
+    for (int client : {0, 1, 2})
+        for (bool streaming : {false, true}) {
+            INFO("client=" << client << " streaming=" << streaming);
+            GenerationServer server(false, 0, 8, 5, 15);
+            const auto patch = [&](bool enabled) {
+                auto changed = server.call("/api/admin/v1/config",
+                    json::serialize(json::object{{"continuation_retry_enabled", enabled},
+                        {"limits", json::object{{"max_continuation_retries", 2}}}}), http::verb::patch);
+                REQUIRE(changed.result_int() == 200);
+                auto result = json::parse(changed.body()).as_object();
+                REQUIRE(bool_or(result, "applied"));
+                REQUIRE_FALSE(bool_or(result, "restart_required"));
+            };
+            auto [target, body] = continuation_request(client, streaming,
+                "gemini-4-synthetic-continuation-denied-twice");
+            patch(false);
+            auto failed = server.call(target, body);
+            CHECK(failed.body().find("permission_denied") != std::string::npos);
+            CHECK(server.state->rounds == 2);
+            patch(true);
+            auto recovered = server.call(target, body);
+            REQUIRE(recovered.result_int() == 200);
+            CHECK(recovered.body().find("hello") != std::string::npos);
+            CHECK(recovered.body().find("world") != std::string::npos);
+            CHECK(recovered.body().find("permission_denied") == std::string::npos);
+            CHECK(server.state->rounds == 6);
+            auto rows = finished_history(server);
+            Store store(server.config.data_dir);
+            auto detail = store.request(string_or(rows.front().as_object(), "id"));
+            const auto& attempts = detail.at("attempts").as_array();
+            REQUIRE(attempts.size() == 4);
+            CHECK(attempts[1].at("error") == "permission_denied");
+            CHECK(attempts[2].at("kind") == "continuation_retry");
+            CHECK(attempts[2].at("error") == "permission_denied");
+            CHECK(attempts[3].at("kind") == "continuation_retry");
+            CHECK(detail.at("initial_prompt_tokens") == 44976);
+        }
+}
+
+TEST_CASE("Native continuation is one answer with summed usage across all HTTP protocols",
+          "[generation][http][continuation][continuation-retry]") {
+    GenerationServer server;
+    Store store(server.config.data_dir);
+    auto catalog = json::parse(
+        R"({"schema_version":1,"published_at":"2026-01-01T00:00:00Z","currency":"USD","models":{"gemini-4-synthetic-continuation":{"periods":[{"from":null,"tiers":[{"above_tokens":0,"input":1,"output":2},{"above_tokens":50000,"input":10,"output":20}]}]}}})");
+    auto price = catalog.at("models").at("gemini-4-synthetic-continuation");
+    catalog.at("models").as_object()["gemini-4-synthetic-continuation-denied-once"] =
+        std::move(price);
+    store.save_price_source("google", parse_price_catalog(catalog, 1), 1);
+    for (const std::string model :
+         {"gemini-4-synthetic-continuation", "gemini-4-synthetic-continuation-denied-once"})
+        for (bool streaming : {false, true})
+            for (int client : {0, 1, 2}) {
+                INFO(model << " client=" << client << " streaming=" << streaming);
+                const bool replayed = model.ends_with("-denied-once");
+                const auto calls_before = server.state->calls.load();
+                auto [target, body] = continuation_request(client, streaming, model);
+                auto response = server.call(target, body);
+                REQUIRE(response.result_int() == 200);
+                CHECK(response.body().find("private-synthetic-checkpoint") == std::string::npos);
+                CHECK(response.body().find("ais2apiContinuationToken") == std::string::npos);
+                CHECK(response.body().find("MAX_TOKENS") == std::string::npos);
+                CHECK(response.body().find("permission_denied") == std::string::npos);
+                CHECK(response.body().find("!synthetic-snapshot") == std::string::npos);
+                json::object result;
+                if (streaming && client != 2) {
+                    std::string text;
+                    unsigned finishes = 0;
+                    std::set<std::string> ids;
+                    for (auto &record : sse_records(response.body())) {
+                        if (record == "[DONE]")
+                            continue;
+                        auto chunk = json::parse(record).as_object();
+                        if (client == 0) {
+                            auto id = string_or(chunk, "responseId");
+                            if (!id.empty())
+                                ids.insert(id);
+                            if (auto candidates = chunk.if_contains("candidates"))
+                                for (auto &value : candidates->as_array()) {
+                                    auto &candidate = value.as_object();
+                                    if (candidate.contains("finishReason"))
+                                        ++finishes;
+                                    if (auto content = candidate.if_contains("content"))
+                                        for (auto &part : content->at("parts").as_array())
+                                            text += string_or(part.as_object(), "text");
+                                }
+                        } else {
+                            ids.insert(string_or(chunk, "id"));
+                            for (auto &choice : chunk.at("choices").as_array()) {
+                                if (!choice.at("finish_reason").is_null())
+                                    ++finishes;
+                                text += string_or(choice.at("delta").as_object(), "content");
+                            }
+                        }
+                        result = chunk;
+                    }
+                    REQUIRE(text == "hello world");
+                    REQUIRE(finishes == 1);
+                    REQUIRE(ids.size() == 1);
+                } else {
+                    result =
+                        streaming
+                            ? response_events(response.body()).back().at("response").as_object()
+                            : json::parse(response.body()).as_object();
+                    if (client == 0)
+                        REQUIRE(result.at("candidates")
+                                    .at(0)
+                                    .at("content")
+                                    .at("parts")
+                                    .at(0)
+                                    .at("text") == "hello world");
+                    else if (client == 1)
+                        REQUIRE(result.at("choices").at(0).at("message").at("content") ==
+                                "hello world");
+                    else {
+                        REQUIRE(result.at("status") == "completed");
+                        REQUIRE(result.at("output").at(0).at("content").at(0).at("text") ==
+                                "hello world");
+                        if (streaming) {
+                            unsigned finishes = 0;
+                            for (auto &e : response_events(response.body()))
+                                if (e.at("type") == "response.completed")
+                                    ++finishes;
+                            REQUIRE(finishes == 1);
+                        }
+                    }
+                }
+                auto usage = result.at(client == 0 ? "usageMetadata" : "usage").as_object();
+                REQUIRE(usage.at(client == 0   ? "promptTokenCount"
+                                 : client == 1 ? "prompt_tokens"
+                                               : "input_tokens") == 122720);
+                REQUIRE(usage.at(client == 0   ? "candidatesTokenCount"
+                                 : client == 1 ? "completion_tokens"
+                                               : "output_tokens") == 44723);
+                REQUIRE(usage.at(client == 0 ? "totalTokenCount" : "total_tokens") == 167443);
+                auto rows = finished_history(server);
+                auto detail = store.request(string_or(rows.front().as_object(), "id"));
+                REQUIRE(detail.at("status") == "succeeded");
+                REQUIRE(detail.at("attempts").as_array().size() == (replayed ? 3 : 2));
+                REQUIRE(detail.at("initial_prompt_tokens") == 44976);
+                REQUIRE(detail.at("usage").at("promptTokenCount") == 122720);
+                REQUIRE(detail.at("settings").at("maxOutputTokens") == 65536);
+                const auto &attempts = detail.at("attempts").as_array();
+                REQUIRE(attempts[0].at("kind") == "initial");
+                REQUIRE(attempts[1].at("kind") == "continuation");
+                REQUIRE(attempts[0].at("account") == attempts[1].at("account"));
+                REQUIRE(attempts[0].at("cost").at("amount_nano") == 110512000);
+                const auto &final = attempts[replayed ? 2 : 1];
+                REQUIRE(final.at("cost").at("amount_nano") == 1016540000);
+                REQUIRE(final.at("completed") == true);
+                if (replayed) {
+                    CHECK(attempts[1].at("error") == "permission_denied");
+                    CHECK(attempts[1].at("usage").as_object().empty());
+                    CHECK(attempts[1].at("cost").at("amount_nano").is_null());
+                    CHECK(final.at("kind") == "continuation_retry");
+                    CHECK(final.at("account") == attempts[0].at("account"));
+                    CHECK(detail.at("error") == "");
+                    CHECK(detail.at("cost").at("amount_nano").is_null());
+                    CHECK(detail.at("cost").at("known_amount_nano") == 1127052000);
+                    CHECK(detail.at("cost").at("unpriced_attempts") == 1);
+                    std::lock_guard lock(server.state->mutex);
+                    const auto size = server.state->generation_bodies.size();
+                    REQUIRE(size >= 3);
+                    CHECK(server.state->generation_bodies[size - 2] ==
+                          server.state->generation_bodies[size - 1]);
+                } else
+                    REQUIRE(detail.at("cost").at("amount_nano") == 1127052000);
+                CHECK(server.state->calls == calls_before + 1);
+                CHECK(json::serialize(detail).find("private-synthetic-checkpoint") ==
+                      std::string::npos);
+            }
+    REQUIRE(server.state->calls == 12);
+    REQUIRE(server.state->rounds == 30);
+    CHECK(server.state->session_resets == 0);
+    CHECK(server.state->browser_closes == 0);
+    REQUIRE(store.stats().at("totals").at("success") == 12);
+}
+
+TEST_CASE("Continuation failures preserve prefixes without retrying another account",
+          "[generation][http][continuation][continuation-retry]") {
+    GenerationServer server;
+    struct Failure {
+        const char *suffix, *error;
+        int status, executions, total_tokens;
+    };
+    for (const auto test : {Failure{"-failed", "synthetic_continuation_failure", 502, 2, 77744},
+                            Failure{"-missing", "continuation_missing_token", 502, 1, 77744},
+                            Failure{"-denied-always", "permission_denied", 403, 3, 77744},
+                            Failure{"-denied-partial", "upstream_error", 502, 3, 155489}})
+        for (bool streaming : {false, true})
+            for (int client : {0, 1, 2}) {
+                INFO(test.suffix << " client=" << client << " streaming=" << streaming);
+                const auto before = server.state->calls.load();
+                const auto rounds_before = server.state->rounds.load();
+                auto [target, body] = continuation_request(
+                    client, streaming,
+                    std::string("gemini-4-synthetic-continuation") + test.suffix);
+                auto response = server.call(target, body);
+                REQUIRE(response.result_int() == (streaming ? 200 : test.status));
+                REQUIRE(response.body().find("hello ") != std::string::npos);
+                if (std::string_view(test.suffix) == "-denied-partial")
+                    CHECK(response.body().find("world") != std::string::npos);
+                REQUIRE(response.body().find("MAX_TOKENS") == std::string::npos);
+                REQUIRE(response.body().find("[DONE]") == std::string::npos);
+                REQUIRE(response.body().find("response.completed") == std::string::npos);
+                REQUIRE(response.body().find(test.error) != std::string::npos);
+                REQUIRE(server.state->calls == before + 1);
+                CHECK(server.state->rounds == rounds_before + test.executions);
+                if (!streaming) {
+                    auto partial = json::parse(response.body())
+                                       .at("ais2api")
+                                       .at("partial_response")
+                                       .as_object();
+                    if (client == 0)
+                        REQUIRE_FALSE(
+                            partial.at("candidates").at(0).as_object().contains("finishReason"));
+                    else if (client == 1)
+                        REQUIRE(partial.at("choices").at(0).at("finish_reason").is_null());
+                    else {
+                        REQUIRE(partial.at("status") == "failed");
+                        REQUIRE(partial.at("output").at(0).at("status") == "incomplete");
+                    }
+                }
+                auto rows = finished_history(server);
+                REQUIRE(rows.front().at("status") == "failed");
+                REQUIRE(rows.front().at("usage").at("totalTokenCount") == test.total_tokens);
+                REQUIRE(rows.front().at("attempt_count") == test.executions);
+                if (test.executions == 3) {
+                    Store store(server.config.data_dir);
+                    auto detail = store.request(string_or(rows.front().as_object(), "id"));
+                    CHECK(detail.at("attempts").at(1).at("error") == "permission_denied");
+                    CHECK(detail.at("attempts").at(2).at("kind") == "continuation_retry");
+                    CHECK(detail.at("attempts").at(2).at("error").as_string() == test.error);
+                    CHECK(detail.at("initial_prompt_tokens") == 44976);
+                }
+            }
+}
+
+TEST_CASE("Continuation supports three rounds and remains distinct from pre-output retries",
+          "[generation][http][continuation]") {
+    GenerationServer server;
+    auto [target, body] =
+        continuation_request(0, false, "gemini-4-synthetic-continuation-three", 100000);
+    auto response = server.call(target, body);
+    REQUIRE(response.result_int() == 200);
+    auto result = json::parse(response.body());
+    REQUIRE(result.at("candidates").at(0).at("content").at("parts").at(0).at("text") ==
+            "hello world!");
+    REQUIRE(result.at("usageMetadata").at("candidatesTokenCount") == 77491);
+    REQUIRE(finished_history(server).front().at("attempt_count") == 3);
+    // A fresh service lets the synthetic first-attempt failure fire once.
+    GenerationServer retry;
+    std::tie(target, body) =
+        continuation_request(1, false, "gemini-4-synthetic-continuation-retry");
+    REQUIRE(retry.call(target, body).result_int() == 200);
+    auto rows = finished_history(retry);
+    Store store(retry.config.data_dir);
+    auto attempts =
+        store.request(string_or(rows.front().as_object(), "id")).at("attempts").as_array();
+    REQUIRE(attempts.size() == 3);
+    REQUIRE(attempts[0].at("kind") == "initial");
+    REQUIRE(attempts[1].at("kind") == "retry");
+    REQUIRE(attempts[2].at("kind") == "continuation");
+    REQUIRE(retry.state->calls == 2);
+    REQUIRE(retry.state->rounds == 2);
+}
+
+TEST_CASE("HTTP disconnect during continuation retry waiting records no unsent retry",
+          "[generation][http][continuation][continuation-retry]") {
+    GenerationServer server;
+    net::io_context io;
+    tcp::socket socket(io);
+    socket.connect({net::ip::make_address("127.0.0.1"), server.config.port});
+    receive_timeout(socket);
+    auto [target, body] =
+        continuation_request(0, true, "gemini-4-synthetic-continuation-denied-once");
+    http::write(socket, server.request(target, body));
+    boost::beast::flat_buffer input;
+    http::response_parser<http::buffer_body> parser;
+    http::read_header(socket, input, parser);
+    REQUIRE(parser.get().result_int() == 200);
+    const auto deadline = Clock::now() + 1s;
+    while (!server.state->continuation_denied && Clock::now() < deadline)
+        std::this_thread::sleep_for(5ms);
+    REQUIRE(server.state->continuation_denied);
+    boost::system::error_code ignored;
+    socket.set_option(net::socket_base::linger(true, 0));
+    socket.close(ignored);
+    const auto cancelled_by = Clock::now() + 1s;
+    while (!server.state->cancelled && Clock::now() < cancelled_by)
+        std::this_thread::sleep_for(5ms);
+    REQUIRE(server.state->cancelled);
+    CHECK(server.state->rounds == 2);
+    auto rows = finished_history(server);
+    CHECK(rows.front().at("status") == "cancelled");
+    Store store(server.config.data_dir);
+    auto detail = store.request(string_or(rows.front().as_object(), "id"));
+    REQUIRE(detail.at("attempts").as_array().size() == 2);
+    CHECK(detail.at("attempts").at(1).at("error") == "permission_denied");
+}
+
+TEST_CASE("Disconnect before a continuation checkpoint prevents the next upstream round",
+          "[generation][http][continuation]") {
+    GenerationServer server;
+    net::io_context io;
+    tcp::socket socket(io);
+    socket.connect({net::ip::make_address("127.0.0.1"), server.config.port});
+    receive_timeout(socket);
+    auto [target, body] = continuation_request(0, true, "gemini-4-synthetic-continuation-gated");
+    http::write(socket, server.request(target, body));
+    boost::beast::flat_buffer input;
+    http::response_parser<http::buffer_body> parser;
+    http::read_header(socket, input, parser);
+    REQUIRE(parser.get().result_int() == 200);
+    std::string received = boost::beast::buffers_to_string(input.data());
+    std::array<char, 1024> buffer{};
+    while (received.find("hello ") == std::string::npos)
+        received.append(buffer.data(), socket.read_some(net::buffer(buffer)));
+    REQUIRE(server.state->rounds == 1);
+    boost::system::error_code ignored;
+    socket.shutdown(tcp::socket::shutdown_both, ignored);
+    socket.close(ignored);
+    const auto deadline = Clock::now() + 2s;
+    while (!server.state->cancelled && Clock::now() < deadline)
+        std::this_thread::sleep_for(5ms);
+    REQUIRE(server.state->cancelled);
+    REQUIRE(server.state->rounds == 1);
+    REQUIRE(finished_history(server).front().at("status") == "cancelled");
 }
 
 TEST_CASE("Responses JSON and named SSE expose consistent text and usage", "[generation][http][responses]") {

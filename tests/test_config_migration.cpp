@@ -70,6 +70,8 @@ TEST_CASE("loading a partial configuration fills defaults, preserves values and 
     CHECK(persisted.at("version") == 1);
     CHECK(persisted.at("ignore_unsupported_parameters") == false);
     CHECK(persisted.at("search_model_drop_functions") == true);
+    CHECK(persisted.at("continuation_retry_enabled") == true);
+    CHECK(persisted.at("limits").at("max_continuation_retries") == 1);
     CHECK(persisted.at("browser_idle_seconds") == 0);
     CHECK(persisted.at("browser_proxy_relay") == false);
     CHECK(persisted.at("browser_remote_allow_origins") == false);

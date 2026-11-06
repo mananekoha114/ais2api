@@ -7,9 +7,9 @@
 #include "ais2api/browser.hpp"
 #include "ais2api/region.hpp"
 #include "../browser/cdp.hpp"
+#include "../browser/generation.hpp"
 #include "../browser/proxy_relay.hpp"
 #include "../browser/google_auth.hpp"
-#include "../browser/rpc_error.hpp"
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 #include <boost/beast/websocket.hpp>
@@ -192,23 +192,6 @@ std::string quote_js(std::string_view s) {
     std::string quoted;
     browser_detail::append_quoted(quoted, s);
     return quoted;
-}
-std::string decode64(std::string_view encoded) {
-    constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    if (encoded.size() > 4 * ((32768 + 2) / 3) || encoded.size() % 4) incompatible("Invalid browser relay chunk");
-    std::string bytes;
-    bytes.reserve(encoded.size() * 3 / 4);
-    unsigned bits = 0, count = 0;
-    bool padding = false;
-    for (char c : encoded) {
-        if (c == '=') { padding = true; continue; }
-        const auto n = alphabet.find(c);
-        if (padding || n == std::string_view::npos) incompatible("Invalid base64 browser chunk");
-        bits = (bits << 6) | static_cast<unsigned>(n); count += 6;
-        if (count >= 8) { count -= 8; bytes.push_back(static_cast<char>((bits >> count) & 255)); }
-    }
-    if (bytes.size() > 32768) incompatible("Browser exceeded byte credit");
-    return bytes;
 }
 // Each launch writes its own browser-*.log; keep the most recent ones only.
 void prune_browser_logs(const fs::path& directory, std::size_t keep = 8) {
@@ -495,7 +478,7 @@ struct BrowserGateway::Impl {
     // Sends a request body to the page in pieces passed as call arguments.
     // The bridge keeps each piece as a Blob, outside the JavaScript heap, so
     // neither a script source nor a page string ever holds the whole body.
-    std::string upload(std::string body, std::stop_token token) {
+    std::string upload(std::string_view body, std::stop_token token) {
         constexpr std::size_t piece_bytes = 512 * 1024;
         auto bridge = cdp->call("Runtime.evaluate", {{"expression", "globalThis.__ais2bridge"}, {"objectGroup", "ais2api-upload"}}, session, token);
         auto remote = bridge.if_contains("result");
@@ -834,9 +817,11 @@ bool BrowserGateway::release_idle() {
 void BrowserGateway::reconfigure(const Config& config) {
     std::lock_guard lock(impl_->mutex);
     // Transport/lifecycle settings require a service restart. These fields are
-    // the model policy that config.reload may atomically replace.
+    // the generation policy that config.reload may atomically replace.
     impl_->config.model_aliases = config.model_aliases;
     impl_->config.model_defaults = config.model_defaults;
+    impl_->config.continuation_retry_enabled = config.continuation_retry_enabled;
+    impl_->config.limits.max_continuation_retries = config.limits.max_continuation_retries;
 }
 json::object BrowserGateway::diagnostics() {
     std::unique_lock lock(impl_->mutex, std::try_to_lock);
@@ -891,102 +876,69 @@ json::array BrowserGateway::models(const Account &account, std::stop_token cance
     impl_->models_discovered = true;
     return result.as_array();
 }
-void BrowserGateway::generate(const Request& request, const Account& account, const EventSink& sink, std::stop_token cancel) {
+void BrowserGateway::generate(const Request &request, const Account &account, const EventSink &sink,
+                              std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
     impl_->ensure_account(account, cancel, true);
     impl_->phase = "snapshot_ticket";
     auto wire = encode_request(request, impl_->base_template, "", impl_->timezone);
     // Covers the bridge's bounded snapshot retries (3 x 9 s).
-    auto snapshot = impl_->eval("globalThis.__ais2bridge.snapshot(" + quote_js(content_hash(wire)) + ")", cancel, 30s);
-    if (!snapshot.is_string() || snapshot.as_string().empty()) incompatible("Snapshot service produced no request ticket");
-    wire[4] = snapshot;
-    auto body = json::serialize(wire);
+    auto snapshot = impl_->eval(
+        "globalThis.__ais2bridge.snapshot(" + quote_js(content_hash(wire)) + ")", cancel, 30s);
+    if (!snapshot.is_string() || snapshot.as_string().empty())
+        incompatible("Snapshot service produced no request ticket");
     json::array().swap(wire);
     const auto chunk_bytes = std::min<std::size_t>(32768, impl_->config.limits.relay_bytes);
-    if (!chunk_bytes) throw Error(500, "invalid_config", "Browser relay byte budget must be positive");
-    impl_->phase = "request_authorization";
-    const auto authorization = impl_->authorization(cancel);
-    const bool large_body = body.size() >= 1024 * 1024;
-    WireStreamParser parser(impl_->config.limits.object_bytes);
-    std::uint64_t sequence = 0;
-    std::string error_prefix;
-    constexpr std::size_t error_prefix_limit = 16384;
-    std::optional<Error> parse_failure;
+    if (!chunk_bytes)
+        throw Error(500, "invalid_config", "Browser relay byte budget must be positive");
+    bool large_body = false;
     try {
-        impl_->phase = "generation_upload";
-        const auto upload = impl_->upload(std::move(body), cancel);
-        impl_->phase = "generation_start";
-        impl_->eval("globalThis.__ais2bridge.start({upload:" + quote_js(upload) + ",authUser:" + quote_js(account.auth_user) +
-                    ",authorization:" + quote_js(authorization) + ",chunkBytes:" + std::to_string(chunk_bytes) + "})", cancel);
-        const auto began = Clock::now();
-        auto activity = began;
-        impl_->phase = "generation_read";
-        // Sequence of the consumed chunk the next call acknowledges (0: none).
-        std::uint64_t unacknowledged = 0;
-        while (true) {
-            check_cancel(cancel);
-            if (!request.stream && Clock::now() - began > std::chrono::seconds(impl_->config.limits.generation_seconds)) throw Error(504, "generation_timeout", "Generation deadline exceeded");
-            if (Clock::now() - activity > std::chrono::seconds(impl_->config.limits.stream_idle_seconds)) throw Error(504, "stream_idle_timeout", "No upstream stream bytes before idle deadline");
-            // The page answers as soon as a chunk or the end arrives.
-            auto value = impl_->eval("globalThis.__ais2bridge.next(" + std::to_string(unacknowledged) + ",250)", cancel, 5s);
-            unacknowledged = 0;
-            check_cancel(cancel);
-            if (!value.is_object()) incompatible("Browser relay state was lost");
-            const auto& state = value.as_object();
-            auto classified = [&](Error error) {
-                if (error.status == 403 && string_or(state, "benefitTier", "unknown") == "unknown")
-                    error.code = "benefit_tier_unconfirmed";
-                return error;
-            };
-            const auto retry_value = state.if_contains("retryAfter");
-            const auto retry_after = retry_value && retry_value->is_int64() && retry_value->as_int64() > 0 ? static_cast<unsigned>(std::min<std::int64_t>(86400, retry_value->as_int64())) : 0u;
-            auto pending = state.if_contains("pending");
-            if (pending && pending->is_object()) {
-                auto number = pending->as_object().if_contains("sequence");
-                if (!number || !number->is_int64() || number->as_int64() != static_cast<std::int64_t>(sequence + 1)) incompatible("Browser relay sequence mismatch");
-                const auto bytes = decode64(string_or(pending->as_object(), "bytes"));
-                if (bytes.empty()) incompatible("Empty browser relay credit");
-                if (error_prefix.size() < error_prefix_limit) error_prefix.append(bytes.substr(0, error_prefix_limit - error_prefix.size()));
-                if (auto error = browser_detail::rpc_text_error(error_prefix, retry_after)) throw classified(*error);
-                try { if (!parse_failure) parser.feed(bytes, [&](json::value chunk) {
-                    check_cancel(cancel);
-                    if (auto error = browser_detail::rpc_error(chunk, retry_after)) throw classified(*error);
-                    auto event = decode_chunk(chunk);
-                    if (!event.empty()) sink(std::move(event));
-                    check_cancel(cancel);
-                }); } catch (const Error& error) {
-                    if (error.code != "invalid_upstream" && error.code != "truncated_upstream") throw;
-                    parse_failure = error;
+        browser_detail::GenerationIO io;
+        io.encode = [&](std::string_view checkpoint) {
+            return json::serialize(encode_request(request, impl_->base_template,
+                                                  std::string_view(snapshot.as_string()),
+                                                  impl_->timezone, checkpoint));
+        };
+        io.start = [&](std::string_view body, const std::function<void()> &check) {
+            check();
+            impl_->phase = "request_authorization";
+            const auto authorization = impl_->authorization(cancel);
+            large_body = body.size() >= 1024 * 1024;
+            impl_->phase = "generation_upload";
+            const auto upload = impl_->upload(body, cancel);
+            check();
+            impl_->phase = "generation_start";
+            impl_->eval("globalThis.__ais2bridge.start({upload:" + quote_js(upload) +
+                            ",authUser:" + quote_js(account.auth_user) +
+                            ",authorization:" + quote_js(authorization) +
+                            ",chunkBytes:" + std::to_string(chunk_bytes) + "})",
+                        cancel);
+            impl_->phase = "generation_read";
+        };
+        io.next = [&](std::uint64_t acknowledgment) {
+            return impl_->eval("globalThis.__ais2bridge.next(" +
+                                   std::to_string(acknowledgment) + ",250)", cancel, 5s);
+        };
+        io.completed = [&] {
+            impl_->phase = "generation_complete";
+            if (Clock::now() - impl_->cookies_saved_at >= 300s)
+                try {
+                    impl_->persist_cookies(account, {});
+                } catch (...) {
                 }
-                if (parse_failure && error_prefix.size() >= error_prefix_limit) throw *parse_failure;
-                if (!request.stream && Clock::now() - began > std::chrono::seconds(impl_->config.limits.generation_seconds)) throw Error(504, "generation_timeout", "Generation deadline exceeded while consuming downstream events");
-                // EventSink returns only once downstream consumed its event.
-                // ACK grants the page permission for exactly one next read.
-                unacknowledged = ++sequence;
-                activity = Clock::now();
-            } else if (bool_or(state, "done")) {
-                const auto error = string_or(state, "error");
-                const auto status_value = state.if_contains("status");
-                const auto status = status_value && status_value->is_int64() ? status_value->as_int64() : 0;
-                if (status == 204) throw Error(502, "upstream_no_content", "Google returned an empty response");
-                if (!error.empty()) {
-                    const auto error_body = string_or(state, "errorBody");
-                    if (auto rpc = browser_detail::rpc_text_error(error_body, retry_after)) throw classified(*rpc);
-                    if (auto http = browser_detail::rpc_status_error(status, retry_after, error_body)) throw classified(*http);
-                    throw Error(502, error.starts_with("browser_incompatible") ? "browser_incompatible" : "upstream_error", "Browser generation transport failed");
-                }
-                if (auto rpc = browser_detail::rpc_text_error(error_prefix, retry_after)) throw classified(*rpc);
-                if (parse_failure) throw *parse_failure;
-                parser.finish(); impl_->phase = "generation_complete";
-                if (Clock::now() - impl_->cookies_saved_at >= 300s)
-                    try { impl_->persist_cookies(account, {}); } catch (...) {}
-                if (large_body) impl_->collect_garbage();
-                return;
-            }
-        }
+            if (large_body)
+                impl_->collect_garbage();
+        };
+        browser_detail::run_generation(request, impl_->config.limits,
+                                       impl_->config.continuation_retry_enabled, io, sink, cancel);
     } catch (...) {
-        try { impl_->eval("globalThis.__ais2bridge.abort()", {}, 3s); } catch (...) { impl_->close(); }
-        if (large_body) impl_->collect_garbage();
+        try {
+            impl_->eval("globalThis.__ais2bridge.abort()", {}, 3s);
+        } catch (...) {
+            impl_->close();
+        }
+        if (large_body)
+            impl_->collect_garbage();
         throw;
     }
 }

@@ -4,7 +4,7 @@ import FDialog from './FDialog.vue'
 import FInfoBar from './FInfoBar.vue'
 import type { RequestDetail } from '../api/types'
 import { formatNumber, formatTimestamp } from '../utils/format'
-import { activeRequest, attemptsSummary, costKinds, costReasons, dollars, estimateCoverage, estimateDollars, finishLabel, generationSettings, rateDollars, requestStatusLabel } from '../utils/usage'
+import { activeRequest, attemptLabel, attemptsSummary, costKinds, costReasons, dollars, estimateCoverage, estimateDollars, finishLabel, generationSettings, rateDollars, requestStatusLabel } from '../utils/usage'
 
 const props = defineProps<{ record: RequestDetail | null; error: string; loading: boolean; accountName: (id: string) => string }>()
 const open = defineModel<boolean>('open', { default: false })
@@ -34,6 +34,11 @@ const endpoint = { chat_completions: 'Chat Completions', responses: 'Responses',
         <dd>{{ record.requested_model || '—' }}</dd>
         <dt>执行账号</dt>
         <dd>{{ accountName(record.account) }}</dd>
+        <template v-if="record.initial_prompt_tokens != null">
+          <dt>原始输入</dt><dd>{{ formatNumber(record.initial_prompt_tokens) }} Tokens</dd>
+        </template>
+        <dt>累计用量</dt>
+        <dd>输入 {{ formatNumber(record.usage.promptTokenCount) }} · 输出 {{ formatNumber(record.usage.candidatesTokenCount) }} Tokens</dd>
         <dt>开始时间</dt>
         <dd>{{ timestamp(record.created_at) }}</dd>
         <dt>结束时间</dt>
@@ -59,9 +64,10 @@ const endpoint = { chat_completions: 'Chat Completions', responses: 'Responses',
       </details>
       <p class="t-caption t-secondary">{{ estimateCoverage(record.cost) }}</p>
       <p v-if="record.attempts.length > 1" class="t-caption t-secondary">{{ attemptsSummary(record.attempts) }}</p>
+      <p v-if="record.attempts.some(attempt => attempt.kind === 'continuation' || attempt.kind === 'continuation_retry')" class="t-caption t-secondary">续接沿用同一个回答。累计输入包含各次执行处理的上下文，费用按每次执行用量分别估算。</p>
       <section v-for="(attempt, index) in record.attempts" :key="index" class="attempt">
         <div class="row wrap">
-          <h3 class="t-body-strong grow">尝试 {{ index + 1 }} · {{ accountName(attempt.account) }}</h3>
+          <h3 class="t-body-strong grow">{{ attemptLabel(attempt, index) }} · {{ accountName(attempt.account) }}</h3>
           <span>{{ dollars(attempt.cost.amount_nano) }}</span>
         </div>
         <p class="t-caption t-secondary">{{ timestamp(attempt.started_at) }} → {{ timestamp(attempt.ended_at) }} · {{ finishLabel(attempt.finish_reason) || attempt.error || '进行中' }}<span v-if="attempt.finish_reason"> · {{ attempt.finish_reason }}</span></p>

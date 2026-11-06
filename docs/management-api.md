@@ -117,7 +117,15 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 | GET | `/diagnostics` | 脱敏诊断快照 |
 | POST | `/diagnostics/export` | 导出脱敏诊断快照 |
 
+`continuation_retry_enabled` 默认开启；`limits.max_continuation_retries` 默认 1、允许 1–16，整条回答共享额外补试次数。两项可通过配置 PATCH 保存并从下一次生成生效；当前回答保持开始时的设置。关闭开关仍保留次数，不关闭正常续接；其余保存和待重启规则相同。补试条件见[协议合同](protocol.md#总输出预算与自动续接)。
+
 ## 请求记录与估算费用
+
+详情的 `attempts[].kind` 区分 `initial`（首轮）、`retry`（无输出失败后的普通重试）、`continuation`（同一回答自动续接）与 `continuation_retry`（原续轮失败后的一次补试）。列表的 `attempt_count` 统计执行尝试数，续接与补试都不会新增客户端请求数。准备阶段失败也可能形成尝试记录，该数字不保证等于 Google 实际收到的请求数。旧记录可以缺少 `kind`，界面保留“尝试”的旧显示，不把旧数据猜测为续接。此扩展保存在既有 JSON 记录中，不改变 SQLite schema 版本。
+
+可选的 `initial_prompt_tokens` 为最初生成轮次的最终输入快照；发生普通失败重试时使用随后初始轮的快照，自动续接及续接补试均不覆盖它。旧记录或缺少用量时可以不返回。`usage` 是各次执行累计消费，包含续接中再次处理的上下文，不表示原始输入长度。每次使用该次输入量选取价格阶梯，再把金额相加；完整结束且用量可确认的首轮仍可计价，即使随后的续接失败。客户端可在详情中查看各次执行的结束原因与已知费用。
+
+允许补试时，失败尝试先记录原错误并结束，实际开始补试执行后才新增 `continuation_retry`；等待期间取消不会生成一条未执行的补试记录。恢复成功的请求可以是 `succeeded`，同时保留中间的 `permission_denied` 和未完整计价状态：没有回报用量的失败尝试不能视为免费。补试的允许条件见[协议合同](protocol.md#总输出预算与自动续接)。
 
 上述路径沿用管理 Bearer 鉴权。请求时间戳使用 Unix **毫秒**，价表的 `fetched_at` / `attempted_at` 使用 Unix **秒**。金额 `amount_nano` 为整数纳美元，单价 `*_pico` / `rate_pico` 为整数皮美元/token；`null` 表示未知，不能当作免费。
 

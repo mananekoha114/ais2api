@@ -618,17 +618,6 @@ class Service {
                     }
             }
     }
-    // AI Studio cannot continue past its per-request output limit and fails
-    // with an internal error instead of ending with MAX_TOKENS. Take that error
-    // for the limit only when maxOutputTokens was the limit, output was already
-    // produced, and the last reported count (thinking included), if any, is
-    // near it.
-    static bool output_limit_reached(const Request &request, const Error &error, bool delivered,
-                                     const std::optional<json::object> &usage) {
-        if (!request.output_limit || !delivered || error.code != "upstream_internal") return false;
-        auto count = usage ? usage->if_contains("candidatesTokenCount") : nullptr;
-        return !count || !count->is_int64() || count->as_int64() >= request.output_limit * 9 / 10;
-    }
     void generate(const std::shared_ptr<Work> &work) {
         try {
             if (!work->usage->start()) return;
@@ -724,7 +713,7 @@ class Service {
             // One in-place session rebuild or browser restart per request.
             bool recovered = false;
             for (unsigned attempt = 0; attempt < cfg.limits.max_attempts; ++attempt) {
-                trace.attempts = attempt + 1;
+                ++trace.attempts;
                 check_cancel(token);
                 auto account = retry_account ? std::exchange(retry_account, std::nullopt) : store_.choose(request.model, excluded, true);
                 if (!account) {
@@ -738,16 +727,47 @@ class Service {
                 { std::lock_guard lock(queue_mutex_); active_account_id_ = account->id; }
                 log({{"event", "generation_attempt"}, {"request_id", work->usage->id()},
                     {"account_id", account->id}, {"attempt", attempt+1}});
-                std::optional<json::object> last_usage;
+                json::object completed_usage;
+                bool continuing = false, over_budget = false;
+                unsigned round = 1;
                 try {
                     bool received = false;
                     bool completed = false;
                     gateway_->generate(
                         request, *account,
-                        [&](json::object event) {
+                        [&](GenerationEvent next) {
+                            check_cancel(token);
+                            if (next.kind == GenerationEvent::Kind::continuation_failed) {
+                                work->usage->end_attempt(string_or(next.data, "error"));
+                                return;
+                            }
+                            if (next.kind == GenerationEvent::Kind::continuation_started ||
+                                next.kind == GenerationEvent::Kind::continuation_retry_started) {
+                                continuing = true;
+                                ++trace.attempts;
+                                const bool retry = next.kind == GenerationEvent::Kind::continuation_retry_started;
+                                if (!retry)
+                                    ++round;
+                                work->usage->begin_attempt(account->id, retry ? "continuation_retry" : "continuation");
+                                log({{"event", retry ? "generation_continuation_retry" : "generation_continuation"},
+                                     {"request_id", work->usage->id()},
+                                     {"account_id", account->id},
+                                     {"attempt", trace.attempts},
+                                     {"round", round}});
+                                return;
+                            }
+                            auto event = std::move(next.data);
                             work->usage->event(event, has_content(event));
-                            if (auto usage = event.if_contains("usageMetadata"); usage && usage->is_object())
-                                last_usage = usage->as_object();
+                            if (next.kind == GenerationEvent::Kind::round_finished) {
+                                continuing = true;
+                                work->usage->end_attempt();
+                                // The completed round carries its latest usage snapshot.
+                                if (auto usage = event.if_contains("usageMetadata");
+                                    usage && usage->is_object())
+                                    completed_usage =
+                                        add_usage(completed_usage, usage->as_object());
+                                return;
+                            }
                             check_cancel(token);
                             for (auto &location : take_upstream_ignored(event))
                                 if (std::find(trace.upstream_ignored.begin(), trace.upstream_ignored.end(), location) ==
@@ -762,10 +782,27 @@ class Service {
                                 for (auto &candidate : candidates->as_array())
                                     if (candidate.is_object()) {
                                         const auto reason = string_or(candidate.as_object(), "finishReason");
-                                        if (!reason.empty() && reason != "FINISH_REASON_UNSPECIFIED") completed = true;
+                                        if (!reason.empty() && reason != "FINISH_REASON_UNSPECIFIED")
+                                            completed = true;
                                     }
                             if (!request.include_thoughts)
                                 filter_thoughts(event);
+                            if (auto usage = event.if_contains("usageMetadata");
+                                usage && usage->is_object()) {
+                                *usage = add_usage(completed_usage, usage->as_object());
+                                // Output was already delivered, so an overrun is
+                                // recorded once instead of failing the answer.
+                                auto output = usage->as_object().if_contains("candidatesTokenCount");
+                                if (!over_budget && request.output_budget > 0 && output &&
+                                    output->as_int64() > *request.output_budget) {
+                                    over_budget = true;
+                                    log({{"event", "output_budget_exceeded"},
+                                         {"request_id", work->usage->id()},
+                                         {"account_id", account->id},
+                                         {"budget", *request.output_budget},
+                                         {"output", *output}});
+                                }
+                            }
                             work->pipe->push(
                                 std::move(event),
                                 Clock::now() + std::chrono::seconds(
@@ -784,28 +821,8 @@ class Service {
                     work->pipe->finish();
                     return;
                 } catch (const Error &e) {
-                    if (output_limit_reached(request, e, delivered, last_usage) && !token.stop_requested()) {
-                        // Report the cut like the public API's MAX_TOKENS ending
-                        // and keep the partial answer.
-                        json::object event{{"candidates", json::array{json::object{
-                            {"index", 0},
-                            {"content", {{"role", "model"}, {"parts", json::array{}}}},
-                            {"finishReason", "MAX_TOKENS"}}}}};
-                        if (last_usage) event["usageMetadata"] = *last_usage;
-                        log({{"event", "output_limit_reached"}, {"request_id", work->usage->id()},
-                             {"account_id", account->id}, {"limit", request.output_limit}});
-                        work->usage->event(event, false);
-                        work->pipe->push(std::move(event),
-                                         Clock::now() + std::chrono::seconds(request.stream ? cfg.limits.stream_idle_seconds
-                                                                                            : cfg.limits.generation_seconds));
-                        store_.success(account->id, request.model);
-                        work->usage->end_attempt();
-                        work->usage->producer_done();
-                        work->pipe->finish();
-                        return;
-                    }
                     work->usage->end_attempt(e.code);
-                    if (token.stop_requested() || delivered)
+                    if (token.stop_requested() || delivered || continuing)
                         throw;
                     const bool last = attempt + 1 == cfg.limits.max_attempts;
                     auto decision = classify_failure(e, attempt, recovered);
@@ -1044,6 +1061,7 @@ struct ConnectionState {
     std::string origin, category = "http";
     std::unique_ptr<ResponsesStream> responses_stream;
     std::shared_ptr<RequestUsage> usage;
+    std::optional<json::object> partial_response;
 };
 std::map<std::string, std::string> query_parameters(std::string_view target) {
     std::map<std::string, std::string> result;
@@ -1631,17 +1649,46 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     if (!work->stream) {
         json::object aggregate;
         std::size_t aggregate_bound = 2;
-        while (auto event = co_await next_event(work, cfg.limits.queue_seconds)) {
-            merge_event(aggregate, *event, cfg.limits.object_bytes, &aggregate_bound);
-            work->pipe->acknowledge();
+        auto adapt = [&](const json::object &value) {
+            auto output = responses ? responses_response(value, work->model, work->usage->id(),
+                                                         work->response_options, &service.store(),
+                                                         work->principal)
+                          : openai  ? openai_response(value, work->model, work->usage->id(),
+                                                      &service.store(), work->principal)
+                                    : value;
+            if (!responses && !openai)
+                official_usage(output);
+            return output;
+        };
+        try {
+            while (auto event = co_await next_event(work, cfg.limits.queue_seconds)) {
+                merge_event(aggregate, *event, cfg.limits.object_bytes, &aggregate_bound);
+                work->pipe->acknowledge();
+            }
+        } catch (const Error &error) {
+            if (has_content(aggregate)) {
+                // A transport failure must not inherit an earlier normal finish.
+                if (auto candidates = aggregate.if_contains("candidates"))
+                    for (auto &candidate : candidates->as_array()) {
+                        candidate.as_object().erase("finishReason");
+                        candidate.as_object().erase("finishMessage");
+                    }
+                auto partial = adapt(aggregate);
+                if (responses) {
+                    partial["status"] = "failed";
+                    partial["error"] =
+                        json::object{{"code", error.code}, {"message", error.what()}};
+                    for (auto &item : partial.at("output").as_array())
+                        item.as_object()["status"] = "incomplete";
+                } else if (openai) {
+                    for (auto &choice : partial.at("choices").as_array())
+                        choice.as_object()["finish_reason"] = nullptr;
+                }
+                state.partial_response = std::move(partial);
+            }
+            throw;
         }
-        auto output = responses ? responses_response(aggregate, work->model, work->usage->id(),
-                                                     work->response_options, &service.store(), work->principal)
-                      : openai ? openai_response(aggregate, work->model, work->usage->id(), &service.store(),
-                                               work->principal)
-                             : aggregate;
-        if (!responses && !openai) official_usage(output);
-        co_await send_json(stream, 200, output);
+        co_await send_json(stream, 200, adapt(aggregate));
         co_return;
     }
     auto event = co_await next_event(work, cfg.limits.queue_seconds);
@@ -1743,9 +1790,14 @@ net::awaitable<void> connection(tcp::socket socket, Service &service,
                 } else
                     co_await json_sse(stream, error_json(*error, state.openai), 16384);
                 co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
-            } else if (error->status != 499)
-                co_await send_json(stream, static_cast<unsigned>(error->status),
-                                   error_json(*error, state.openai), state.origin);
+            } else if (error->status != 499) {
+                auto body = error_json(*error, state.openai);
+                if (state.partial_response)
+                    body["ais2api"] =
+                        json::object{{"partial_response", std::move(*state.partial_response)}};
+                co_await send_json(stream, static_cast<unsigned>(error->status), body,
+                                   state.origin);
+            }
         } catch (...) { delivered = false; }
     }
     if (state.usage) {

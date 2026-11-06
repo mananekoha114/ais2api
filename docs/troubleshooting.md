@@ -104,7 +104,7 @@
 - **SillyTavern 404**：反向代理地址填 `http://HOST:18451` 或 `http://HOST:18451/v1beta`，不要填 `/v1`。
 - **手机连不上**：确认 `bind` 不是 `127.0.0.1`、防火墙放行端口，且客户端使用的是电脑的局域网地址。
 - **thinkingBudget 无效**：该参数被接受但不生效（Gemini 4 上的 `0` 映射为 `LOW`），请改用 `thinkingLevel`。
-- **Gemini 4 长回答被截断**：AI Studio 上游每次最多输出 32,768 token（含思考），没有续写机制，网关会把输出上限压到 32768，到达上限时上游返回的 `Internal error encountered.` 会转成 `MAX_TOKENS` 结束（日志 `output_limit_reached`）。可降低思考等级给可见输出留出更多空间，或把任务拆成多次请求。
+- **Gemini 4 长回答被截断**：AI Studio 上游每轮最多输出 32,768 token（含思考）。未指定 `maxOutputTokens`（或 `max_tokens` / `max_output_tokens`）时总预算为 32768，到达上限以 `MAX_TOKENS`（OpenAI 为 `length`）结束；需要更长输出时明确设置更大的总预算，网关会在同一次请求内自动续接（见 [协议说明](protocol.md#总输出预算与自动续接)）。非流式长生成可能超过 `limits.generation_seconds`，建议改用流式接口。日志 `output_budget_exceeded` 表示上游报告的输出略超总预算，回答本身已正常结束。
 - **原生 Gemini 接口看不到思考**：与官方一致，需要在 `generationConfig.thinkingConfig` 中设置 `includeThoughts: true`，或在 `model_defaults` 中为该模型配置。
 - **搜索没有返回来源**：目前不解析搜索来源元数据，这是已知限制。
 

@@ -4,8 +4,18 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 import { afterEach, expect, it } from 'vitest'
-import { dollars, usageBounds } from './usage'
+import { attemptLabel, attemptsSummary, dollars, usageBounds } from './usage'
 const originalTimezone = process.env.TZ
+it('distinguishes continuations from retries and keeps legacy labels', () => {
+  expect(attemptsSummary([{ kind: 'initial', error: 'permission_denied' }, { kind: 'retry', error: '' },
+    { kind: 'continuation', error: '' }])).toBe('共 3 次执行 · 1 次失败重试 · 1 次自动续接')
+  expect(attemptLabel({ kind: 'continuation' }, 2)).toBe('第 3 次执行 · 自动续接')
+  expect(attemptLabel({ kind: 'continuation_retry' }, 3)).toBe('第 4 次执行 · 续接重试')
+  expect(attemptsSummary([{ kind: 'initial', error: '' }, { kind: 'continuation', error: 'permission_denied' },
+    { kind: 'continuation_retry', error: '' }])).toBe('共 3 次执行 · 1 次自动续接 · 1 次续接重试')
+  expect(attemptLabel({}, 0)).toBe('尝试 1')
+  expect(attemptsSummary([{ error: 'permission_denied' }, { error: '' }])).toBe('共 2 次尝试 · 首次权限错误，随后再次执行')
+})
 afterEach(() => { if (originalTimezone === undefined) delete process.env.TZ; else process.env.TZ = originalTimezone })
 
 it('uses local calendar days across both DST transitions', () => {

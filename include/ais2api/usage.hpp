@@ -25,7 +25,7 @@ class RequestUsage {
     void configure(std::string_view model, bool stream);
     bool start();
     void normalized(std::string_view model, const json::object &gemini);
-    void begin_attempt(std::string_view account);
+    void begin_attempt(std::string_view account, std::string_view kind = {});
     void event(const json::object &event, bool content);
     void end_attempt(std::string_view error = {});
     void producer_done(std::string_view error = {});

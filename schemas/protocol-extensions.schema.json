@@ -4,6 +4,15 @@
   "title": "ais2api protocol extensions version 1",
   "description": "Schemas for the ais2api property only. Standard Gemini/OpenAI properties remain defined by their respective protocols.",
   "$defs": {
+    "errorExtension": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "partial_response": {
+          "type": "object",
+          "description": "Already received result in the requested Gemini, Chat Completions or Responses format, attached to a failed non-streaming response. No successful finish is implied; the HTTP error remains authoritative. Bounded by the configured aggregate limit and protocol conversion overhead."
+        }
+      }
+    },
     "clientToolCallId": {
       "type": "string",
       "description": "Opaque OpenAI tool ID. call_gemini_ IDs carry base64url JSON [original ID or null, thought signature or null, nonce]; clients must return them unchanged. Decoded signatures are not authentication tokens."

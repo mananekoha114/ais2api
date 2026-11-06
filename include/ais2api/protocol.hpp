@@ -16,13 +16,22 @@ struct Request {
     bool stream = false;
     bool include_usage = false;
     bool include_thoughts = true;
-    // Nonzero when maxOutputTokens equals the upstream's per-request output
-    // limit, where AI Studio fails with an internal error instead of stopping.
-    std::int64_t output_limit = 0;
+    // Gemini 4 total output budget, including thoughts and continuation rounds.
+    // Other model families do not use the verified private continuation mapping.
+    std::optional<std::int64_t> output_budget;
     json::array ignored_parameters;
     json::object gemini;
 };
-using EventSink = std::function<void(json::object)>;
+struct GenerationEvent {
+    enum class Kind { chunk, round_finished, continuation_started, continuation_failed,
+                      continuation_retry_started };
+    Kind kind = Kind::chunk;
+    json::object data;
+    GenerationEvent(json::object value) : data(std::move(value)) {}
+    GenerationEvent(Kind type, json::object value = {}) : kind(type), data(std::move(value)) {}
+};
+using EventSink = std::function<void(GenerationEvent)>;
+inline constexpr std::int64_t studio_round_tokens = 32768;
 Request normalize_gemini(std::string model, const json::object& body, bool stream, const Config& config);
 // Whether model listings add a "<id>-search" variant (Google Search on by
 // default) for this discovered or configured model entry.
@@ -30,12 +39,15 @@ bool lists_search_variant(std::string_view id, const json::object& entry);
 Request normalize_openai(const json::object& body, const Config& config, Store* store = nullptr, std::string principal = {});
 json::array encode_contents(const json::array& contents);
 json::array encode_schema(const json::object& schema);
-json::array encode_request(const Request& request, const json::array& base_template, std::string_view browser_snapshot,
-                           std::string_view timezone = "UTC");
+json::array encode_request(const Request &request, const json::array &base_template,
+                           std::string_view browser_snapshot, std::string_view timezone = "UTC",
+                           std::string_view continuation_token = {});
 // Wire locations skipped while decoding (unknown or malformed non-function
 // slots) are reported under this internal key so the service can log them;
 // take_upstream_ignored removes it before the event reaches a client.
 inline constexpr std::string_view upstream_ignored_key = "ais2apiUpstreamIgnored";
+// Internal checkpoint: NativeContinuation consumes it before invoking EventSink.
+inline constexpr std::string_view continuation_token_key = "ais2apiContinuationToken";
 json::object decode_chunk(const json::value& wire_chunk);
 json::array take_upstream_ignored(json::object& event);
 void filter_thoughts(json::object& event);
@@ -43,6 +55,8 @@ void filter_thoughts(json::object& event);
 // Internally candidatesTokenCount includes thoughtsTokenCount; the public field
 // excludes it, and zero thought/cache counts are omitted.
 void official_usage(json::object& event);
+// Sum final per-round snapshots, not successive snapshots from the same round.
+json::object add_usage(const json::object &completed, const json::object &current);
 bool has_content(const json::object& event);
 // Merges one streamed event into `aggregate`, failing without changes when the
 // result would exceed `byte_limit` serialized bytes. A caller merging a whole

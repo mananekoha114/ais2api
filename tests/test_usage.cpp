@@ -271,6 +271,36 @@ TEST_CASE("Retries remain one request and unknown attempts do not become free", 
     REQUIRE(store.stats().at("totals").at("unpriced") == 1);
     REQUIRE(store.stats().at("totals").at("amount_nano") == 140000);
 }
+TEST_CASE("Continuation retries preserve the initial prompt and the failed execution", "[usage][continuation]") {
+    Directory d;
+    Store store(d.path);
+    store.save_price_source("google", parse_price_catalog(source_data(), 1), 1);
+    RequestUsage usage(store, "continuation-retry", "gemini");
+    start(usage);
+    usage.event(event(10, 3), true);
+    usage.end_attempt();
+    usage.begin_attempt("a", "continuation");
+    usage.end_attempt("permission_denied");
+    usage.begin_attempt("a", "continuation_retry");
+    usage.event(event(1000, 4), true);
+    usage.end_attempt();
+    usage.producer_done();
+    usage.http_done(200, "", true);
+    auto record = store.request("continuation-retry");
+    REQUIRE(record.at("status") == "succeeded");
+    CHECK(record.at("error") == "");
+    CHECK(record.at("initial_prompt_tokens") == 10);
+    CHECK(record.at("usage").at("promptTokenCount") == 1010);
+    CHECK(record.at("usage").at("candidatesTokenCount") == 7);
+    const auto &attempts = record.at("attempts").as_array();
+    REQUIRE(attempts.size() == 3);
+    CHECK(attempts[1].at("error") == "permission_denied");
+    CHECK(attempts[1].at("cost").at("amount_nano").is_null());
+    CHECK(attempts[2].at("kind") == "continuation_retry");
+    CHECK(record.at("cost").at("amount_nano").is_null());
+    CHECK(record.at("cost").at("known_amount_nano") == 1024000);
+    CHECK(store.stats().at("totals").at("success") == 1);
+}
 TEST_CASE("History cursors filters retention and reset share one store", "[usage]") {
     Directory d;
     Store store(d.path);
