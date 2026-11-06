@@ -113,7 +113,8 @@ install(FILES licenses/CloakBrowser-BINARY-LICENSE.md DESTINATION share/doc/ais2
 install(FILES docs/README.md docs/getting-started.md docs/clients.md docs/configuration.md docs/troubleshooting.md
               docs/cli.md docs/protocol.md docs/responses.md docs/true-role.md docs/browser.md
               docs/validation.md docs/performance.md docs/roadmap.md docs/security-review.md
-              docs/userscript.md docs/management-api.md docs/webui.md docs/docker.md DESTINATION share/doc/ais2api)
+              docs/userscript.md docs/management-api.md docs/webui.md docs/docker.md
+              docs/firefox-backends.md DESTINATION share/doc/ais2api)
 install(DIRECTORY docs/reports DESTINATION share/doc/ais2api)
 if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
   install(DIRECTORY "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/"

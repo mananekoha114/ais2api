@@ -32,6 +32,7 @@
 | [构建与打包](platforms.md) | Windows / Linux / Termux 构建、运行包结构、Browser-Local 包、CI |
 | [验证记录](validation.md) | 已执行的验证、能证明的范围与未满足的发布门槛 |
 | [路线图](roadmap.md) | 阶段状态、待决定的方向与已知缺口 |
+| [Firefox 后端迁移计划](firefox-backends.md) | 从 CloakBrowser 迁移到 Camoufox 与 SpiderMonkey 的决策、阶段与待实测事项 |
 | [性能工具](performance.md) | 离线回放工具的用法与报告解读 |
 | [安全回归审查](security-review.md) | 下载、连接上限与媒体预算等安全修复的回归 |
 | [发布流程](github-publishing.md) | 提交检查、CI 与二进制发布清单 |
