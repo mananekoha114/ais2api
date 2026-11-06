@@ -6,6 +6,7 @@
 
 #include "../browser/process.hpp"
 #include <algorithm>
+#include <cerrno>
 #include <cstdlib>
 #include <cwchar>
 #include <map>
@@ -20,6 +21,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
 extern char **environ;
 #endif
 
@@ -42,7 +44,8 @@ void pause(std::stop_token token, std::chrono::milliseconds duration) {
     const auto deadline = Clock::now() + duration;
     while (Clock::now() < deadline) { check_cancel(token); std::this_thread::sleep_for(20ms); }
 }
-void OwnedProcess::start(const fs::path& executable, const std::vector<std::string>& args, const fs::path& private_root) {
+void OwnedProcess::start(const fs::path& executable, const std::vector<std::string>& args, const fs::path& private_root,
+                         const ProcessOptions& options) {
     stop();
     // Build a child-only environment before fork/CreateProcess. Never mutate
     // this multithreaded service's process-wide environment.
@@ -90,6 +93,13 @@ void OwnedProcess::start(const fs::path& executable, const std::vector<std::stri
         if (separator != std::wstring::npos) inherited[value.substr(0, separator)] = value.substr(separator + 1);
     }
     FreeEnvironmentStringsW(raw_environment);
+    for (const auto& unset : options.unset_prefixes) {
+        const auto name = wide(unset);
+        std::erase_if(inherited, [&](const auto& item) {
+            return item.first.size() >= name.size() && CompareStringOrdinal(item.first.c_str(), static_cast<int>(name.size()),
+                       name.c_str(), static_cast<int>(name.size()), TRUE) == CSTR_EQUAL;
+        });
+    }
     inherited[L"LOCALAPPDATA"] = cache.wstring();
     inherited[L"APPDATA"] = settings.wstring();
     inherited[L"TEMP"] = temporary.wstring();
@@ -100,6 +110,7 @@ void OwnedProcess::start(const fs::path& executable, const std::vector<std::stri
         inherited[L"HOMEDRIVE"] = home.root_name().wstring();
         inherited[L"HOMEPATH"] = home.relative_path().empty() ? L"\\" : L"\\" + home.relative_path().wstring();
     }
+    for (const auto& [key, value] : options.environment) inherited[wide(key)] = wide(value);
     std::vector<wchar_t> environment;
     for (const auto& [key, value] : inherited) {
         environment.insert(environment.end(), key.begin(), key.end()); environment.push_back(L'=');
@@ -111,13 +122,55 @@ void OwnedProcess::start(const fs::path& executable, const std::vector<std::stri
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!SetInformationJobObject(job_, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) { stop(); throw Error(500, "browser_launch", "Cannot configure browser Job Object"); }
-    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = options.on_output ? sizeof(STARTUPINFOEXW) : sizeof(STARTUPINFOW);
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, environment.data(), nullptr, &startup, &pi)) { stop(); throw Error(500, "browser_launch", "CreateProcessW failed"); }
+    DWORD flags = CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
+    // The child's ends of the output pipe; the parent closes them on every path.
+    HANDLE output_write = nullptr, input = nullptr;
+    struct ChildEnds {
+        HANDLE& write; HANDLE& input;
+        ~ChildEnds() { if (write) CloseHandle(write); if (input) CloseHandle(input); }
+    } child_ends{output_write, input};
+    std::vector<unsigned char> attributes;
+    HANDLE inheritable_handles[2]{};
+    if (options.on_output) {
+        SECURITY_ATTRIBUTES inheritable{sizeof(inheritable), nullptr, TRUE};
+        HANDLE read = nullptr;
+        if (!CreatePipe(&read, &output_write, &inheritable, 0)) { stop(); throw Error(500, "browser_launch", "Cannot create browser output pipe"); }
+        output_ = read;
+        input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &inheritable, OPEN_EXISTING, 0, nullptr);
+        if (input == INVALID_HANDLE_VALUE) input = nullptr;
+        SIZE_T size = 0;
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+        attributes.resize(size);
+        // Only these two handles reach the child, not every inheritable
+        // handle this multithreaded service happens to hold.
+        inheritable_handles[0] = input;
+        inheritable_handles[1] = output_write;
+        auto list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributes.data());
+        if (!input || !SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0) || !InitializeProcThreadAttributeList(list, 1, 0, &size)) {
+            stop(); throw Error(500, "browser_launch", "Cannot prepare browser output pipe");
+        }
+        startup.lpAttributeList = list;
+        if (!UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritable_handles, sizeof(inheritable_handles), nullptr, nullptr)) {
+            DeleteProcThreadAttributeList(list); stop(); throw Error(500, "browser_launch", "Cannot prepare browser output pipe");
+        }
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = input;
+        startup.StartupInfo.hStdOutput = output_write;
+        startup.StartupInfo.hStdError = output_write;
+        flags |= EXTENDED_STARTUPINFO_PRESENT;
+    }
+    const BOOL created = CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, options.on_output ? TRUE : FALSE, flags,
+                                        environment.data(), nullptr, &startup.StartupInfo, &pi);
+    if (startup.lpAttributeList) DeleteProcThreadAttributeList(startup.lpAttributeList);
+    if (!created) { stop(); throw Error(500, "browser_launch", "CreateProcessW failed"); }
     process_ = pi.hProcess;
     if (!AssignProcessToJobObject(job_, process_)) { TerminateProcess(process_, 1); CloseHandle(pi.hThread); stop(); throw Error(500, "browser_launch", "Cannot assign browser to Job Object"); }
     if (ResumeThread(pi.hThread) == static_cast<DWORD>(-1)) { CloseHandle(pi.hThread); stop(); throw Error(500, "browser_launch", "Cannot resume browser process"); }
     CloseHandle(pi.hThread);
+    if (options.on_output) reader_ = std::thread([this, on_output = options.on_output] { read_output(on_output); });
 #else
     std::vector<std::string> values{executable.string()};
     values.insert(values.end(), args.begin(), args.end());
@@ -130,6 +183,8 @@ void OwnedProcess::start(const fs::path& executable, const std::vector<std::stri
         auto separator = value.find('=');
         if (separator != std::string::npos) inherited[value.substr(0, separator)] = value.substr(separator + 1);
     }
+    for (const auto& unset : options.unset_prefixes)
+        std::erase_if(inherited, [&](const auto& item) { return item.first.starts_with(unset); });
     inherited["XDG_CONFIG_HOME"] = settings.string();
     inherited["XDG_CACHE_HOME"] = cache.string();
     inherited["XDG_DATA_HOME"] = data.string();
@@ -149,18 +204,40 @@ void OwnedProcess::start(const fs::path& executable, const std::vector<std::stri
     }
 #endif
     if (!termux) inherited["HOME"] = home.string();
+    for (const auto& [key, value] : options.environment) inherited[key] = value;
     std::vector<std::string> environment;
     for (const auto& [key, value] : inherited) environment.push_back(key + "=" + value);
     std::vector<char*> envp;
     for (auto& value : environment) envp.push_back(value.data());
     envp.push_back(nullptr);
+    int output_write = -1;
+    if (options.on_output) {
+        int ends[2];
+        if (pipe(ends) != 0) { stop(); throw Error(500, "browser_launch", "Cannot create browser output pipe"); }
+        for (int end : ends) fcntl(end, F_SETFD, FD_CLOEXEC);
+        output_ = ends[0];
+        output_write = ends[1];
+    }
     pid_ = fork();
-    if (pid_ < 0) throw Error(500, "browser_launch", "fork failed");
+    if (pid_ < 0) {
+        if (output_write >= 0) ::close(output_write);
+        stop();
+        throw Error(500, "browser_launch", "fork failed");
+    }
     if (pid_ == 0) {
         if (setsid() < 0) _exit(126);
         int nullfd = open("/dev/null", O_RDWR);
-        if (nullfd >= 0) { dup2(nullfd, STDIN_FILENO); dup2(nullfd, STDOUT_FILENO); dup2(nullfd, STDERR_FILENO); if (nullfd > 2) ::close(nullfd); }
+        if (nullfd >= 0) {
+            dup2(nullfd, STDIN_FILENO);
+            if (output_write < 0) { dup2(nullfd, STDOUT_FILENO); dup2(nullfd, STDERR_FILENO); }
+            if (nullfd > 2) ::close(nullfd);
+        }
+        if (output_write >= 0) { dup2(output_write, STDOUT_FILENO); dup2(output_write, STDERR_FILENO); }
         execve(argv[0], argv.data(), envp.data()); _exit(127);
+    }
+    if (output_write >= 0) {
+        ::close(output_write);
+        reader_ = std::thread([this, on_output = options.on_output] { read_output(on_output); });
     }
 #endif
 }
@@ -189,6 +266,66 @@ void OwnedProcess::stop() noexcept {
         pid_ = -1;
     }
     if (temporary_directory_fd_ >= 0) { ::close(temporary_directory_fd_); temporary_directory_fd_ = -1; }
+#endif
+    stop_reader();
+}
+// Reads until every writer has exited, or until stop() once the pipe is idle
+// (a descendant outside the process group could otherwise hold it open).
+void OwnedProcess::read_output(std::function<void(std::string_view)> on_output) {
+    std::string pending;
+    char buffer[4096];
+    auto deliver = [&](bool flush) {
+        std::size_t start = 0;
+        for (std::size_t end; (end = pending.find('\n', start)) != std::string::npos; start = end + 1) {
+            auto line = std::string_view(pending).substr(start, end - start);
+            if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+            try { on_output(line); } catch (...) {}
+        }
+        pending.erase(0, start);
+        // An endless line is passed on in pieces instead of growing without bound.
+        if (flush ? !pending.empty() : pending.size() >= 64 * 1024) {
+            try { on_output(pending); } catch (...) {}
+            pending.clear();
+        }
+    };
+    for (;;) {
+#ifdef _WIN32
+        DWORD available = 0;
+        // Fails with a broken pipe once every writer has exited.
+        if (!PeekNamedPipe(output_, nullptr, 0, nullptr, &available, nullptr)) break;
+        if (!available) {
+            if (stopping_) break;
+            std::this_thread::sleep_for(20ms);
+            continue;
+        }
+        DWORD count = 0;
+        if (!ReadFile(output_, buffer, std::min<DWORD>(available, sizeof(buffer)), &count, nullptr) || !count) break;
+#else
+        pollfd descriptor{output_, POLLIN, 0};
+        const int ready = poll(&descriptor, 1, 20);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready < 0) break;
+        if (ready == 0) {
+            if (stopping_) break;
+            continue;
+        }
+        const auto count = ::read(output_, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) break;
+#endif
+        pending.append(buffer, static_cast<std::size_t>(count));
+        deliver(false);
+    }
+    deliver(true);
+}
+void OwnedProcess::stop_reader() noexcept {
+    stopping_ = true;
+    if (reader_.joinable()) reader_.join();
+    stopping_ = false;
+#ifdef _WIN32
+    if (output_) { CloseHandle(output_); output_ = nullptr; }
+#else
+    if (output_ >= 0) { ::close(output_); output_ = -1; }
 #endif
 }
 } // namespace ais2api::browser_detail
