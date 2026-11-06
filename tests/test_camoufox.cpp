@@ -6,7 +6,9 @@
 
 #include "ais2api/camoufox.hpp"
 #include "ais2api/browser.hpp"
+#include "ais2api/store.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <cstdlib>
 #include <fstream>
 
 using namespace ais2api;
@@ -172,4 +174,61 @@ TEST_CASE("launch configuration applies the account locale and timezone", "[camo
     const auto unchanged = camoufox_launch_config(identity, "", "");
     CHECK(string_or(unchanged, "timezone") == "America/New_York");
     CHECK_FALSE(unchanged.contains("navigator.language"));
+}
+
+TEST_CASE("the Camoufox gateway needs an identity pool and a Camoufox executable", "[camoufox][identity]") {
+    Directory directory;
+    Config config;
+    config.data_dir = directory.path;
+    config.browser_executable = directory.path / "camoufox.exe";
+    write(config.browser_executable, "");
+    Store store(config.data_dir);
+    CamoufoxGateway gateway(config, store);
+    Account account;
+    account.id = "account-1";
+    auto code = [](auto&& call) {
+        try { call(); } catch (const Error& error) { return error.code; }
+        return std::string("no error");
+    };
+    // No process is started for either refusal.
+    CHECK(code([&] { gateway.probe(account); }) == "browser_not_configured");
+    config.browser_executable = directory.path / "chrome.exe";
+    write(config.browser_executable, "");
+    CamoufoxGateway chromium(config, store);
+    CHECK(code([&] { chromium.verify_runtime(); }) == "browser_not_configured");
+    CHECK_FALSE(bool_or(gateway.diagnostics(), "running"));
+    CHECK(string_or(gateway.diagnostics(), "backend") == "camoufox");
+}
+
+// Hidden by default: select it with a prepared Camoufox executable. It opens
+// only a local page; no cookies, account probe or Google request.
+TEST_CASE("Camoufox runs the bridge with BYOB reads and trusted keys", "[.camoufox-runtime]") {
+    const auto executable = std::getenv("AIS2API_TEST_CAMOUFOX");
+    REQUIRE(executable != nullptr);
+    REQUIRE(fs::is_regular_file(fs::u8path(executable)));
+    Directory directory;
+    Config config;
+    config.data_dir = directory.path;
+    config.browser_executable = fs::u8path(executable);
+    config.headless = std::getenv("AIS2API_TEST_CAMOUFOX_HEADED") == nullptr;
+    Store store(config.data_dir);
+    CamoufoxGateway gateway(config, store);
+    const auto result = gateway.verify_runtime();
+    INFO(json::serialize(result));
+    CHECK(string_or(result, "product").starts_with("firefox/"));
+    CHECK(string_or(result, "protocol_version") == "webdriver-bidi");
+    CHECK(bool_or(result, "isolated_context"));
+    CHECK_FALSE(bool_or(result, "google_verified"));
+    const auto& page = result.at("page").as_object();
+    CHECK(bool_or(page, "bridge"));
+    CHECK(page.at("webdriver") == json::value(false));
+    CHECK(bool_or(page, "byobReader"));
+    CHECK(bool_or(page, "trustedKey"));
+    CHECK_FALSE(bool_or(gateway.diagnostics(), "running"));
+    for (const auto& entry : fs::directory_iterator(config.data_dir / "runtime"))
+        CHECK_FALSE(entry.path().filename().string().starts_with("camoufox-"));
+    bool retained_log = false;
+    for (const auto& entry : fs::directory_iterator(config.data_dir / "logs"))
+        retained_log = retained_log || (entry.is_regular_file() && entry.path().filename().string().starts_with("camoufox-"));
+    CHECK(retained_log);
 }

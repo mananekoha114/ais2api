@@ -45,4 +45,31 @@ CamoufoxIdentityPool load_identity_pool(const fs::path &file);
 // account's locale and timezone, and page-world script evaluation allowed.
 json::object camoufox_launch_config(const json::object &identity_config, std::string_view locale, std::string_view timezone);
 } // namespace browser_detail
+// The experimental Camoufox backend (browser_backend "camoufox"): the same
+// account flow as BrowserGateway over WebDriver BiDi, with each account on a
+// fixed identity from <data_dir>/camoufox/identity-pool.json.
+class CamoufoxGateway final : public GenerationBackend {
+  public:
+    CamoufoxGateway(const Config &config, Store &store);
+    ~CamoufoxGateway() override;
+    void generate(const Request &request, const Account &account, const EventSink &sink,
+                  std::stop_token cancel) override;
+    json::array models(const Account &account, std::stop_token cancel = {}) override;
+    json::object probe(const Account &account, std::stop_token cancel = {}) override;
+    json::object probe_import(Account &account, std::stop_token cancel = {}) override;
+    json::object diagnostics() override;
+    void reconfigure(const Config &config) override;
+    // Launches the browser without an identity and checks, on a local page,
+    // what generation depends on: the bridge preload, navigator.webdriver,
+    // BYOB stream readers and trusted key presses. No Google request.
+    json::object verify_runtime(std::stop_token cancel = {});
+    void close() override;
+    void reset_session() override;
+    void clear_template() override;
+    bool release_idle() override;
+
+  private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 } // namespace ais2api
