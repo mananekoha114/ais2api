@@ -459,6 +459,14 @@ struct CamoufoxGateway::Impl {
                 user_agent = string_or(identity_config, "navigator.userAgent");
             }
             for (const auto& item : base_prefs()) prefs[item.key()] = item.value();
+            const auto launch_config = browser_detail::camoufox_launch_config(identity_config, identity.locale, identity.timezone);
+            // The browser's own language follows the account locale, as in a
+            // localized Firefox (Camoufox packages the language packs), so
+            // validation messages agree with Intl formatting.
+            if (const auto language = string_or(launch_config, "locale:language"); !language.empty()) {
+                const auto region = string_or(launch_config, "locale:region");
+                prefs["intl.locale.requested"] = region.empty() ? language : language + "-" + region;
+            }
             if (!config.proxy.empty()) {
                 const auto endpoint = parse_proxy(config.proxy);
                 if (config.browser_proxy_relay) {
@@ -484,8 +492,7 @@ struct CamoufoxGateway::Impl {
                 if (!user_js) throw Error(500, "browser_launch", "Cannot write the Camoufox profile");
             }
             browser_detail::ProcessOptions options;
-            options.environment = browser_detail::camoufox_environment(
-                json::serialize(browser_detail::camoufox_launch_config(identity_config, identity.locale, identity.timezone)));
+            options.environment = browser_detail::camoufox_environment(json::serialize(launch_config));
             // Only this launch's identity reaches the browser.
             options.unset_prefixes = {"CAMOU_CONFIG_", "CAMOU_PREFS_"};
             // Persist browser output beyond the profile cleanup.

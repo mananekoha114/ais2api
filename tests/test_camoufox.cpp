@@ -215,7 +215,7 @@ TEST_CASE("Camoufox runs the bridge with BYOB reads and trusted keys", "[.camouf
     CamoufoxGateway gateway(config, store);
     const auto result = gateway.verify_runtime();
     INFO(json::serialize(result));
-    CHECK(string_or(result, "product").starts_with("firefox/"));
+    CHECK(string_or(result, "product").starts_with("camoufox/"));
     CHECK(string_or(result, "protocol_version") == "webdriver-bidi");
     CHECK(bool_or(result, "isolated_context"));
     CHECK_FALSE(bool_or(result, "google_verified"));
