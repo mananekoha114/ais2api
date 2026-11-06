@@ -20,6 +20,7 @@ in the data directory and never commit it.
 """
 from __future__ import annotations
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -28,6 +29,7 @@ from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
 import sys
+import threading
 import urllib.request
 import uuid
 import zipfile
@@ -65,39 +67,47 @@ def safe_member(name):
     return path
 
 
-def download(target):
-    # Resumed with HTTP ranges: long downloads from GitHub's storage can end
-    # early without an error.
+def download(target, segments=8):
+    # Parallel ranges, each resumed after an early end: a single long download
+    # from GitHub's storage can crawl or end without an error.
     partial = target.with_name(target.name + '.part')
-    digest = hashlib.sha256()
-    done = shown = 0
-    # An earlier run's partial download is continued, not restarted.
-    if partial.exists():
-        with open(partial, 'rb') as source:
-            while block := source.read(1024 * 1024):
-                digest.update(block)
-                done += len(block)
-    with open(partial, 'ab') as output:
-        for _ in range(20):
-            request = urllib.request.Request(URL, headers={'Range': f'bytes={done}-'} if done else {})
-            try:
-                with urllib.request.urlopen(request, timeout=60) as response:
-                    if done and response.status != 206:
-                        fail('the server does not resume downloads')
-                    while block := response.read(1024 * 1024):
-                        output.write(block)
-                        digest.update(block)
-                        done += len(block)
-                        if done * 20 // ASSET_SIZE > shown:
-                            shown = done * 20 // ASSET_SIZE
-                            print(f'{done * 100 // ASSET_SIZE}% of {ASSET_SIZE // (1024 * 1024)} MiB', file=sys.stderr)
-            except OSError as error:
-                print(f'download interrupted at {done} bytes: {error}', file=sys.stderr)
-            if done >= ASSET_SIZE:
-                break
-    if done != ASSET_SIZE or digest.hexdigest() != ASSET_SHA256:
+    with open(partial, 'wb') as output:
+        output.truncate(ASSET_SIZE)
+    bounds = [(i * ASSET_SIZE // segments, (i + 1) * ASSET_SIZE // segments) for i in range(segments)]
+    received = [0] * segments
+    lock = threading.Lock()
+    shown = [0]
+
+    def segment(index):
+        start, end = bounds[index]
+        with open(partial, 'r+b') as output:
+            for _ in range(20):
+                position = start + received[index]
+                if position >= end:
+                    return
+                request = urllib.request.Request(URL, headers={'Range': f'bytes={position}-{end - 1}'})
+                try:
+                    with urllib.request.urlopen(request, timeout=60) as response:
+                        if response.status != 206:
+                            raise OSError(f'HTTP {response.status} instead of a range')
+                        output.seek(position)
+                        while block := response.read(1024 * 1024):
+                            block = block[:end - start - received[index]]
+                            output.write(block)
+                            with lock:
+                                received[index] += len(block)
+                                step = sum(received) * 20 // ASSET_SIZE
+                                if step > shown[0]:
+                                    shown[0] = step
+                                    print(f'{step * 5}% of {ASSET_SIZE // (1024 * 1024)} MiB', file=sys.stderr)
+                except OSError as error:
+                    print(f'segment {index} interrupted at {start + received[index]}: {error}', file=sys.stderr)
+
+    with ThreadPoolExecutor(segments) as pool:
+        list(pool.map(segment, range(segments)))
+    if sum(received) != ASSET_SIZE or not verify(partial):
         partial.unlink()
-        fail(f'downloaded {done} bytes with SHA-256 {digest.hexdigest()}, expected {ASSET_SIZE} bytes with {ASSET_SHA256}')
+        fail(f'{ASSET} did not download completely or does not match the pinned SHA-256 {ASSET_SHA256}')
     partial.replace(target)
 
 
