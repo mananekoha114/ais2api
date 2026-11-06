@@ -77,6 +77,21 @@ TEST_CASE("browser DevTools origins and site isolation keep Chromium defaults an
         for (auto key : {"browser_remote_allow_origins", "browser_site_isolation"})
             CHECK_THROWS_AS(cfg.patched({{key, invalid}}), Error);
 }
+TEST_CASE("browser backend defaults to CloakBrowser, accepts Camoufox and needs a restart", "[config][admin][browser]") {
+    AdminDirectory dir;
+    auto cfg = Config::load(dir.path / "config.json");
+    CHECK(Config{}.browser_backend == "cloakbrowser");
+    CHECK(cfg.browser_backend == "cloakbrowser");
+    CHECK(cfg.to_json().at("browser_backend") == "cloakbrowser");
+    auto camoufox = cfg.patched({{"browser_backend", "camoufox"}});
+    CHECK(camoufox.browser_backend == "camoufox");
+    CHECK(restart_required(cfg, camoufox));
+    camoufox.save();
+    CHECK(Config::load(cfg.config_file).browser_backend == "camoufox");
+    CHECK(Config::load(cfg.config_file, {{"browser_backend", "cloakbrowser"}}).browser_backend == "cloakbrowser");
+    for (const auto& invalid : json::array{"", "firefox", "Camoufox", 1, nullptr, json::array{}})
+        CHECK_THROWS_AS(cfg.patched({{"browser_backend", invalid}}), Error);
+}
 TEST_CASE("search model function policy defaults to dropping functions and updates without restart", "[config][admin][search-model]") {
     AdminDirectory dir;
     auto cfg = Config::load(dir.path / "config.json");

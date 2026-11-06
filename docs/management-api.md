@@ -148,7 +148,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 - `GET /config` 返回当前运行的脱敏配置 `config`、文件路径和 `restart_required`。有待重启的修改时，`saved_config` 包含脱敏后的待生效配置。
 - PATCH 会在原子保存前校验修改后的完整配置。未知字段、类型错误、无效限额以及把脱敏占位符 `***` 当作密钥提交都会被拒绝。提交表单时请省略未修改的脱敏密钥字段。
 - 只有 `limits` 按子项合并；`model_aliases`、`model_defaults`、`configured_models` 与 `admin_origins` 整体替换。要删除某个别名，提交不含它的完整对象。
-- 需要重启的字段：监听地址、端口、数据目录、浏览器路径、代理、`browser_proxy_relay`、`browser_remote_allow_origins`、`browser_site_isolation`、无界面模式、生成时限、流式空闲时限、`object_bytes` 与 `relay_bytes`。其余字段热更新。
+- 需要重启的字段：监听地址、端口、数据目录、浏览器路径、浏览器后端（`browser_backend`）、代理、`browser_proxy_relay`、`browser_remote_allow_origins`、`browser_site_isolation`、无界面模式、生成时限、流式空闲时限、`object_bytes` 与 `relay_bytes`。其余字段热更新。
 - 响应包含 `saved`、`applied` 与 `restart_required`。只要包含任一需重启的差异，整份配置就作为待重启配置保存，不会部分应用；之后的 PATCH 以待重启配置为基础，保留之前保存的修改。把所有需重启的字段改回运行值后，完整结果会立即应用。重启时加载保存的配置，环境变量覆盖在启动和重新加载时依然生效。
 
 部分字段的补充说明：

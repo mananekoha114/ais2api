@@ -143,6 +143,7 @@ json::object Config::to_json(bool portable_paths) const {
           {"cookie_import_timeout_seconds", cookie_import_timeout_seconds},
           {"data_dir", stored_path(data_dir, config_file, portable_paths)},
           {"browser_executable", stored_path(browser_executable, config_file, portable_paths)},
+          {"browser_backend", browser_backend},
           {"proxy", proxy},
           {"browser_proxy_relay", browser_proxy_relay},
           {"browser_remote_allow_origins", browser_remote_allow_origins},
@@ -213,6 +214,7 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
                     {"AIS2API_BIND", "bind"},
                     {"AIS2API_DATA_DIR", "data_dir"},
                     {"AIS2API_BROWSER_EXECUTABLE", "browser_executable"},
+                    {"AIS2API_BROWSER_BACKEND", "browser_backend"},
                     {"AIS2API_PROXY", "proxy"}}) {
     auto v = env(pair.first);
     if (env_exists(pair.first))
@@ -292,7 +294,7 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
 static Config parse_config(Config c, json::object o, bool explicit_browser) {
   fields(o, {"version", "bind", "port", "api_key", "admin_key", "admin_origins", "cookie_import_key",
              "cookie_import_max_accounts", "cookie_import_timeout_seconds", "data_dir", "browser_executable",
-             "proxy", "browser_proxy_relay", "browser_remote_allow_origins", "browser_site_isolation", "headless", "ignore_unsupported_parameters", "search_model_drop_functions", "browser_idle_seconds", "limits", "model_aliases",
+             "browser_backend", "proxy", "browser_proxy_relay", "browser_remote_allow_origins", "browser_site_isolation", "headless", "ignore_unsupported_parameters", "search_model_drop_functions", "browser_idle_seconds", "limits", "model_aliases",
              "configured_models", "model_defaults", "request_retention_days", "continuation_retry_enabled"});
   auto text = [&](const char *k) {
     if (!o.at(k).is_string())
@@ -327,6 +329,9 @@ static Config parse_config(Config c, json::object o, bool explicit_browser) {
     c.browser_executable = fs::absolute(c.browser_executable).lexically_normal();
   else if (!explicit_browser)
     c.browser_executable = bundled_browser(Config::default_directory());
+  c.browser_backend = text("browser_backend");
+  if (c.browser_backend != "cloakbrowser" && c.browser_backend != "camoufox")
+    throw Error(400, "invalid_config", "browser_backend must be cloakbrowser or camoufox");
   c.proxy = text("proxy");
   if (!o.at("browser_proxy_relay").is_bool())
     throw Error(400, "invalid_config", "browser_proxy_relay must be boolean");
@@ -406,6 +411,7 @@ Config Config::patched(const json::object& patch) const {
 bool restart_required(const Config& previous, const Config& next) {
   return next.bind != previous.bind || next.port != previous.port ||
     next.data_dir != previous.data_dir || next.browser_executable != previous.browser_executable ||
+    next.browser_backend != previous.browser_backend ||
     next.proxy != previous.proxy || next.browser_proxy_relay != previous.browser_proxy_relay ||
     next.browser_remote_allow_origins != previous.browser_remote_allow_origins ||
     next.browser_site_isolation != previous.browser_site_isolation ||
