@@ -152,7 +152,9 @@ TEST_CASE("BiDi errors keep their code and map to gateway errors", "[bidi]") {
         return std::string("no error");
     };
     CHECK(code([&] { client.call("script.evaluate", {}, {}); }) == "browser_disconnected");
-    CHECK(code([&] { client.call("script.evaluate", {}, {}); }) == "browser_disconnected");
+    // A navigation that replaced the realm is retried like CDP's lost
+    // execution context, not treated as a closed page.
+    CHECK(code([&] { client.call("script.evaluate", {}, {}); }) == "browser_incompatible");
     CHECK(code([&] { client.call("storage.setCookie", {}, {}); }) == "browser_incompatible");
     CHECK(code([&] { client.evaluate("throw new Error('boom')", "c", {}); }) == "browser_incompatible");
     CHECK(client.open());

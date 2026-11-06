@@ -153,13 +153,12 @@ public:
         message += "},\"awaitPromise\":true,\"resultOwnership\":\"none\"}}";
         return script_value("script.callFunction", transact(std::move(message), id, token, timeout, context));
     }
-    // A closed or discarded page is a lost browser page; anything else means
-    // the browser does not support what was asked.
+    // A page or user context that no longer exists is a lost browser page.
+    // Anything else means the browser did not do what was asked, including a
+    // script whose realm a navigation replaced ("unknown error" naming a
+    // destroyed actor or discarded context), which CDP reports the same way.
     static Error command_error(std::string_view method, const Reply& reply) {
-        auto message = reply.message;
-        std::transform(message.begin(), message.end(), message.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (reply.error == "no such frame" || reply.error == "no such browsing context" || reply.error == "no such user context" ||
-            message.find("discarded") != std::string::npos || message.find("destroyed") != std::string::npos)
+        if (reply.error == "no such frame" || reply.error == "no such browsing context" || reply.error == "no such user context")
             return Error(502, "browser_disconnected", "Browser page was closed or discarded");
         return Error(502, "browser_incompatible", "Browser rejected BiDi method " + std::string(method) + " (" + reply.error + ")");
     }
