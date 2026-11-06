@@ -163,7 +163,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 ### 日志来源
 
 - 省略 `source` 时读取结构化的管理日志（journal）。
-- `GET /logs/sources` 列出原始日志来源，包括 `service`、`management` 以及 `browser-X.log` 等浏览器日志。请使用返回的来源标识，不要自行拼接文件路径。
+- `GET /logs/sources` 列出原始日志来源，包括 `service`、`management` 以及 `browser-X.log`、`camoufox-X.log` 等浏览器日志。请使用返回的来源标识，不要自行拼接文件路径。
 - 要显示全部日志：列出来源、读取各来源的完整历史、跟随活动来源，并定期刷新来源列表以发现新的浏览器会话。
 - 管理日志同时镜像到 stderr，因此也可能出现在 `service` 原始来源中。前台 `serve` 总会记录服务事件；`service.log` 由后台 `start` 创建。
 - 原始数据以 base64 传输，可以无损传递任意字节和被拆开的 UTF-8 序列。游标是不透明的，且只对所属来源有效，不要混用。

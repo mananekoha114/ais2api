@@ -6,6 +6,7 @@
 
 #include "ais2api/camoufox.hpp"
 #include "ais2api/browser.hpp"
+#include "ais2api/log_sources.hpp"
 #include "ais2api/store.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cstdlib>
@@ -198,6 +199,17 @@ TEST_CASE("the Camoufox gateway needs an identity pool and a Camoufox executable
     CHECK(code([&] { chromium.verify_runtime(); }) == "browser_not_configured");
     CHECK_FALSE(bool_or(gateway.diagnostics(), "running"));
     CHECK(string_or(gateway.diagnostics(), "backend") == "camoufox");
+}
+
+TEST_CASE("Camoufox browser logs are log sources like Chromium ones", "[camoufox]") {
+    Directory directory;
+    fs::create_directories(directory.path / "logs");
+    write(directory.path / "logs" / "browser-1.log", "a");
+    write(directory.path / "logs" / "camoufox-2.log", "b");
+    write(directory.path / "logs" / "camoufox-2-identity.json", "{}");
+    std::vector<std::string> ids;
+    for (const auto& source : log_sources(directory.path).at("sources").as_array()) ids.push_back(string_or(source.as_object(), "id"));
+    CHECK(ids == std::vector<std::string>{"browser-1.log", "camoufox-2.log"});
 }
 
 // Hidden by default: select it with a prepared Camoufox executable. It opens
