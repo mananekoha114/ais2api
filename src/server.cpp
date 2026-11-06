@@ -728,7 +728,8 @@ class Service {
                 log({{"event", "generation_attempt"}, {"request_id", work->usage->id()},
                     {"account_id", account->id}, {"attempt", attempt+1}});
                 json::object completed_usage;
-                bool continuing = false;
+                bool continuing = false, over_budget = false;
+                unsigned round = 1;
                 try {
                     bool received = false;
                     bool completed = false;
@@ -745,11 +746,14 @@ class Service {
                                 continuing = true;
                                 ++trace.attempts;
                                 const bool retry = next.kind == GenerationEvent::Kind::continuation_retry_started;
+                                if (!retry)
+                                    ++round;
                                 work->usage->begin_attempt(account->id, retry ? "continuation_retry" : "continuation");
                                 log({{"event", retry ? "generation_continuation_retry" : "generation_continuation"},
                                      {"request_id", work->usage->id()},
                                      {"account_id", account->id},
-                                     {"attempt", trace.attempts}});
+                                     {"attempt", trace.attempts},
+                                     {"round", round}});
                                 return;
                             }
                             auto event = std::move(next.data);
@@ -784,8 +788,21 @@ class Service {
                             if (!request.include_thoughts)
                                 filter_thoughts(event);
                             if (auto usage = event.if_contains("usageMetadata");
-                                usage && usage->is_object())
+                                usage && usage->is_object()) {
                                 *usage = add_usage(completed_usage, usage->as_object());
+                                // Output was already delivered, so an overrun is
+                                // recorded once instead of failing the answer.
+                                auto output = usage->as_object().if_contains("candidatesTokenCount");
+                                if (!over_budget && request.output_budget > 0 && output &&
+                                    output->as_int64() > *request.output_budget) {
+                                    over_budget = true;
+                                    log({{"event", "output_budget_exceeded"},
+                                         {"request_id", work->usage->id()},
+                                         {"account_id", account->id},
+                                         {"budget", *request.output_budget},
+                                         {"output", *output}});
+                                }
+                            }
                             work->pipe->push(
                                 std::move(event),
                                 Clock::now() + std::chrono::seconds(

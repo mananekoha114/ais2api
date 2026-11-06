@@ -289,6 +289,16 @@ std::optional<Line> describe(const json::object &r) {
         line.title = "继续生成";
         line.add("第 " + text_of(r, "round") + " 轮");
         line.add(short_id(text_of(r, "request_id")));
+    } else if (event == "generation_continuation_retry") {
+        line.level = Level::warning;
+        line.title = "续接重试";
+        line.add("第 " + text_of(r, "round") + " 轮");
+        line.add(short_id(text_of(r, "request_id")));
+    } else if (event == "output_budget_exceeded") {
+        line.level = Level::warning;
+        line.title = "输出超过总预算";
+        line.add(text_of(r, "output") + " / " + text_of(r, "budget") + " token");
+        line.add(short_id(text_of(r, "request_id")));
     } else if (event == "model_discovery_scheduled") {
         line.title = "导入的账号将获取模型列表";
         line.add(text_of(r, "account_id"));

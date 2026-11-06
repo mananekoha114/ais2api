@@ -53,8 +53,8 @@ bool known_benefit(const json::object &state) {
 
 void run_generation(const Request &request, const Limits &limits, bool retry_enabled,
                     const GenerationIO &io, const EventSink &sink, std::stop_token cancel) {
-    const auto deadline = Clock::now() + std::chrono::seconds(limits.generation_seconds);
-    NativeContinuation continuation(request, deadline, cancel);
+    std::optional<Clock::time_point> deadline;
+    NativeContinuation continuation(request, {}, cancel);
     unsigned retries = 0;
     for (;;) {
         continuation.check();
@@ -81,6 +81,12 @@ void run_generation(const Request &request, const Limits &limits, bool retry_ena
                 constexpr std::size_t error_prefix_limit = 16384;
                 std::optional<Error> parse_failure;
                 io.start(body, check);
+                // Authorization and the first upload do not consume the unary
+                // total; later rounds and retries keep this one deadline.
+                if (!deadline) {
+                    deadline = Clock::now() + std::chrono::seconds(limits.generation_seconds);
+                    continuation.start_deadline(*deadline);
+                }
                 if (!activity)
                     activity = Clock::now();
                 for (;;) {
@@ -172,8 +178,6 @@ void run_generation(const Request &request, const Limits &limits, bool retry_ena
                         if (parse_failure)
                             throw *parse_failure;
                         parser.finish();
-                        if (io.completed)
-                            io.completed();
                         check_cancel(cancel);
                         break;
                     }
@@ -186,7 +190,7 @@ void run_generation(const Request &request, const Limits &limits, bool retry_ena
                 continuation.check();
                 const auto delay = std::max(2s, std::chrono::seconds(error.retry_after));
                 const auto ready = Clock::now() + delay;
-                if (ready >= *activity + idle || (!request.stream && ready >= deadline))
+                if (ready >= *activity + idle || (!request.stream && ready >= *deadline))
                     throw;
                 ++retries;
                 sink(GenerationEvent(GenerationEvent::Kind::continuation_failed,
@@ -201,7 +205,11 @@ void run_generation(const Request &request, const Limits &limits, bool retry_ena
             }
             break;
         }
-        if (!continuation.finish(sink))
+        // Deliver the round's final event before page cleanup and cookie saving.
+        const bool resume = continuation.finish(sink);
+        if (io.completed)
+            io.completed();
+        if (!resume)
             return;
     }
 }

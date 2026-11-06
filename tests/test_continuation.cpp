@@ -122,11 +122,44 @@ TEST_CASE("Continuation obeys the total output budget including thought tokens",
         REQUIRE(events.back().data.at("candidates").at(0).at("finishReason") ==
                 "PROHIBITED_CONTENT");
     }
-    SECTION("reported overshoot is an error") {
+    SECTION("reported overshoot keeps the delivered answer") {
         NativeContinuation state(budget(40000));
         state.push(checkpoint(40001), sink);
-        REQUIRE(error_code([&] { state.finish(sink); }) == "output_budget_exceeded");
+        REQUIRE_FALSE(state.finish(sink));
+        REQUIRE(events.back().kind == GenerationEvent::Kind::chunk);
+        REQUIRE(events.back().data.at("candidates").at(0).at("finishReason") == "MAX_TOKENS");
     }
+    SECTION("an overshooting later round still ends normally") {
+        NativeContinuation state(budget(40000));
+        state.push(checkpoint(32768), sink);
+        REQUIRE(state.finish(sink));
+        state.push(checkpoint(20000, "checkpoint-2", "STOP"), sink);
+        REQUIRE_FALSE(state.finish(sink));
+        REQUIRE(events.back().data.at("candidates").at(0).at("finishReason") == "STOP");
+    }
+}
+
+TEST_CASE("Non-string checkpoint slots stay ignored for every model family",
+          "[continuation][protocol]") {
+    json::array parts;
+    parts.push_back(json::array{nullptr, "text"});
+    json::array candidate(9);
+    candidate[0] = json::array{std::move(parts), "model"};
+    candidate[1] = 2;
+    candidate[8] = 5;
+    json::array candidates;
+    candidates.push_back(std::move(candidate));
+    json::array usage(10);
+    usage[0] = 10;
+    usage[1] = 32768;
+    auto event = decode_chunk(json::array{std::move(candidates), nullptr, usage});
+    CHECK_FALSE(event.at("candidates").at(0).as_object().contains(continuation_token_key));
+    CHECK(take_upstream_ignored(event) == json::array{"candidate[8]"});
+    // A Gemini 4 answer that needs another round reports the checkpoint missing.
+    NativeContinuation state(budget(65536));
+    EventSink sink = [](GenerationEvent) {};
+    state.push(std::move(event), sink);
+    CHECK(error_code([&] { state.finish(sink); }) == "continuation_missing_token");
 }
 
 TEST_CASE("Unusable checkpoints fail without publishing a final MAX_TOKENS", "[continuation]") {

@@ -349,6 +349,46 @@ TEST_CASE("A retry rechecks the unchanged deadline after preparing its upload",
     CHECK(script.bodies.size() == 2);
 }
 
+TEST_CASE("The unary deadline starts once the first round has been sent",
+          "[browser][continuation]") {
+    gf::Script script;
+    script.attempts = {gf::first(), gf::last()};
+    Limits limits;
+    limits.generation_seconds = 1;
+    std::size_t slow = 0;
+    std::string expected;
+    SECTION("first authorization and upload are not counted") {}
+    SECTION("later rounds keep that deadline") {
+        slow = 1;
+        expected = "generation_timeout";
+    }
+    script.before_send = [&](std::size_t attempt, const auto &check) {
+        if (attempt == slow) {
+            std::this_thread::sleep_for(1100ms);
+            check();
+        }
+    };
+    std::vector<GenerationEvent> events;
+    CHECK(run(script, request(), events, limits) == expected);
+}
+
+TEST_CASE("Page cleanup runs after each round's events were delivered",
+          "[browser][continuation]") {
+    gf::Script script;
+    script.attempts = {gf::first(), gf::last()};
+    const auto r = request();
+    std::vector<GenerationEvent> events;
+    std::vector<GenerationEvent::Kind> last_before_cleanup;
+    auto io = script.io(r);
+    io.completed = [&] { last_before_cleanup.push_back(events.back().kind); };
+    browser_detail::run_generation(
+        r, {}, true, io, [&](GenerationEvent event) { events.push_back(std::move(event)); }, {});
+    REQUIRE(last_before_cleanup.size() == 2);
+    CHECK(last_before_cleanup[0] == GenerationEvent::Kind::round_finished);
+    CHECK(last_before_cleanup[1] == GenerationEvent::Kind::chunk);
+    CHECK(events.back().data.at("candidates").at(0).at("finishReason") == "STOP");
+}
+
 TEST_CASE("Continuation retry honors a longer Retry-After without changing the body",
           "[browser][continuation][continuation-retry]") {
     gf::Script script;

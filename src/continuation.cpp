@@ -71,8 +71,8 @@ bool NativeContinuation::finish(const EventSink &sink) {
     if (!response_id_.empty())
         event["responseId"] = response_id_;
     if (!resume) {
-        if (counted && produced > budget_ - output_)
-            throw Error(502, "output_budget_exceeded", "Upstream exceeded the total output budget");
+        // The answer has already been delivered. A reported overrun cannot be
+        // undone, so the service records it instead of failing the answer.
         sink(std::move(event));
         check();
         return false;

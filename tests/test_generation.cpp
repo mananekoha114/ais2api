@@ -15,6 +15,8 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -236,6 +238,14 @@ public:
             emit(calls);
             emit(finish_event());
             return;
+        }
+        if (request.model == "gemini-4-synthetic-overrun") {
+            // The final round reports one token beyond the caller's total budget.
+            namespace gf = generation_fixture;
+            gf::Script script;
+            script.attempts = {gf::response(gf::reply("hello", 1001, 1))};
+            return browser_detail::run_generation(request, config_.limits, true,
+                                                  script.io(request), emit, cancel);
         }
         if (request.model.starts_with("gemini-4-synthetic-limit")) {
             // AI Studio's failure once output passes its per-request limit.
@@ -712,6 +722,31 @@ TEST_CASE("Client grounding options reach AI Studio wire over unary and SSE HTTP
         }
     }
     REQUIRE(server.state->calls == 6);
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("A reported Gemini 4 budget overrun is logged without failing the delivered answer",
+          "[generation][http][continuation]") {
+    GenerationServer server;
+    auto response = server.call(
+        "/v1beta/models/gemini-4-synthetic-overrun:generateContent",
+        R"({"contents":[{"parts":[{"text":"question"}]}],"generationConfig":{"maxOutputTokens":1000}})");
+    REQUIRE(response.result_int() == 200);
+    auto result = json::parse(response.body()).as_object();
+    CHECK(result.at("candidates").at(0).at("finishReason") == "STOP");
+    CHECK(result.at("usageMetadata").at("candidatesTokenCount") == 1001);
+    // Service logs are written asynchronously.
+    std::string journal;
+    for (const auto until = Clock::now() + 5s; Clock::now() < until;
+         std::this_thread::sleep_for(20ms)) {
+        std::ifstream in(server.config.data_dir / "management.log", std::ios::binary);
+        journal.assign(std::istreambuf_iterator<char>(in), {});
+        if (journal.find("output_budget_exceeded") != std::string::npos)
+            break;
+    }
+    CHECK(journal.find(R"("event":"output_budget_exceeded")") != std::string::npos);
+    CHECK(journal.find(R"("budget":1000)") != std::string::npos);
+    CHECK(journal.find(R"("output":1001)") != std::string::npos);
     REQUIRE_FALSE(server.failed);
 }
 

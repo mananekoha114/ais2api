@@ -15,8 +15,13 @@ class NativeContinuation {
     explicit NativeContinuation(const Request &request,
                                 std::optional<Clock::time_point> deadline = {},
                                 std::stop_token cancel = {})
-        : budget_(request.output_budget.value_or(0)),
+        : budget_(request.output_budget.value_or(0)), stream_(request.stream),
           deadline_(request.stream ? std::nullopt : deadline), cancel_(cancel) {}
+    // Starts the unary deadline once, after the first round has been sent.
+    void start_deadline(Clock::time_point deadline) {
+        if (!stream_ && !deadline_)
+            deadline_ = deadline;
+    }
     const std::string &token() const { return token_; }
     void check() const;
     void push(json::object event, const EventSink &sink);
@@ -26,7 +31,8 @@ class NativeContinuation {
 
   private:
     std::int64_t budget_, output_ = 0;
-    const std::optional<Clock::time_point> deadline_;
+    const bool stream_;
+    std::optional<Clock::time_point> deadline_;
     const std::stop_token cancel_;
     unsigned rounds_ = 0;
     std::string token_, checkpoint_, response_id_;

@@ -1413,7 +1413,8 @@ json::object decode_chunk(const json::value &wire) {
                 continue;
             auto &c = v.as_array();
             for (std::size_t i = 0; i < c.size(); ++i)
-                if (!c[i].is_null() && i != 0 && i != 1 && i != 3 && i != 4 && i != 8)
+                if (!c[i].is_null() && i != 0 && i != 1 && i != 3 && i != 4 &&
+                    !(i == 8 && c[i].is_string()))
                     note_ignored(ignored, "candidate[" + std::to_string(i) + "]");
             json::object candidate{{"index", index++}};
             if (at(c, 0).is_array()) {
@@ -1435,11 +1436,10 @@ json::object decode_chunk(const json::value &wire) {
                 candidate["finishReason"] = finish_name(number(c[1]));
             if (at(c, 3).is_string())
                 candidate["finishMessage"] = c[3];
-            if (!at(c, 8).is_null()) {
-                if (!at(c, 8).is_string())
-                    throw Error(502, "invalid_upstream", "Invalid continuation checkpoint");
+            // Only a string is a checkpoint. Other values stay ignored for every
+            // model family; a continuation that needs one fails as missing.
+            if (at(c, 8).is_string())
                 candidate[continuation_token_key] = c[8];
-            }
             if (at(c, 4).is_array() && !c[4].as_array().empty())
                 candidate["ais2api"] = json::object{{"wireSafetyRatings", c[4]}};
             candidates.push_back(candidate);

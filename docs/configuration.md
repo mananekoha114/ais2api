@@ -72,7 +72,7 @@
 | `relay_bytes` | 1048576（1 MiB） | 重启 | 浏览器到服务的转发窗口，不能大于 `object_bytes`。 |
 | `queue_size` | 8（1–4096） | 热更新 | 等待中的生成请求数上限，超出返回 `429 queue_full`。 |
 | `queue_seconds` | 30 | 热更新 | 请求最多排队多少秒，超时返回 `504 queue_timeout`。 |
-| `generation_seconds` | 240 | 重启 | 非流式生成的总时限。 |
+| `generation_seconds` | 240 | 重启 | 非流式生成的总时限，从首轮请求发出后开始计时，自动续接不重置。 |
 | `stream_idle_seconds` | 240 | 重启 | 流式生成两次收到数据之间的最长间隔；只要数据持续到达，流式请求可以超过 `generation_seconds`。 |
 | `max_attempts` | 3（1–16） | 热更新 | 单个请求在没有输出任何内容前的最大尝试次数。 |
 | `max_continuation_retries` | 1（1–16） | 热更新 | 整条回答共用的续接额外补试次数，由 `continuation_retry_enabled` 控制是否启用。 |

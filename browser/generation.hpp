@@ -9,7 +9,8 @@
 namespace ais2api::browser_detail {
 // The account, page and snapshot belong to the caller for this entire call.
 // start consumes body before returning and must check again after preparing the
-// upload, before sending it.
+// upload, before sending it. completed runs after each completed round's events
+// have been delivered.
 struct GenerationIO {
     std::function<std::string(std::string_view checkpoint)> encode;
     std::function<void(std::string_view body, const std::function<void()> &check)> start;
