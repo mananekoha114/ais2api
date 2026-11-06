@@ -207,8 +207,9 @@ TEST_CASE("Camoufox browser logs are log sources like Chromium ones", "[camoufox
     write(directory.path / "logs" / "browser-1.log", "a");
     write(directory.path / "logs" / "camoufox-2.log", "b");
     write(directory.path / "logs" / "camoufox-2-identity.json", "{}");
+    const auto listed = log_sources(directory.path);
     std::vector<std::string> ids;
-    for (const auto& source : log_sources(directory.path).at("sources").as_array()) ids.push_back(string_or(source.as_object(), "id"));
+    for (const auto& source : listed.at("sources").as_array()) ids.push_back(string_or(source.as_object(), "id"));
     CHECK(ids == std::vector<std::string>{"browser-1.log", "camoufox-2.log"});
 }
 
