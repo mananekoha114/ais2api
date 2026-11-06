@@ -14,9 +14,11 @@
 #include "../browser/json_text.hpp"
 #include "../browser/process.hpp"
 #include "../browser/proxy_relay.hpp"
+#include <boost/beast/core/detail/base64.hpp>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <deque>
 #include <fstream>
 #include <limits>
@@ -336,6 +338,19 @@ struct CamoufoxGateway::Impl {
     json::object session_state;
     Clock::time_point cookies_saved_at{};
     std::string cookie_refresh = "not_attempted";
+    // AIS2API_CAMOUFOX_DEBUG: keep what the page showed when its identity did
+    // not load. Local logs only; the screenshot shows the account.
+    const bool debug = [] {
+#ifdef _WIN32
+        wchar_t* value = nullptr;
+        std::size_t size = 0;
+        const bool set = _wdupenv_s(&value, &size, L"AIS2API_CAMOUFOX_DEBUG") == 0 && value;
+        std::free(value);
+        return set;
+#else
+        return std::getenv("AIS2API_CAMOUFOX_DEBUG") != nullptr;
+#endif
+    }();
     explicit Impl(const Config& c, Store& s) : config(c), store(s) {}
     ~Impl() { close(); }
     void close() noexcept {
@@ -615,10 +630,44 @@ struct CamoufoxGateway::Impl {
             }
             pause(token, 250ms);
         }
+        record_page("identity");
         if (last == browser_detail::IdentityVerdict::verified)
             incompatible("AI Studio page did not expose a supported ready prompt editor");
         throw Error(409, "identity_unverified", last == browser_detail::IdentityVerdict::ambiguous
             ? "AI Studio exposed multiple account identities" : "AI Studio account identity did not finish loading");
+    }
+    // Debug only: the page state and a screenshot as logs/<profile>-<what>.*.
+    void record_page(std::string_view what) noexcept {
+        if (!debug || page.empty() || !bidi) return;
+        const auto stem = config.data_dir / "logs" / (path_utf8(root.filename()) + "-" + std::string(what));
+        try {
+            const auto state = eval(R"((() => {
+  const links = [...document.querySelectorAll('a[href*="accounts.google.com"], a[href*="myaccount.google.com"]')];
+  const labelled = [...document.querySelectorAll('[data-email], [aria-label*="@"], img[alt*="@"]')];
+  const bridge = globalThis.__ais2bridge;
+  let identity = null;
+  try { if (bridge) { const i = bridge.identity(); identity = { login: i.login, ready: i.ready, identityReady: i.identityReady, ambiguous: i.identityAmbiguous, email: !!i.email }; } } catch (error) { identity = String(error); }
+  return { page: location.origin + location.pathname, title: document.title, readyState: document.readyState,
+    visibility: document.visibilityState, bridge: !!bridge, identity, accountLinks: links.length,
+    accountLinksWithEmail: links.filter(a => /@/.test((a.getAttribute('aria-label') || '') + (a.getAttribute('data-email') || ''))).length,
+    labelled: labelled.length, labelledVisible: labelled.filter(el => el.getClientRects().length > 0).length,
+    textarea: !!document.querySelector('textarea'), dialogs: document.querySelectorAll('[role="dialog"], mat-dialog-container').length,
+    environment: { userAgent: navigator.userAgent, platform: navigator.platform, webdriver: navigator.webdriver,
+      language: navigator.language, languages: navigator.languages, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      intlLocale: Intl.DateTimeFormat().resolvedOptions().locale, offset: new Date().getTimezoneOffset(), hasFocus: document.hasFocus(),
+      cores: navigator.hardwareConcurrency, screen: [screen.width, screen.height, devicePixelRatio], window: [innerWidth, innerHeight],
+      byob: (() => { try { new Response('x').body.getReader({ mode: 'byob' }).releaseLock(); return true; } catch (error) { return false; } })() },
+    text: (document.body ? document.body.innerText : '').slice(0, 600) };
+})())", {}, 5s);
+            std::ofstream(stem.string() + ".json", std::ios::binary) << json::serialize(state);
+        } catch (...) {}
+        try {
+            const auto shot = bidi->call("browsingContext.captureScreenshot", {{"context", page}}, {}, 10s, page);
+            const auto data = string_or(shot, "data");
+            std::string png(boost::beast::detail::base64::decoded_size(data.size()), '\0');
+            png.resize(boost::beast::detail::base64::decode(png.data(), data.data(), data.size()).first);
+            std::ofstream(stem.string() + ".png", std::ios::binary) << png;
+        } catch (...) {}
     }
     void navigate(const std::string& url, std::stop_token token) {
         const auto reply = bidi->exchange("browsingContext.navigate", {{"context", page}, {"url", url}, {"wait", "interactive"}}, token, 45s, page);
@@ -657,6 +706,7 @@ struct CamoufoxGateway::Impl {
                 navigate("https://aistudio.google.com/prompts/new_chat?authuser=" + account.auth_user, token);
                 phase = "account_identity";
                 await_account_identity(account, token, !identity_only);
+                record_page("account");
                 account_id = account.id; account_fingerprint = std::move(fingerprint); last_status = "account_ready";
                 session_state = account.storage_state;
                 verified_session = true;
