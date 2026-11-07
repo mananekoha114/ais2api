@@ -64,7 +64,21 @@ ais2api stop      停止服务
 - `browser update` 与 `browser rollback` 管理浏览器版本。
 - 执行 `setup`、`browser update`、`browser rollback` 前需先停止服务，它们与服务使用同一把数据目录独占锁。
 - 程序旁存在 `browser-runtime/PLATFORM/chrome[.exe]`（Browser-Local 包）时会自动使用，无需下载；`setup` 仍会校验其完整文件清单并准备系统依赖。
-- 实验性的 `camoufox` 后端下，`setup` 只安装生成 Firefox 身份所需的 fpgen 模型（锁定版本，逐个文件核对 SHA-256），不下载 CloakBrowser，也不改写 `browser_executable`；`doctor` 显示模型状态（`installed`、`missing`、`damaged`，或不是 `setup` 创建的 `foreign`）。
+- 实验性的 `camoufox` 后端下，`setup` 安装以下两项，都按 `runtime-manifest.json` 锁定的版本下载并核对 SHA-256；不下载 CloakBrowser，也不改写 `browser_executable`：
+  - 生成 Firefox 身份所需的 fpgen 模型，逐个文件核对；
+  - Camoufox，目前只有 Windows x64：
+    - 压缩包约 1.3 GB，下载时需要约 3 GiB 空闲空间；
+    - 安装到 `<data_dir>/runtime/camoufox/<版本>-<平台>/`，约 400 MB；
+    - 解压时跳过自带的字体和 uBlock Origin：身份总是呈现本机 OS，这时 Camoufox 只用系统字体，外加 Firefox 本身也带的 emoji 字体 `TwemojiMozilla.ttf`（保留）；uBlock Origin 从不加载；
+    - 无界面验证通过后才切换为当前版本，并删除下载的压缩包；
+    - `browser_executable` 指向 Camoufox（`camoufox[.exe]`）时不下载，只验证该程序。
+- `camoufox` 后端的 `doctor`：
+  - 显示模型状态：`installed`、`missing`、`damaged`，或不是 `setup` 创建的 `foreign`；
+  - 显示 Camoufox 的来源、当前版本、上一版本和锁定版本；
+  - 当前版本不是锁定版本，或锁定版本的安装与本程序的解压规则不符时，`camoufox.setup_needed` 为 true、`browser_exists` 为 false，因此程序升级后启动脚本会自动运行 `setup`。
+- `camoufox` 后端会保留上一个 Camoufox：
+  - `browser rollback` 退回上一版本并保持，启动脚本不再自动升级；
+  - `browser update` 重新安装锁定版本，并解除保持。
 
 ### 一键启动脚本
 

@@ -57,11 +57,19 @@
 ## 版本策略
 
 - **跟随最新版**：两种后端始终声称同一个 Firefox 大版本。Firefox 每出一个新大版本，等 Camoufox 在该大版本上的第一个正式版（不是预发布版），Camoufox、SpiderMonkey 与对象结构表三者一起升级，目标 2 周内完成。SpiderMonkey 部分没准备好时，Camoufox 不升大版本；同一大版本内的小版本更新 Camoufox 可以单独跟进。SpiderMonkey 后端出现之前，Camoufox 自由跟随最新版。
-- **回滚**：升级时保留上一个版本，一条命令即可退回。
+- **Camoufox 版本随程序版本更新**：
+  - 由 `runtime-manifest.json` 锁定，维护时决定是否升级；
+  - 新版程序锁定了新的 Camoufox 时，升级程序后启动脚本自动下载；
+  - 锁定版本没变时不下载。
+- **回滚**：升级时保留上一个版本，`ais2api browser rollback` 一条命令即可退回。退回后一直保持，直到运行 `browser update`。
 - **升级 Camoufox 时的身份检查**：
-  1. 更新 `scripts/camoufox-dev.py` 中锁定的 Camoufox 和启动器版本，运行 `catalog` 更新 `browser/camoufox/`（按启动器包的 `RECORD` 核对哈希），并确认 `runtime-manifest.json` 的 `fpgen_model` 与启动器锁定的模型一致。
+  1. 更新锁定版本：
+     - `runtime-manifest.json` 的 `camoufox` 条目：版本、URL、大小、SHA-256，开发脚本也从这里读取；
+     - `scripts/camoufox-dev.py` 中的启动器版本。
+     然后运行 `catalog` 更新 `browser/camoufox/`。它按启动器包的 `RECORD` 核对哈希，并检查启动器锁定的 Camoufox 和 fpgen 模型与 `runtime-manifest.json` 一致。
   2. 对比新旧启动器中已移植的逻辑和 `properties.json`。如果与版本相关的输出变了（例如 WebGL 扩展列表、新增或删除的配置项），在 `firefox_identity::launch()` 中为已保存的身份加迁移，不重新生成。
   3. 运行隐藏测试 `[.fpgen-model]`，并用 `check-identities` 与新启动器对比；再运行 `[.camoufox-runtime]`。
+  4. 用 `fetch` 下载不裁剪的完整版，运行 `[.camoufox-fonts]`，确认 `setup` 裁剪后的渲染与完整版相同。
 - **对象结构表**：自己编写采集工具，在真实浏览器页面中导出与参考项目 `firefox152.json.gz` 相同格式的数据（全局对象自有键及顺序、接口与属性描述、原生函数标记、Window 原型链与取值）。以同版本的 Mozilla 官方 Firefox 为准，按 Windows 和 Linux 分别采集；Camoufox 只用于对比，找出它与官方版不一致之处。每次升级还要人工检查 `dom.js` 中与版本相关的行为。
 - **SpiderMonkey 静态库**：放在单独的公开仓库（例如 `mananekoha114/ais2api-spidermonkey`），保存我们的嵌入补丁（第一版来自参考项目针对 152.0.4 的补丁，之后由我们维护），用 GitHub Actions 编译 windows-x64（clang-cl，兼容 MSVC）、linux-x64、linux-arm64、android-arm64（NDK）。主仓库像 `runtime-manifest.json` 一样用 SHA-256 锁定。
 
@@ -70,9 +78,18 @@
 - **平台顺序**：Windows → Linux x64（含 Docker）→ Termux → macOS（可暂缓）。
 - **显示模式**：Linux 上用 Xvfb 虚拟显示、以有界面模式运行，`setup` 负责安装 Xvfb。Termux 上用 Linux arm64 版，像现在的 CloakBrowser 一样跑在 proot Ubuntu 中，proot 内同样使用 Xvfb。Windows 上用无界面模式：P1 实测两种模式功能相同，无界面模式私有内存少约 270–300 MiB，也不弹出窗口；有界面模式只用于排查登录。
 - **安装**：
-  - 正式分发版由 `setup` 从 Camoufox 官方 GitHub Release 下载锁定版本并校验 SHA-256；运行包和 Docker 镜像都不包含 Camoufox，Docker 在第一次启动时下载到数据卷。
-  - 解压后删除本机 OS 身份用不到的字体组。Camoufox 158 的压缩包约 1.3 GB，其中约 2 GB（解压后）是三套 OS 的字体，浏览器本体约 350 MB。
-  - 不加载自带的 uBlock Origin，与现有的 `--disable-extensions` 一致。
+  - **下载**：
+    - 正式分发版由 `setup` 从 Camoufox 官方 GitHub Release 下载 `runtime-manifest.json` 锁定的版本，校验 SHA-256；
+    - 安装到 `<data_dir>/runtime/camoufox/<版本>-<平台>/`；
+    - 运行包和 Docker 镜像都不包含 Camoufox，Docker 在第一次启动时下载到数据卷；
+    - `browser_executable` 指向 Camoufox 时改用它，方便开发和排查。
+  - **字体**：
+    - Camoufox 158 的压缩包约 1.3 GB，解压后 2.5 GB，其中约 2.1 GB 是三套 OS 的字体，浏览器本体约 400 MB；
+    - 身份呈现宿主 OS 时，Camoufox 只用系统字体；自带字体中只有 Firefox 本身也带的 emoji 字体 `Twemoji Mozilla` 仍会启用，页面能检测到它，emoji 也用它绘制；
+    - 所以 Windows 上解压时跳过 `fonts/` 中 `TwemojiMozilla.ttf` 以外的文件；
+    - 隐藏测试 `[.camoufox-fonts]` 确认裁剪版与完整版渲染相同：检测到的字体、每个字体族和通用字体族的文字宽度逐项一致；
+    - Linux 按 `fonts/groups.json` 保留宿主 OS 的字体组，在 Linux 阶段实现。
+  - **扩展**：不加载自带的 uBlock Origin，与现有的 `--disable-extensions` 一致，解压时就跳过 `addons/UBO`。
   - 开发版可以把 Camoufox 一起打包。
 
 ## SpiderMonkey 后端

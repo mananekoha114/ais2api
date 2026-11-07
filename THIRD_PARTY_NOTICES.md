@@ -42,7 +42,7 @@ Camoufox 后端的身份生成器（`src/fpgen.cpp`、`src/firefox_identity.cpp`
 - [fpgen](https://github.com/scrapfly/fingerprint-generator) 1.3.0（Apache License 2.0，[fpgen-LICENSE.txt](licenses/fpgen-LICENSE.txt)）：`src/fpgen.cpp` 按其 Python 实现移植了贝叶斯网络的读取、beam search 条件分布和采样。fpgen 的模型数据不纳入仓库和运行包，由 `ais2api setup` 从其 GitHub Release 下载，并按 `runtime-manifest.json` 中锁定的 SHA-256 校验。
 - [Camoufox](https://github.com/daijro/camoufox) Python 启动器 0.5.9（MIT License，Copyright (c) 2024-2026 daijro and the Camoufox contributors，[camoufox-launcher-LICENSE.txt](licenses/camoufox-launcher-LICENSE.txt)）：`src/firefox_identity.cpp` 移植了启动器组装身份、修正几何与核数、抽取字体、语音、媒体设备和 WebGL、检查身份一致性的逻辑。`browser/camoufox/` 中的 JSON 目录数据是该启动器安装包中的原文件，未作修改，`catalog.json` 记录其版本和 SHA-256，构建时嵌入程序。
 
-移植部分的许可不因 ais2api 的许可选择而改变。Camoufox 浏览器本身（MPL 2.0）不纳入仓库和运行包。
+移植部分的许可不因 ais2api 的许可选择而改变。Camoufox 浏览器本身（MPL 2.0）不纳入仓库和运行包：`setup` 从官方 GitHub Release 下载锁定版本，跳过自带的字体（保留 emoji 字体）和 uBlock Origin 后安装在数据目录中，其余文件保持原样。
 
 ## 原理参考
 
