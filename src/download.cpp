@@ -16,6 +16,7 @@
 #include <thread>
 #include <charconv>
 #include <cctype>
+#include <optional>
 namespace ais2api {
 namespace {
 struct CurlInit {
@@ -77,6 +78,24 @@ std::string file_digest(const fs::path &path) {
 }
 
 namespace {
+// An attempt that a later one resumes.
+void interrupted(std::string reason) {
+    console::emit_record({{"event", "setup_download_interrupted"}, {"reason", std::move(reason)}});
+}
+std::uint64_t range_bytes(const fs::path &part) {
+    std::uint64_t bytes = 0;
+    std::error_code error;
+    for (unsigned i = 0; i < 4; ++i) {
+        auto segment = part; segment += ".range" + std::to_string(i);
+        if (const auto size = fs::file_size(segment, error); !error) bytes += size;
+    }
+    return bytes;
+}
+// After the given number of consecutive failures without progress, which a
+// download that made progress starts again from one.
+std::chrono::milliseconds backoff(const download_detail::Options &options, unsigned failures) {
+    return options.retry_delay * (1u << (failures - 1));
+}
 void cleanup_ranges(const fs::path &part) {
     std::error_code error;
     for (unsigned i = 0; i < 4; ++i) {
@@ -117,12 +136,16 @@ size_t range_header(char *data, size_t size, size_t count, void *opaque) noexcep
     return size*count;
     } catch (...) { return 0; }
 }
+// "unsupported": the server does not serve exact ranges, so a single stream
+// takes over. "interrupted": a transfer failed (a TLS handshake through a
+// proxy, a dropped connection); another attempt resumes each range.
+enum class Segments { complete, unsupported, interrupted };
 // Each response is stored separately: an interrupted segment is resumable without
 // treating sparse/preallocated bytes as downloaded data. Four easy handles share
 // one bounded multi loop, so failure cleanup never leaves worker threads running.
-bool segmented(std::string_view url, const fs::path &part, std::string_view digest,
-               std::string_view proxy, std::uint64_t total, const download_detail::Options &options) {
-    if (options.connections == 1 || total < 4*1024*1024 || (fs::exists(part) && fs::file_size(part))) return false;
+Segments segmented(std::string_view url, const fs::path &part, std::string_view digest,
+                   std::string_view proxy, std::uint64_t total, const download_detail::Options &options) {
+    if (options.connections == 1 || total < 4*1024*1024 || (fs::exists(part) && fs::file_size(part))) return Segments::unsupported;
     std::string address(url), proxy_text(proxy);
     auto configure = [&](CURL *c, RangeTransfer &t) {
         curl_easy_setopt(c, CURLOPT_URL, address.c_str());
@@ -145,9 +168,18 @@ bool segmented(std::string_view url, const fs::path &part, std::string_view dige
             if (s*n > 1-t.received) return 0;
             t.received += s*n; return s*n;
         });
-    if (curl_easy_perform(handle.get()) != CURLE_OK || probe.status != 206 || probe.received != 1 ||
+    // A write error is the probe refusing more than the one byte it asked for.
+    const auto probed = curl_easy_perform(handle.get());
+    // An untrusted certificate is not a transient failure: the single stream
+    // reports it.
+    if (probed == CURLE_PEER_FAILED_VERIFICATION) return Segments::unsupported;
+    if (probed != CURLE_OK && probed != CURLE_WRITE_ERROR) {
+        interrupted(curl_easy_strerror(probed));
+        return Segments::interrupted;
+    }
+    if (probed != CURLE_OK || probe.status != 206 || probe.received != 1 ||
         !download_detail::content_range(probe.response_range,0,0,total) ||
-        probe.response_etag.size()<2 || probe.response_etag.front()!='"' || probe.response_etag.back()!='"') return false;
+        probe.response_etag.size()<2 || probe.response_etag.front()!='"' || probe.response_etag.back()!='"') return Segments::unsupported;
     auto boundary=[&](unsigned i){return (total/4)*i+(total%4)*i/4;};
     std::array<RangeTransfer,4> transfers;
     std::array<Curl,4> handles{curl_handle(options),curl_handle(options),curl_handle(options),curl_handle(options)};
@@ -193,11 +225,17 @@ bool segmented(std::string_view url, const fs::path &part, std::string_view dige
         curl_multi_add_handle(multi.get(),handles[i].get());
     }
     int running=0; auto logged=Clock::now(); bool transport_ok=true;
+    // Each transfer's result once curl is done with it. A write error is a
+    // response the write callback refused.
+    std::array<std::optional<CURLcode>,4> results;
     do {
         if(curl_multi_perform(multi.get(),&running)!=CURLM_OK){transport_ok=false;break;}
         int remaining=0;
         while(auto *message=curl_multi_info_read(multi.get(),&remaining))
-            if(message->msg==CURLMSG_DONE && message->data.result!=CURLE_OK) transport_ok=false;
+            if(message->msg==CURLMSG_DONE) {
+                for(unsigned i=0;i<4;++i) if(handles[i].get()==message->easy_handle) results[i]=message->data.result;
+                if(message->data.result!=CURLE_OK) transport_ok=false;
+            }
         if(Clock::now()-logged>=std::chrono::seconds(5)){
             std::uint64_t bytes=0; for(auto &t:transfers) bytes+=t.existing+t.received;
             console::emit_record({{"event","setup_download"},{"received_bytes",bytes},{"maximum_bytes",total},{"connections",4}});logged=Clock::now();
@@ -211,10 +249,25 @@ bool segmented(std::string_view url, const fs::path &part, std::string_view dige
         valid=valid && (t.valid || (t.received==t.limit && t.status==206 && t.response_etag==t.etag && download_detail::content_range(t.response_range,last-t.limit+1,last,total)));
     }
     if(!valid) {
-        // Keep valid bounded prefixes only when the response was the exact range.
+        // A range answered with another 2xx response, or another entity, means
+        // the server does not serve exact ranges: that range's bytes are dropped
+        // and a single stream takes over. After any other failure (transport,
+        // an HTTP error) each range keeps the bytes the write callback checked,
+        // and the next attempt resumes them.
+        bool refused=false; std::string reason;
         for(unsigned i=0;i<4;++i){auto &t=transfers[i];auto last=boundary(i+1)-1;
-            if(!t.valid && (t.status!=206 || t.response_etag!=t.etag || !download_detail::content_range(t.response_range,last-t.limit+1,last,total))) fs::remove(paths[i]);}
-        return false;
+            if(t.valid || !results[i]) continue;
+            if(*results[i]!=CURLE_OK && *results[i]!=CURLE_WRITE_ERROR) {
+                if(reason.empty()) reason=curl_easy_strerror(*results[i]);
+                continue;
+            }
+            const bool exact=t.status==206 && t.response_etag==t.etag && download_detail::content_range(t.response_range,last-t.limit+1,last,total);
+            if(!exact && (t.status==200 || t.status==206)) {refused=true; fs::remove(paths[i]);}
+            else if(!exact && reason.empty()) reason="HTTP "+std::to_string(t.status);
+        }
+        if(refused) return Segments::unsupported;
+        interrupted(reason.empty() ? "transfer stopped" : reason);
+        return Segments::interrupted;
     }
     std::ofstream out(part,std::ios::binary|std::ios::trunc);
     std::array<char,65536> buffer{};
@@ -224,7 +277,7 @@ bool segmented(std::string_view url, const fs::path &part, std::string_view dige
     for (auto &path : paths)
         fs::remove(path);
     fs::remove(marker);
-    return true;
+    return Segments::complete;
 }
 }
 void download_detail::download_with_options(std::string_view url, const fs::path &destination, std::string_view digest,
@@ -243,7 +296,15 @@ void download_detail::download_with_options(std::string_view url, const fs::path
         cleanup_ranges(part);
         return;
     }
-    if (segmented(url, part, digest, proxy, expected_size, options)) {
+    for (unsigned failures = 0; failures < 5;) {
+        const auto before = range_bytes(part);
+        const auto outcome = segmented(url, part, digest, proxy, expected_size, options);
+        if (outcome == Segments::unsupported) break;
+        if (outcome == Segments::interrupted) {
+            failures = range_bytes(part) > before ? 1 : failures + 1;
+            std::this_thread::sleep_for(backoff(options, failures));
+            continue;
+        }
         if (file_digest(part) != digest) {
             fs::remove(part);
             throw Error(502,"digest_mismatch","Browser archive SHA-256 mismatch; partial archive removed");
@@ -253,7 +314,7 @@ void download_detail::download_with_options(std::string_view url, const fs::path
         cleanup_ranges(part);
         return;
     }
-    for (unsigned attempt = 0; attempt < 3; ++attempt) {
+    for (unsigned failures = 0; failures < 5;) {
         auto offset = fs::exists(part) ? fs::file_size(part) : 0;
         const auto cap = expected_size ? expected_size : 1024ull * 1024 * 1024;
         if (offset > cap) {
@@ -340,13 +401,18 @@ void download_detail::download_with_options(std::string_view url, const fs::path
         }
         if (result == CURLE_RANGE_ERROR || status == 416) {
             fs::remove(part);
+            ++failures;
             continue;
         }
-        if (attempt == 2)
+        std::error_code error;
+        const auto received = fs::file_size(part, error);
+        failures = !error && received > offset ? 1 : failures + 1;
+        if (failures == 5 || result == CURLE_PEER_FAILED_VERIFICATION)
             throw Error(502, "download_failed",
                         std::string("Archive download failed: ") + curl_easy_strerror(result) +
                             "; partial bytes retained for a later retry");
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        interrupted(result == CURLE_HTTP_RETURNED_ERROR ? "HTTP " + std::to_string(status) : curl_easy_strerror(result));
+        std::this_thread::sleep_for(backoff(options, failures));
     }
     throw Error(502, "download_failed", "Archive server did not accept resumed downloads");
 }

@@ -26,8 +26,9 @@ struct DownloadFixture {
     std::jthread accept_thread;
     std::vector<std::jthread> clients;
     // 0 correct; 1 ignores ranges; 2 changes ETag; 3 malformed ranges;
-    // 4 interrupts range transfers and rejects stream fallback.
-    std::atomic<int> mode{0}, active{0}, peak{0}, resumed{0}, full_requests{0};
+    // 4 interrupts range transfers and rejects stream fallback; 5 answers the
+    // first range transfer with an HTTP error.
+    std::atomic<int> mode{0}, active{0}, peak{0}, resumed{0}, full_requests{0}, errors{0};
     std::chrono::milliseconds throttle{0};
     const std::string body=std::string(4*1024*1024,'x');
     DownloadFixture() {
@@ -73,7 +74,7 @@ struct DownloadFixture {
     }
     ~DownloadFixture(){accept_thread.request_stop();accept_thread.join();clients.clear();std::error_code ec;fs::remove_all(root,ec);}
     std::string url() const {return "https://127.0.0.1:"+std::to_string(acceptor.local_endpoint().port())+"/archive";}
-    download_detail::Options options(unsigned connections=4) const {return {connections,root/"ca.pem"};}
+    download_detail::Options options(unsigned connections=4) const {return {connections,root/"ca.pem",std::chrono::milliseconds(10)};}
     std::string digest() const {
         unsigned char hash[EVP_MAX_MD_SIZE];unsigned size=0;
         EVP_Digest(body.data(),body.size(),hash,&size,EVP_sha256(),nullptr);
@@ -93,6 +94,7 @@ struct DownloadFixture {
             const int behavior=mode.load();
             if(!range)++full_requests;
             if(range && !probe && first%(body.size()/4)!=0)++resumed;
+            if(behavior==5 && range && !probe && errors++==0){boost::asio::write(stream,boost::asio::buffer(std::string("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 4\r\n\r\nbusy")));return;}
             if(behavior==1)range=false;
             if(first>=body.size() || last>=body.size() || first>last) return;
             if(!range){first=0;last=body.size()-1;}
@@ -160,6 +162,15 @@ TEST_CASE("HTTPS interrupted segments resume only verified response prefixes", "
     REQUIRE_NOTHROW(download_detail::download_with_options(server.url(),target,server.digest(),"",server.body.size(),server.options()));
     REQUIRE(server.resumed>0);
     REQUIRE(read_file(target,server.body.size()+1)==server.body);
+}
+TEST_CASE("HTTPS segmented download resumes its ranges after an HTTP error", "[setup][download]") {
+    DownloadFixture server;
+    server.mode=5;
+    auto target=server.root/"archive";
+    REQUIRE_NOTHROW(download_detail::download_with_options(server.url(),target,server.digest(),"",server.body.size(),server.options()));
+    REQUIRE(read_file(target,server.body.size()+1)==server.body);
+    REQUIRE(server.errors>=2);
+    REQUIRE(server.full_requests==0);
 }
 TEST_CASE("HTTPS single stream resumes partial files and restarts ignored ranges", "[setup][download]") {
     DownloadFixture server;
