@@ -37,13 +37,20 @@
 
 - **内容**：navigator、屏幕、字体、WebGL、语音、媒体设备、时区与语言。
 - **OS**：非 macOS 主机呈现宿主真实的 OS（Linux 主机呈现 Linux）。Camoufox 在 Linux 上伪装 Windows 时 canvas/WebGL 读回随机数据，本身就是特征；是否伪装 Windows 留到 Linux 阶段实测决定。
-- **GPU**：按 Camoufox 官方启动器的做法，在本机先不带伪装启动一次 Camoufox，读出真实 GPU 并写入身份。
-- **生成方式**：
-  - 开发版使用预生成的身份池：开发时调用与目标版本配套的 Camoufox 官方 Python 启动器生成，嵌入程序。
-  - 正式分发版必须在本机为每个账号全新生成：把 [fpgen](https://github.com/scrapfly/fingerprint-generator)（Apache-2.0，贝叶斯网络采样，参考其 TypeScript 移植版 fpgen-js）和 Camoufox 启动器组装身份、校验一致性的逻辑移植成 C++。fpgen 模型数据由 `setup` 下载并以 SHA-256 锁定，随版本升级更新。运行时不依赖 Python。
+- **GPU**：按 Camoufox 官方启动器的做法，不带身份启动一次 Camoufox，在本地页面读出 WebGL 厂商与渲染器。读取时的显示模式和首选项与身份启动相同，每个进程只读一次。
+  - fpgen 记录过这块 GPU：身份就声称它。
+  - 是硬件 GPU 但没有记录：抽一块 GPU，并开启 canvas 读回保护。
+  - 软件渲染：抽一块 GPU，不开保护。
+  - 宿主 GPU 与生成身份时不同（换了显卡，或数据目录搬到别的机器）：诊断信息给出提示，身份保持不变，直到重新生成。
+- **生成方式**：开发版和正式分发版都在本机为每个账号生成，运行时不依赖 Python。
+  - 把 [fpgen](https://github.com/scrapfly/fingerprint-generator)（Apache-2.0，贝叶斯网络采样）和 Camoufox 官方 Python 启动器 0.5.9（MIT）中组装身份、校验一致性的 Windows 与 Linux 逻辑移植成 C++（`src/fpgen.cpp`、`src/firefox_identity.cpp`）。字体、语音、媒体设备等目录数据原样取自启动器包，放在 `browser/camoufox/`，嵌入程序。
+  - fpgen 模型由 `setup` 下载到 `<data_dir>/runtime/fpgen/<标签>/`，在 `runtime-manifest.json` 中以 SHA-256 锁定，随版本升级更新。没有模型时，网关返回 503 `browser_not_configured`，提示运行 `ais2api setup`。
+  - 生成过程是确定的：盐值取本机密钥、账号 ID 与指纹种子的 SHA-256 前 64 位。Cookie 导入验证与账号第一次真正启动因此呈现同一台设备；本机密钥让不同安装抽到的身份互不重复。
+  - 身份和指纹种子一起保存在 state 库中。每次启动时按账号语言填入语言、时区和语音（语音来自该语言的语言包），并按浏览器的 `properties.json` 去掉它不读取的配置项。
+  - `scripts/camoufox-dev.py check-identities` 用启动器自己的校验和一致性规则检查生成的身份，并与启动器在同一台机器上生成的身份比较分布。
 - **生命周期**：
   - Firefox 升级时身份抽到的值保持不变，只更新浏览器标识中的版本号等字段。
-  - 只有用户明确操作时才重新生成身份。
+  - 只有用户明确操作时才重新生成身份：重新生成指纹（命令行、管理 API、WebUI）会一并清除身份，下次启动按新种子生成。
   - 已有账号从 CloakBrowser 指纹迁移到 Firefox 身份必须显式操作，不在后台自动迁移；迁移在 Google 看来等同于换了一台新设备。
 - **已知限制**：参考项目的 SpiderMonkey 宿主中 WebGL 返回 null，canvas 只有 2d 的空壳实现，图形表现无法与 Camoufox 完全一致。共用身份实际覆盖 navigator、屏幕、语言和时区。
 
@@ -51,6 +58,10 @@
 
 - **跟随最新版**：两种后端始终声称同一个 Firefox 大版本。Firefox 每出一个新大版本，等 Camoufox 在该大版本上的第一个正式版（不是预发布版），Camoufox、SpiderMonkey 与对象结构表三者一起升级，目标 2 周内完成。SpiderMonkey 部分没准备好时，Camoufox 不升大版本；同一大版本内的小版本更新 Camoufox 可以单独跟进。SpiderMonkey 后端出现之前，Camoufox 自由跟随最新版。
 - **回滚**：升级时保留上一个版本，一条命令即可退回。
+- **升级 Camoufox 时的身份检查**：
+  1. 更新 `scripts/camoufox-dev.py` 中锁定的 Camoufox 和启动器版本，运行 `catalog` 更新 `browser/camoufox/`（按启动器包的 `RECORD` 核对哈希），并确认 `runtime-manifest.json` 的 `fpgen_model` 与启动器锁定的模型一致。
+  2. 对比新旧启动器中已移植的逻辑和 `properties.json`。如果与版本相关的输出变了（例如 WebGL 扩展列表、新增或删除的配置项），在 `firefox_identity::launch()` 中为已保存的身份加迁移，不重新生成。
+  3. 运行隐藏测试 `[.fpgen-model]`，并用 `check-identities` 与新启动器对比；再运行 `[.camoufox-runtime]`。
 - **对象结构表**：自己编写采集工具，在真实浏览器页面中导出与参考项目 `firefox152.json.gz` 相同格式的数据（全局对象自有键及顺序、接口与属性描述、原生函数标记、Window 原型链与取值）。以同版本的 Mozilla 官方 Firefox 为准，按 Windows 和 Linux 分别采集；Camoufox 只用于对比，找出它与官方版不一致之处。每次升级还要人工检查 `dom.js` 中与版本相关的行为。
 - **SpiderMonkey 静态库**：放在单独的公开仓库（例如 `mananekoha114/ais2api-spidermonkey`），保存我们的嵌入补丁（第一版来自参考项目针对 152.0.4 的补丁，之后由我们维护），用 GitHub Actions 编译 windows-x64（clang-cl，兼容 MSVC）、linux-x64、linux-arm64、android-arm64（NDK）。主仓库像 `runtime-manifest.json` 一样用 SHA-256 锁定。
 
@@ -77,7 +88,7 @@ CMake 选项 `AIS2API_DEV_BUNDLE` 区分开发版与正式分发版，默认关�
 
 | | 开发版（开启） | 正式分发版（关闭） |
 |---|---|---|
-| 身份 | 嵌入预生成的身份池 | 本机全新生成 |
+| 身份 | 本机生成（与正式版相同） | 本机生成 |
 | fpgen 模型 | 嵌入 | `setup` 下载 |
 | Camoufox | 可以一起打包 | `setup` 下载 |
 
