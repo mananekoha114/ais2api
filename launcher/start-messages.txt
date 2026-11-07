@@ -2,7 +2,7 @@ missing|找不到可执行文件：
 running|ais2api 已在运行。
 api_key|提示：config.json 中的 api_key 为空；调用生成接口前，请先填写它或在管理控制台「配置」中设置。
 password|提示：管理控制台的默认密码为 admin，首次登录后需要修改。
-setup|尚未准备浏览器，正在运行 setup 下载浏览器……
+setup|浏览器尚未准备或需要更新，正在运行 setup 下载浏览器……
 prepared|浏览器已准备完成。
 background|ais2api 已在后台启动，日志位于数据目录的 service.log。
 serve|正在启动 ais2api，按 Ctrl+C 停止。

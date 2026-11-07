@@ -8,7 +8,9 @@
 #include "ais2api/media.hpp"
 #include "ais2api/browser.hpp"
 #include "ais2api/bundle.hpp"
+#include "ais2api/camoufox.hpp"
 #include "ais2api/console.hpp"
+#include "ais2api/firefox_identity.hpp"
 #include <archive.h>
 #include <archive_entry.h>
 #include <curl/curl.h>
@@ -162,7 +164,8 @@ curl_socket_t public_socket(void *, curlsocktype, struct curl_sockaddr *address)
     return ::socket(address->family, address->socktype, address->protocol);
 }
 } // namespace
-void extract_archive(const fs::path &input, const fs::path &destination) {
+void extract_archive(const fs::path &input, const fs::path &destination,
+                     const std::function<bool(std::string_view)> &keep) {
     if (fs::exists(destination) && (!fs::is_directory(destination) || !fs::is_empty(destination)))
         throw Error(409, "directory_not_empty",
                     "Extraction destination must be an empty owned staging directory");
@@ -197,9 +200,12 @@ void extract_archive(const fs::path &input, const fs::path &destination) {
             name.find(':') != std::string::npos || archive_entry_symlink(entry) ||
             archive_entry_hardlink(entry))
             throw Error(400, "archive_path", "Unsafe archive entry");
+        std::string clean;  // the entry's path, '/'-separated, without "." pieces
         for (const auto &piece : relative) {
             if (piece == "..")
                 throw Error(400, "archive_path", "Archive entry escapes staging directory");
+            if (const auto text = path_utf8(piece); !text.empty() && text != ".")
+                clean += (clean.empty() ? "" : "/") + text;
 #ifdef _WIN32
             auto component = piece.string();
             if (component != "." && !component.empty()) {
@@ -216,15 +222,19 @@ void extract_archive(const fs::path &input, const fs::path &destination) {
             }
 #endif
         }
+        const auto type = archive_entry_filetype(entry);
+        if (type != AE_IFDIR && type != AE_IFREG)
+            throw Error(400, "archive_path", "Special archive entries are not supported");
+        // Entries the caller leaves out pass the same checks but are not written.
+        if (keep && !keep(clean))
+            continue;
         auto target = (root / relative).lexically_normal();
-        if (!seen.insert(target).second && archive_entry_filetype(entry) != AE_IFDIR)
+        if (!seen.insert(target).second && type != AE_IFDIR)
             throw Error(400, "archive_path", "Duplicate archive file");
-        if (archive_entry_filetype(entry) == AE_IFDIR) {
+        if (type == AE_IFDIR) {
             fs::create_directories(target);
             continue;
         }
-        if (archive_entry_filetype(entry) != AE_IFREG)
-            throw Error(400, "archive_path", "Special archive entries are not supported");
         // Filesystem aliases (Windows case folding / short names) may name an
         // already extracted entry even when the lexical paths differ.
         if (fs::exists(target))
@@ -347,39 +357,301 @@ void install_fpgen_model(const fs::path &archive, const fs::path &directory, con
     }
 }
 namespace {
-// The Camoufox backend needs the fpgen model. Camoufox itself is configured
-// by hand for now, so setup neither downloads CloakBrowser nor changes
-// browser_executable.
+// Written last into a Camoufox directory setup installed.
+constexpr std::string_view camoufox_marker = ".ais2api-runtime.json";
+#ifdef _WIN32
+constexpr std::string_view camoufox_program = "camoufox.exe";
+#else
+constexpr std::string_view camoufox_program = "camoufox";
+#endif
+// What camoufox_keeps leaves out, as recorded in the marker.
+constexpr std::array<std::string_view, 2> camoufox_skipped{"fonts", "addons/UBO"};
+// Kept from a skipped directory. Camoufox still activates the emoji font
+// Firefox bundles on Windows, and so a page finds it.
+constexpr std::array<std::string_view, 1> camoufox_kept{"fonts/TwemojiMozilla.ttf"};
+// The marker's record of the rules above. An install made under other rules
+// is installed again.
+json::object camoufox_trim() {
+    json::array skipped, kept;
+    for (const auto entry : camoufox_skipped) skipped.emplace_back(entry);
+    for (const auto entry : camoufox_kept) kept.emplace_back(entry);
+    return {{"skipped", std::move(skipped)}, {"kept", std::move(kept)}};
+}
+std::string host_platform() {
+    try {
+        return platform();
+    } catch (const std::exception &) {
+        return {};
+    }
+}
+// "installed" when `directory` holds a complete install setup made; its
+// marker is then in `owner`.
+std::string camoufox_install_state(const fs::path &directory, json::object &owner) {
+    std::error_code error;
+    const auto status = fs::symlink_status(directory, error);
+    if (!fs::exists(status)) return "missing";
+    if (!fs::is_directory(status)) return "foreign";
+    try {
+        owner = json::parse(read_file(directory / camoufox_marker, 65536)).as_object();
+    } catch (const std::exception &) {
+        return "foreign";
+    }
+    if (string_or(owner, "browser") != "camoufox") return "foreign";
+    const auto file = [&](std::string_view name) {
+        return fs::is_regular_file(fs::symlink_status(directory / name, error));
+    };
+    if (!file(camoufox_program) || !file("properties.json") || !file("application.ini")) return "damaged";
+    try {
+        if (firefox_identity::browser_version(directory) != string_or(owner, "browser_version")) return "damaged";
+    } catch (const std::exception &) {
+        return "damaged";
+    }
+    return "installed";
+}
+fs::path selection_file(const fs::path &data_dir) { return camoufox_root(data_dir) / "current.json"; }
+void write_selection(const fs::path &data_dir, const CamoufoxSelection &selection) {
+    secure_directory(camoufox_root(data_dir));
+    atomic_write(selection_file(data_dir),
+                 json::serialize(json::object{{"version", 1},
+                                              {"current", selection.current},
+                                              {"previous", selection.previous},
+                                              {"held", selection.held}}));
+}
+} // namespace
+std::optional<CamoufoxPin> camoufox_pin(const json::object &manifest, std::string_view platform) {
+    const auto *camoufox = manifest.if_contains("camoufox");
+    if (!camoufox) return std::nullopt;
+    CamoufoxPin pin;
+    try {
+        const auto &object = camoufox->as_object();
+        const auto *artifact = object.at("artifacts").as_object().if_contains(platform);
+        if (!artifact) return std::nullopt;
+        pin.version = json::value_to<std::string>(object.at("version"));
+        pin.platform = std::string(platform);
+        pin.url = json::value_to<std::string>(artifact->at("url"));
+        pin.sha256 = json::value_to<std::string>(artifact->at("sha256"));
+        pin.size = json::value_to<std::uint64_t>(artifact->at("size"));
+    } catch (const std::exception &) {
+        pin = {};
+    }
+    if (!model_name(pin.version, false) || !model_name(pin.platform, false) || !pin.url.starts_with("https://") ||
+        !digest(pin.sha256) || !pin.size)
+        throw Error(400, "invalid_manifest",
+                    "runtime-manifest.json has no valid Camoufox pin for " + std::string(platform));
+    return pin;
+}
+std::optional<CamoufoxPin> camoufox_pin() {
+    const auto host = host_platform();
+    if (host.empty()) return std::nullopt;
+    return camoufox_pin(manifest(), host);
+}
+bool camoufox_keeps(std::string_view relative) {
+    if (std::find(camoufox_kept.begin(), camoufox_kept.end(), relative) != camoufox_kept.end()) return true;
+    return std::none_of(camoufox_skipped.begin(), camoufox_skipped.end(), [&](std::string_view skipped) {
+        return relative.starts_with(skipped) &&
+               (relative.size() == skipped.size() || relative[skipped.size()] == '/');
+    });
+}
+fs::path camoufox_root(const fs::path &data_dir) { return data_dir / "runtime" / "camoufox"; }
+fs::path camoufox_directory(const fs::path &data_dir, const CamoufoxPin &pin) {
+    return camoufox_root(data_dir) / fs::u8path(pin.version + "-" + pin.platform);
+}
+std::string camoufox_state(const fs::path &directory, const CamoufoxPin &pin) {
+    json::object owner;
+    const auto state = camoufox_install_state(directory, owner);
+    const auto trim = camoufox_trim();
+    if (state == "installed" &&
+        (string_or(owner, "browser_version") != pin.version || string_or(owner, "platform") != pin.platform ||
+         string_or(owner, "sha256") != pin.sha256 || owner.if_contains("skipped") == nullptr ||
+         owner.at("skipped") != trim.at("skipped") || owner.if_contains("kept") == nullptr ||
+         owner.at("kept") != trim.at("kept")))
+        return "damaged";
+    return state;
+}
+void install_camoufox(const fs::path &archive, const fs::path &directory, const CamoufoxPin &pin) {
+    const auto state = camoufox_state(directory, pin);
+    if (state == "foreign")
+        throw Error(409, "unknown_runtime",
+                    path_utf8(directory) + " was not created by setup; move it away and rerun setup");
+    const auto parent = directory.parent_path();
+    secure_directory(parent);
+    const auto staging = parent / ("staging-" + random_hex(8));
+    try {
+        extract_archive(archive, staging, camoufox_keeps);
+        for (const auto name : {camoufox_program, std::string_view("properties.json"), std::string_view("application.ini")})
+            if (!fs::is_regular_file(fs::symlink_status(staging / name)))
+                throw Error(502, "archive_layout", "Camoufox archive holds no " + std::string(name) + " at its root");
+        if (firefox_identity::browser_version(staging) != pin.version)
+            throw Error(502, "archive_layout", "Camoufox archive is not version " + pin.version);
+        auto marker = camoufox_trim();
+        marker.insert({{"version", 1},
+                       {"browser", "camoufox"},
+                       {"browser_version", pin.version},
+                       {"platform", pin.platform},
+                       {"sha256", pin.sha256}});
+        atomic_write(staging / camoufox_marker, json::serialize(marker));
+        if (state != "missing") fs::remove_all(directory);
+        fs::rename(staging, directory);
+    } catch (...) {
+        std::error_code error;
+        fs::remove_all(staging, error);
+        throw;
+    }
+}
+CamoufoxSelection camoufox_selection(const fs::path &data_dir) {
+    CamoufoxSelection selection;
+    std::error_code error;
+    if (!fs::is_regular_file(fs::symlink_status(selection_file(data_dir), error))) return selection;
+    try {
+        const auto object = json::parse(read_file(selection_file(data_dir), 65536)).as_object();
+        selection.current = string_or(object, "current");
+        selection.previous = string_or(object, "previous");
+        selection.held = bool_or(object, "held");
+    } catch (const std::exception &) {
+        return {};
+    }
+    // Directory names under camoufox_root, nothing else.
+    if (!model_name(selection.current, false)) selection.current.clear();
+    if (!model_name(selection.previous, false)) selection.previous.clear();
+    return selection;
+}
+void select_camoufox(const fs::path &data_dir, const std::string &name) {
+    if (!model_name(name, false)) throw Error(400, "invalid_runtime", "Invalid Camoufox install name");
+    auto selection = camoufox_selection(data_dir);
+    if (selection.current != name) {
+        if (!selection.current.empty()) selection.previous = selection.current;
+        selection.current = name;
+    }
+    if (selection.previous == name) selection.previous.clear();
+    selection.held = false;
+    write_selection(data_dir, selection);
+    // Two installs are kept. An install still in use elsewhere may resist
+    // removal; the next setup tries again.
+    for (const auto &entry : fs::directory_iterator(camoufox_root(data_dir))) {
+        const auto file = path_utf8(entry.path().filename());
+        if (file == selection.current || file == selection.previous) continue;
+        json::object owner;
+        if (const auto state = camoufox_install_state(entry.path(), owner); state == "installed" || state == "damaged") {
+            std::error_code error;
+            fs::remove_all(entry.path(), error);
+        }
+    }
+}
+void hold_previous_camoufox(const fs::path &data_dir) {
+    auto selection = camoufox_selection(data_dir);
+    if (selection.previous.empty())
+        throw Error(409, "rollback_missing", "There is no earlier Camoufox install to roll back to");
+    std::swap(selection.current, selection.previous);
+    selection.held = true;
+    write_selection(data_dir, selection);
+}
+CamoufoxExecutable camoufox_executable(const Config &config) {
+    auto stem = path_utf8(config.browser_executable.stem());
+    std::transform(stem.begin(), stem.end(), stem.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (stem == "camoufox") return {config.browser_executable, "browser_executable"};
+    const auto selection = camoufox_selection(config.data_dir);
+    if (selection.current.empty()) return {};
+    const auto directory = camoufox_root(config.data_dir) / fs::u8path(selection.current);
+    json::object owner;
+    if (camoufox_install_state(directory, owner) != "installed") return {};
+    return {directory / camoufox_program, "setup"};
+}
+namespace {
+json::object verify_camoufox(const Config &config, const fs::path &executable) {
+    auto verification = config;
+    verification.browser_executable = executable;
+    verification.headless = true;
+    Store store(config.data_dir);
+    CamoufoxGateway gateway(verification, store);
+    return gateway.verify_runtime();
+}
+// The Camoufox backend needs the fpgen model and Camoufox: the pinned build
+// for this platform, unless browser_executable names one. setup changes
+// neither browser_executable nor anything CloakBrowser uses.
 json::object setup_camoufox(const Config &config) {
-    const auto pin = fpgen_model_pin();
+    const auto model = fpgen_model_pin();
+    const auto camoufox = camoufox_pin();
     const auto root = config.data_dir / "runtime";
     secure_directory(config.data_dir);
     secure_directory(root);
-    const auto directory = fpgen_model_directory(config.data_dir, pin);
-    const auto stage = [&](std::string name) {
-        console::emit_record({{"event", "setup_stage"},
-                              {"stage", name},
-                              {"browser_backend", config.browser_backend},
-                              {"fpgen_model", pin.tag}});
+    const auto directory = fpgen_model_directory(config.data_dir, model);
+    const auto stage = [&](std::string name, bool browser) {
+        json::object record{{"event", "setup_stage"}, {"stage", name}, {"browser_backend", config.browser_backend}};
+        if (!browser)
+            record["fpgen_model"] = model.tag;
+        else if (camoufox) {
+            record["browser"] = "camoufox";
+            record["browser_version"] = camoufox->version;
+            record["platform"] = camoufox->platform;
+        }
+        console::emit_record(record);
     };
-    const auto state = fpgen_model_state(directory, pin);
+    const auto state = fpgen_model_state(directory, model);
     if (state == "foreign")
         throw Error(409, "unknown_runtime",
                     path_utf8(directory) + " was not created by setup; move it away and rerun setup");
     if (state != "installed") {
-        stage("model-download");
+        stage("model-download", false);
         const auto archive = root / "downloads" / "fpgen-model.zip";
-        download_verified(pin.url, archive, pin.sha256, config.proxy, pin.size);
-        stage("model-install");
-        install_fpgen_model(archive, directory, pin);
+        download_verified(model.url, archive, model.sha256, config.proxy, model.size);
+        stage("model-install", false);
+        install_fpgen_model(archive, directory, model);
     }
-    stage("model-complete");
-    return {{"status", "prepared"},
-            {"browser_backend", config.browser_backend},
-            {"fpgen_model", json::object{{"tag", pin.tag},
-                                         {"directory", path_utf8(directory)},
-                                         {"installed_now", state != "installed"}}},
-            {"note", "setup does not install Camoufox yet: set browser_executable to a Camoufox build"}};
+    stage("model-complete", false);
+    json::object result{{"status", "prepared"},
+                        {"browser_backend", config.browser_backend},
+                        {"fpgen_model", json::object{{"tag", model.tag},
+                                                     {"directory", path_utf8(directory)},
+                                                     {"installed_now", state != "installed"}}},
+                        {"note", "Run accounts probe and an actual generation to verify Google access"}};
+
+    if (const auto configured = camoufox_executable(config); configured.source == "browser_executable") {
+        stage("verify", true);
+        auto verification = verify_camoufox(config, configured.path);
+        stage("complete", true);
+        result["camoufox"] = json::object{{"source", configured.source},
+                                          {"executable", path_utf8(configured.path)},
+                                          {"browser_verification", std::move(verification)}};
+        return result;
+    }
+    if (!camoufox) {
+        result["note"] = "No Camoufox is pinned for this platform yet: set browser_executable to a Camoufox build";
+        return result;
+    }
+    const auto install = camoufox_directory(config.data_dir, *camoufox);
+    const auto installed = camoufox_state(install, *camoufox);
+    if (installed == "foreign")
+        throw Error(409, "unknown_runtime",
+                    path_utf8(install) + " was not created by setup; move it away and rerun setup");
+    if (installed != "installed") {
+        const auto archive =
+            root / "downloads" / fs::u8path("camoufox-" + camoufox->version + "-" + camoufox->platform + ".zip");
+        std::error_code error;
+        const bool downloaded = fs::is_regular_file(archive, error) && fs::file_size(archive, error) == camoufox->size;
+        // The four download segments are joined into a second copy.
+        if (fs::space(root).available < (downloaded ? 0 : 2 * camoufox->size) + (512ull << 20))
+            throw Error(507, "disk_space",
+                        "Installing Camoufox needs about " + std::to_string(((downloaded ? 0 : 2 * camoufox->size) >> 20) + 512) +
+                            " MiB of free space in the data directory");
+        stage("download", true);
+        download_verified(camoufox->url, archive, camoufox->sha256, config.proxy, camoufox->size);
+        stage("extract", true);
+        install_camoufox(archive, install, *camoufox);
+        fs::remove(archive, error);
+    }
+    stage("verify", true);
+    const auto executable = install / camoufox_program;
+    auto verification = verify_camoufox(config, executable);
+    select_camoufox(config.data_dir, path_utf8(install.filename()));
+    stage("complete", true);
+    result["camoufox"] = json::object{{"source", "setup"},
+                                      {"version", camoufox->version},
+                                      {"directory", path_utf8(install)},
+                                      {"executable", path_utf8(executable)},
+                                      {"installed_now", installed != "installed"},
+                                      {"browser_verification", std::move(verification)}};
+    return result;
 }
 } // namespace
 std::vector<std::string> linux_runtime_packages(std::string_view os_release) {
@@ -582,7 +854,32 @@ json::object setup_runtime(Config &config, bool approved) {
     }
     return prepared(launcher, false);
 }
+namespace {
+json::object rollback_camoufox(const Config &config) {
+    const auto selection = camoufox_selection(config.data_dir);
+    if (selection.previous.empty())
+        throw Error(409, "rollback_missing", "There is no earlier Camoufox install to roll back to");
+    const auto directory = camoufox_root(config.data_dir) / fs::u8path(selection.previous);
+    json::object owner;
+    if (camoufox_install_state(directory, owner) != "installed")
+        throw Error(409, "rollback_missing", "The earlier Camoufox install no longer exists");
+    const auto executable = directory / camoufox_program;
+    auto verification = verify_camoufox(config, executable);
+    hold_previous_camoufox(config.data_dir);
+    json::object result{{"status", "rolled_back"},
+                        {"browser_backend", config.browser_backend},
+                        {"browser_version", string_or(owner, "browser_version")},
+                        {"browser_executable", path_utf8(executable)},
+                        {"browser_verification", std::move(verification)},
+                        {"note", "Kept until browser update installs the pinned Camoufox again"}};
+    if (camoufox_executable(config).source == "browser_executable")
+        result["note"] = "browser_executable names Camoufox and stays in use";
+    return result;
+}
+} // namespace
 json::object rollback_runtime(Config &config) {
+    if (config.browser_backend == "camoufox")
+        return rollback_camoufox(config);
     auto file = config.data_dir / "runtime/previous.json";
     auto previous = json::parse(read_file(file, 65536)).as_object();
     auto path = fs::u8path(string_or(previous, "browser_executable"));
@@ -619,11 +916,38 @@ json::object doctor(const Config &config) {
             {"browser_backend", config.browser_backend},
             {"google_access", "not_checked"}};
     if (config.browser_backend == "camoufox") {
-        const auto pin = fpgen_model_pin();
-        const auto directory = fpgen_model_directory(config.data_dir, pin);
-        result["fpgen_model"] = json::object{{"tag", pin.tag},
+        const auto model = fpgen_model_pin();
+        const auto directory = fpgen_model_directory(config.data_dir, model);
+        const auto model_state = fpgen_model_state(directory, model);
+        result["fpgen_model"] = json::object{{"tag", model.tag},
                                              {"directory", path_utf8(directory)},
-                                             {"state", fpgen_model_state(directory, pin)}};
+                                             {"state", model_state}};
+        const auto executable = camoufox_executable(config);
+        const auto selection = camoufox_selection(config.data_dir);
+        const auto pin = camoufox_pin();
+        json::object camoufox{{"source", executable.source},
+                              {"executable", path_utf8(executable.path)},
+                              {"current", selection.current},
+                              {"previous", selection.previous},
+                              {"held", selection.held},
+                              {"pinned", pin ? json::value(pin->version) : json::value(nullptr)}};
+        // A program upgrade that pins another Camoufox, or extracts it
+        // differently, makes the launcher run setup again, unless a rollback
+        // holds the current install.
+        bool outdated = false;
+        if (pin) {
+            const auto pinned = camoufox_directory(config.data_dir, *pin);
+            const auto state = camoufox_state(pinned, *pin);
+            camoufox["state"] = state;
+            outdated = executable.source == "setup" &&
+                       (selection.current != path_utf8(pinned.filename()) || state != "installed");
+        }
+        camoufox["setup_needed"] = outdated;
+        std::error_code error;
+        result["browser_configured"] = !executable.path.empty();
+        result["browser_exists"] = !executable.path.empty() && fs::is_regular_file(executable.path, error) &&
+                                   model_state == "installed" && (!outdated || selection.held);
+        result["camoufox"] = std::move(camoufox);
     }
     return result;
 }
