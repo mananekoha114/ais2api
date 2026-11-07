@@ -42,7 +42,7 @@
 |---|---|---|---|
 | `data_dir` | 字符串，程序旁 `data/` | 重启 | 数据库、日志、下载与浏览器临时资料所在目录。 |
 | `browser_executable` | 字符串，`""` | 重启 | 浏览器路径。留空时自动使用程序旁 `browser-runtime/` 中的锁定浏览器，或 `setup` 安装的浏览器。 |
-| `browser_backend` | 字符串，`"cloakbrowser"` | 重启 | 浏览器后端。`camoufox` 为实验性的 Firefox 后端（通过 WebDriver BiDi 驱动 Camoufox，见 [Firefox 后端迁移计划](firefox-backends.md)）：`browser_executable` 必须指向 `camoufox`，身份池放在 `<data_dir>/camoufox/identity-pool.json`，由 `scripts/camoufox-dev.py` 生成。 |
+| `browser_backend` | 字符串，`"cloakbrowser"` | 重启 | 浏览器后端。`camoufox` 为实验性的 Firefox 后端（通过 WebDriver BiDi 驱动 Camoufox，见 [Firefox 后端迁移计划](firefox-backends.md)）：`browser_executable` 必须指向 `camoufox`；先运行 `ais2api setup` 安装生成身份所需的 fpgen 模型（此时 `setup` 不下载 CloakBrowser，也不改写 `browser_executable`），每个账号的身份在本机生成并随指纹保存。 |
 | `headless` | 布尔，`true` | 重启 | 是否以无界面模式运行浏览器。 |
 | `proxy` | 字符串，`""` | 重启 | 上游代理，同时用于浏览器和服务端下载。 |
 | `browser_proxy_relay` | 布尔，`false` | 重启 | 开启本机转发代理，让浏览器能使用带用户名密码的 HTTP 或 SOCKS5 代理，详见下文。 |

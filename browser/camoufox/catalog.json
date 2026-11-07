@@ -1,0 +1,13 @@
+{
+ "camoufox_python": "0.5.9",
+ "browser": "v158.0.1-beta.41",
+ "files": {
+  "essential-fonts.json": "b3f6c893c905264602f24a4ebb3b1537a0d70d884d50c2e2e25a28164aef2e68",
+  "font-bases.json": "a048300128262aaa117ce4af82c0e497751ce10a7fbc8104a857b32cbc10d5de",
+  "font-groups.json": "8abc3a0a60c83e9528fe0ced50fa31be126101859c6d6a2d2ec1543d601d5aea",
+  "fonts.json": "647be20f8d58654f30e9f8f71747d3319524c35d75064da90bff68caba44612c",
+  "launcher-constants.json": "39cfa71a3e36ae34976acd4a45c970e20ac558aa4e22e4db6b9e89a71b67cb55",
+  "media-devices.json": "68d85ce470e381b29de48bdfdf3d015bf56ede1458bf6aaba411e7ae3c6d8e9b",
+  "voice-manifests.json": "9f0383dc01bf703ae9607ba7e023684c629142f8a8e84861a0f9da7da933d949"
+ }
+}
