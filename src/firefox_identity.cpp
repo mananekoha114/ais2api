@@ -931,21 +931,24 @@ void detail::apply_locale(json::object &config, std::string_view locale, std::st
             start = end + 1;
         }
         const auto language = lower(parts.front());
-        std::string region;
+        std::string region, script;
         for (std::size_t i = 1; i < parts.size(); ++i)
             if (parts[i].size() == 2 || (parts[i].size() == 3 && std::all_of(parts[i].begin(), parts[i].end(), [](unsigned char c) { return std::isdigit(c); }))) {
                 region = parts[i];
                 std::transform(region.begin(), region.end(), region.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+            } else if (i == 1 && parts[i].size() == 4) {
+                script = lower(parts[i]);
+                script[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(script[0])));
             }
         const std::string tag(locale);
-        json::array languages{json::value(tag)};
-        if (language != tag) languages.emplace_back(language);
+        // Camoufox derives navigator.languages from locale:all.
         config["navigator.language"] = tag;
-        config["navigator.languages"] = languages;
         config["headers.Accept-Language"] = language != tag ? tag + "," + language + ";q=0.9" : tag;
         config["locale:language"] = language;
         if (!region.empty()) config["locale:region"] = region;
         else config.erase("locale:region");
+        if (!script.empty()) config["locale:script"] = script;
+        else config.erase("locale:script");
         config["locale:all"] = language != tag ? tag + ", " + language : tag;
     }
     if (!timezone.empty()) config["timezone"] = std::string(timezone);

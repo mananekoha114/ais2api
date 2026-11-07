@@ -6,7 +6,10 @@
 
 #include "ais2api/camoufox.hpp"
 #include "ais2api/browser.hpp"
+#include "ais2api/console.hpp"
+#include "ais2api/firefox_identity.hpp"
 #include "ais2api/region.hpp"
+#include "ais2api/runtime.hpp"
 #include "ais2api/store.hpp"
 #include "../browser/bidi.hpp"
 #include "../browser/generation.hpp"
@@ -23,7 +26,6 @@
 #include <fstream>
 #include <limits>
 #include <mutex>
-#include <sstream>
 
 namespace ais2api {
 namespace {
@@ -169,66 +171,13 @@ std::string browser_detail::firefox_user_js(const json::object& prefs) {
     return result;
 }
 
-browser_detail::CamoufoxIdentityPool browser_detail::load_identity_pool(const fs::path& file) {
-    std::ifstream input(file, std::ios::binary);
-    if (!input) throw Error(503, "browser_not_configured", "Camoufox identity pool missing: run scripts/camoufox-dev.py identities");
-    std::stringstream buffer;
-    buffer << input.rdbuf();
-    const auto text = buffer.str();
-    boost::system::error_code error;
-    auto value = json::parse(text, error);
-    const auto invalid = [] { return Error(503, "browser_not_configured", "Camoufox identity pool is invalid: regenerate it with scripts/camoufox-dev.py"); };
-    if (error || !value.is_object()) throw invalid();
-    const auto& object = value.as_object();
-    const auto* schema = object.if_contains("schema");
-    const auto* identities = object.if_contains("identities");
-    if (!schema || !schema->is_int64() || schema->as_int64() != 1 || !identities || !identities->is_array() || identities->as_array().empty()) throw invalid();
-    CamoufoxIdentityPool pool;
-    if (auto* camoufox = object.if_contains("camoufox"); camoufox && camoufox->is_object()) pool.camoufox = camoufox->as_object();
-    for (const auto& item : identities->as_array()) {
-        if (!item.is_object()) throw invalid();
-        const auto* config = item.as_object().if_contains("config");
-        const auto* prefs = item.as_object().if_contains("prefs");
-        if (!config || !config->is_object() || config->as_object().empty() || (prefs && !prefs->is_object())) throw invalid();
-        pool.identities.push_back(item.as_object());
-    }
-    pool.sha256 = sha256(text);
-    return pool;
-}
-
-json::object browser_detail::camoufox_launch_config(const json::object& identity_config, std::string_view locale, std::string_view timezone) {
-    auto config = identity_config;
-    if (!locale.empty()) {
-        // BCP 47 subtags: language first, then an optional 4-letter script and
-        // a 2-letter or 3-digit region.
-        std::vector<std::string> parts;
-        for (std::size_t start = 0; start <= locale.size();) {
-            const auto end = std::min(locale.find('-', start), locale.size());
-            parts.emplace_back(locale.substr(start, end - start));
-            start = end + 1;
-        }
-        const auto language = lower(parts.front());
-        std::string region;
-        for (std::size_t i = 1; i < parts.size(); ++i)
-            if (parts[i].size() == 2 || (parts[i].size() == 3 && std::all_of(parts[i].begin(), parts[i].end(), [](unsigned char c) { return std::isdigit(c); }))) {
-                region = parts[i];
-                std::transform(region.begin(), region.end(), region.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-            }
-        const std::string tag(locale);
-        json::array languages{json::value(tag)};
-        if (language != tag) languages.emplace_back(language);
-        config["navigator.language"] = tag;
-        config["navigator.languages"] = languages;
-        config["headers.Accept-Language"] = language != tag ? tag + "," + language + ";q=0.9" : tag;
-        config["locale:language"] = language;
-        if (!region.empty()) config["locale:region"] = region;
-        else config.erase("locale:region");
-        config["locale:all"] = language != tag ? tag + ", " + language : tag;
-    }
-    if (!timezone.empty()) config["timezone"] = std::string(timezone);
-    // The bridge runs in the page's own world, as AI Studio's code does.
-    config["allowMainWorld"] = true;
-    return config;
+std::uint64_t browser_detail::identity_salt(std::string_view secret, std::string_view account_id, unsigned seed) {
+    std::string input(secret);
+    input += '\0';
+    input += account_id;
+    input += '\0';
+    input += std::to_string(seed);
+    return std::stoull(sha256(input).substr(0, 16), nullptr, 16);
 }
 
 namespace {
@@ -289,12 +238,44 @@ json::object proxy_prefs(const ProxyEndpoint& proxy) {
     return prefs;
 }
 
-// The major version in a Firefox user agent ("... Firefox/158.0").
-std::string firefox_major(std::string_view user_agent) {
-    const auto at = user_agent.find("Firefox/");
-    if (at == std::string_view::npos) return {};
-    auto rest = user_agent.substr(at + 8);
-    return std::string(rest.substr(0, std::min(rest.find_first_not_of("0123456789"), rest.size())));
+// The WebGL vendor and renderer, as Firefox sanitizes them, or null.
+constexpr std::string_view read_gpu = R"((() => {
+  const gl = document.createElement('canvas').getContext('webgl');
+  const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
+  return info ? [gl.getParameter(info.UNMASKED_VENDOR_WEBGL), gl.getParameter(info.UNMASKED_RENDERER_WEBGL)] : null;
+})())";
+// What an identity sets, as a page reads it.
+constexpr std::string_view read_identity = R"((async () => {
+  const voices = await new Promise((resolve) => {
+    if (speechSynthesis.getVoices().length) return resolve(speechSynthesis.getVoices());
+    const timer = setTimeout(() => resolve(speechSynthesis.getVoices()), 2000);
+    speechSynthesis.addEventListener('voiceschanged', () => { clearTimeout(timer); resolve(speechSynthesis.getVoices()); }, { once: true });
+  });
+  const gl = document.createElement('canvas').getContext('webgl');
+  const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
+  return { userAgent: navigator.userAgent, platform: navigator.platform, oscpu: navigator.oscpu,
+    hardwareConcurrency: navigator.hardwareConcurrency, maxTouchPoints: navigator.maxTouchPoints,
+    language: navigator.language, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    screen: [screen.width, screen.height],
+    webgl: info ? [gl.getParameter(info.UNMASKED_VENDOR_WEBGL), gl.getParameter(info.UNMASKED_RENDERER_WEBGL)] : null,
+    voices: voices.map((voice) => voice.name) };
+})())";
+// The same readings from a launch configuration.
+json::object expected_identity(const json::object& config) {
+    const auto value = [&](std::string_view key) { const auto* found = config.if_contains(key); return found ? *found : json::value(nullptr); };
+    json::array voices;
+    if (const auto* list = config.if_contains("voices"); list && list->is_array())
+        for (const auto& voice : list->as_array())
+            if (voice.is_object()) voices.emplace_back(string_or(voice.as_object(), "name"));
+    return {{"userAgent", value("navigator.userAgent")}, {"platform", value("navigator.platform")}, {"oscpu", value("navigator.oscpu")},
+            {"hardwareConcurrency", value("navigator.hardwareConcurrency")}, {"maxTouchPoints", value("navigator.maxTouchPoints")},
+            {"language", value("navigator.language")}, {"timezone", value("timezone")},
+            {"screen", json::array{value("screen.width"), value("screen.height")}},
+            {"webgl", json::array{value("webGl:vendor"), value("webGl:renderer")}}, {"voices", std::move(voices)}};
+}
+json::value gpu_json(const std::optional<firefox_identity::Gpu>& gpu) {
+    if (!gpu) return nullptr;
+    return json::object{{"vendor", gpu->vendor}, {"renderer", gpu->renderer}};
 }
 } // namespace
 
@@ -317,18 +298,37 @@ struct CamoufoxGateway::Impl {
     std::string phase = "idle";
     std::string browser_name, browser_version, user_agent;
     // Camoufox applies an identity per process, so the running browser is tied
-    // to the identity it was launched with. No pool: no identity (verify_runtime).
+    // to the identity it was launched with. No identity: verify_runtime and
+    // the host GPU probe.
     struct LaunchIdentity {
-        std::string pool;
-        std::size_t index = 0;
+        std::shared_ptr<const firefox_identity::Identity> identity;
+        std::string digest;  // of the identity as stored
         unsigned seed = 0;
         std::string timezone, locale;
-        bool operator==(const LaunchIdentity&) const = default;
+        bool operator==(const LaunchIdentity& other) const {
+            return digest == other.digest && seed == other.seed && timezone == other.timezone && locale == other.locale;
+        }
     };
     std::optional<LaunchIdentity> launched;
-    // Reloaded when the file changes.
-    std::optional<browser_detail::CamoufoxIdentityPool> pool;
-    fs::file_time_type pool_time{};
+    // The launch's configuration, and the properties the build did not read.
+    json::object launched_config;
+    std::vector<std::string> dropped;
+    // The last stored identity read, so requests do not reparse it.
+    struct StoredIdentity {
+        std::string account;
+        unsigned seed = 0;
+        std::shared_ptr<const firefox_identity::Identity> identity;
+        std::string digest;
+    };
+    std::optional<StoredIdentity> stored_identity;
+    // The GPU this machine's Camoufox renders WebGL on without an identity,
+    // read once per process for each browser version and display mode.
+    struct HostGpu {
+        std::string browser;
+        bool headless = true;
+        std::optional<firefox_identity::Gpu> gpu;
+    };
+    std::optional<HostGpu> host;
     // Browser output, written on the process reader thread.
     std::mutex output_mutex;
     std::ofstream output_log;
@@ -356,7 +356,7 @@ struct CamoufoxGateway::Impl {
     void close() noexcept {
         authorization_cache.clear();
         if (bidi) bidi->close();
-        launched.reset();
+        launched.reset(); launched_config = {};
         bidi.reset(); process.stop();
         if (relay) { relay_error = relay->last_error(); relay.reset(); }
         { std::lock_guard lock(output_mutex); output_log.close(); }
@@ -364,34 +364,105 @@ struct CamoufoxGateway::Impl {
         if (!root.empty()) { std::error_code ec; fs::remove_all(root, ec); root.clear(); }
         last_status = "closed";
     }
-    const browser_detail::CamoufoxIdentityPool& identity_pool() {
-        const auto file = config.data_dir / "camoufox" / "identity-pool.json";
-        std::error_code error;
-        const auto time = fs::last_write_time(file, error);
-        if (error) {
-            pool.reset();
-            throw Error(503, "browser_not_configured", "Camoufox identity pool missing: run scripts/camoufox-dev.py identities");
-        }
-        if (!pool || time != pool_time) {
-            pool.reset();
-            pool = browser_detail::load_identity_pool(file);
-            pool_time = time;
-        }
-        return *pool;
+    void check_executable() const {
+        if (config.browser_executable.empty() || !fs::is_regular_file(config.browser_executable))
+            throw Error(503, "browser_not_configured", "Configure browser_executable as the Camoufox executable");
+        if (lower(path_utf8(config.browser_executable.stem())) != "camoufox")
+            throw Error(503, "browser_not_configured", "browser_backend camoufox needs browser_executable to name the Camoufox executable (camoufox.exe)");
     }
-    LaunchIdentity identity_for(const Account& account) {
-        BrowserFingerprint stored;
+    fs::path browser_directory() const { return config.browser_executable.parent_path(); }
+    // Opens a page in a new user context on a local document.
+    void open_local_page(std::string_view html, bool bridge, std::stop_token token) {
+        user_context = string_or(bidi->call("browser.createUserContext", {}, token), "userContext");
+        if (user_context.empty()) incompatible("Browser did not create a verification context");
+        page = string_or(bidi->call("browsingContext.create", {{"type", "tab"}, {"userContext", user_context}}, token), "context");
+        if (page.empty()) incompatible("Browser did not create a verification page");
+        if (bridge) install_bridge(token);
+        navigate_local(html, token);
+    }
+    void navigate_local(std::string_view html, std::stop_token token) {
+        bidi->call("browsingContext.navigate", {{"context", page}, {"url", "data:text/html," + std::string(html)}, {"wait", "complete"}}, token, 30s, page);
+    }
+    // Launches the browser without an identity, under the display mode and
+    // preferences an identity launches with, as the Python launcher's
+    // host_gpu does.
+    std::optional<firefox_identity::Gpu> host_gpu(std::stop_token token) {
+        const auto version = firefox_identity::browser_version(browser_directory());
+        if (host && host->browser == version && host->headless == config.headless) return host->gpu;
+        ensure_browser(token, {});
         try {
-            stored = store.fingerprint(account.id);
+            open_local_page("<title>ais2api</title>", false, token);
+            const auto value = eval(std::string(read_gpu), token);
+            dispose_context(token);
+            close();
+            std::optional<firefox_identity::Gpu> gpu;
+            if (value.is_array() && value.as_array().size() == 2 && value.as_array()[0].is_string() && value.as_array()[1].is_string())
+                gpu = firefox_identity::Gpu{std::string(value.as_array()[0].as_string()), std::string(value.as_array()[1].as_string())};
+            host = HostGpu{version, config.headless, gpu};
+            return gpu;
+        } catch (...) { close(); throw; }
+    }
+    json::object identity_summary(const firefox_identity::Identity& identity) const {
+        json::array properties;
+        for (const auto& name : dropped) properties.emplace_back(name);
+        // An identity generated on another GPU than this machine renders on
+        // now (a new graphics card, or a data directory moved here) stays
+        // until the account's fingerprint is regenerated.
+        const auto host_gpu = !host ? "not_checked" : host->gpu == identity.host_gpu ? "unchanged" : "changed";
+        return {{"platform", firefox_identity::os_name(identity.os)}, {"userAgent", user_agent},
+                {"gpu", json::object{{"vendor", string_or(identity.config, "webGl:vendor")}, {"renderer", string_or(identity.config, "webGl:renderer")}}},
+                {"claimsHostGpu", identity.claims_host_gpu}, {"canvasCovered", identity.canvas_covered}, {"hostGpu", host_gpu},
+                {"model", identity.model}, {"generatedFor", identity.browser}, {"catalog", identity.catalog.substr(0, 12)},
+                {"droppedProperties", std::move(properties)}};
+    }
+    // The account's identity: the stored one, or one generated for it now and
+    // stored with its seed. An account being imported is not stored yet; its
+    // identity is generated from the seed the store will assign it, so the
+    // account's first launch draws the same one.
+    LaunchIdentity identity_for(const Account& account, std::stop_token token) {
+        BrowserFingerprint fingerprint;
+        bool stored = true;
+        try {
+            fingerprint = store.fingerprint(account.id);
         } catch (const Error& error) {
             if (error.code != "account_not_found") throw;
-            // Cookie import verifies an account before storing it; use the
-            // seed the store will assign to that id.
-            stored.seed = default_fingerprint_seed(account.id);
+            fingerprint.seed = default_fingerprint_seed(account.id);
+            stored = false;
         }
-        const auto& identities = identity_pool();
-        return {identities.sha256, stored.seed % identities.identities.size(), stored.seed,
-                stored.timezone.empty() ? host_timezone() : stored.timezone, stored.locale.empty() ? host_locale() : stored.locale};
+        LaunchIdentity result{nullptr, {}, fingerprint.seed, fingerprint.timezone.empty() ? host_timezone() : fingerprint.timezone,
+                              fingerprint.locale.empty() ? host_locale() : fingerprint.locale};
+        if (stored && stored_identity && stored_identity->account == account.id && stored_identity->seed == fingerprint.seed) {
+            result.identity = stored_identity->identity;
+            result.digest = stored_identity->digest;
+            return result;
+        }
+        auto saved = stored ? store.firefox_identity(account.id) : std::nullopt;
+        if (!saved) {
+            check_executable();
+            FpgenModelPin pin;
+            try {
+                pin = fpgen_model_pin();
+            } catch (const Error& error) {
+                throw Error(503, "browser_not_configured", std::string("The fpgen model is not pinned: ") + error.what());
+            }
+            // Before any launch, so a missing model fails fast.
+            const auto model = fpgen::Model::load(fpgen_model_directory(config.data_dir, pin), pin.file_sha256);
+            auto machine = firefox_identity::local_host();
+            machine.gpu = host_gpu(token);
+            const auto generated = firefox_identity::generate(model, pin.tag, machine,
+                browser_detail::identity_salt(store.identity_secret(), account.id, fingerprint.seed),
+                firefox_identity::browser_version(browser_directory()));
+            saved = firefox_identity::to_json(generated);
+            (*saved)["seed"] = fingerprint.seed;
+            if (stored) store.save_firefox_identity(account.id, *saved);
+            console::emit_record({{"event", "camoufox_identity"}, {"account_id", account.id}, {"stored", stored},
+                                  {"claims_host_gpu", generated.claims_host_gpu}, {"canvas_covered", generated.canvas_covered}});
+        }
+        auto identity = std::make_shared<const firefox_identity::Identity>(firefox_identity::from_json(*saved));
+        result.identity = identity;
+        result.digest = sha256(json::serialize(*saved));
+        if (stored) stored_identity = StoredIdentity{account.id, fingerprint.seed, identity, result.digest};
+        return result;
     }
     json::value eval(std::string expression, std::stop_token token, std::chrono::seconds timeout = 30s) { return bidi->evaluate(std::move(expression), page, token, timeout); }
     json::object partition() const { return {{"type", "storageKey"}, {"userContext", user_context}}; }
@@ -460,28 +531,29 @@ struct CamoufoxGateway::Impl {
         if (bidi && bidi->open() && process.alive() && launched == identity) return;
         // A different identity needs a new browser process.
         close();
-        if (config.browser_executable.empty() || !fs::is_regular_file(config.browser_executable))
-            throw Error(503, "browser_not_configured", "Configure browser_executable as the Camoufox executable");
-        if (lower(path_utf8(config.browser_executable.stem())) != "camoufox")
-            throw Error(503, "browser_not_configured", "browser_backend camoufox needs browser_executable to name the Camoufox executable (camoufox.exe)");
+        check_executable();
         try {
-            json::object identity_config, prefs;
+            json::object launch_config, prefs;
             user_agent.clear();
-            if (!identity.pool.empty()) {
-                const auto& entry = identity_pool().identities.at(identity.index);
-                identity_config = entry.at("config").as_object();
-                if (const auto* own = entry.if_contains("prefs")) prefs = own->as_object();
-                user_agent = string_or(identity_config, "navigator.userAgent");
+            dropped.clear();
+            if (identity.identity) {
+                auto launch = firefox_identity::launch(*identity.identity, identity.locale, identity.timezone,
+                                                       firefox_identity::browser_version(browser_directory()),
+                                                       firefox_identity::load_properties(browser_directory()));
+                launch_config = std::move(launch.config);
+                prefs = std::move(launch.prefs);
+                dropped = std::move(launch.dropped);
+                if (!dropped.empty()) {
+                    json::array names;
+                    for (const auto& name : dropped) names.emplace_back(name);
+                    console::emit_record({{"event", "camoufox_properties_dropped"}, {"properties", std::move(names)}});
+                }
+                user_agent = string_or(launch_config, "navigator.userAgent");
+            } else {
+                // The bridge runs in the page's own world, as AI Studio's code does.
+                launch_config["allowMainWorld"] = true;
             }
             for (const auto& item : base_prefs()) prefs[item.key()] = item.value();
-            const auto launch_config = browser_detail::camoufox_launch_config(identity_config, identity.locale, identity.timezone);
-            // The browser's own language follows the account locale, as in a
-            // localized Firefox (Camoufox packages the language packs), so
-            // validation messages agree with Intl formatting.
-            if (const auto language = string_or(launch_config, "locale:language"); !language.empty()) {
-                const auto region = string_or(launch_config, "locale:region");
-                prefs["intl.locale.requested"] = region.empty() ? language : language + "-" + region;
-            }
             if (!config.proxy.empty()) {
                 const auto endpoint = parse_proxy(config.proxy);
                 if (config.browser_proxy_relay) {
@@ -552,6 +624,7 @@ struct CamoufoxGateway::Impl {
             }
             bidi->call("session.subscribe", {{"events", json::array{"browsingContext.contextDestroyed"}}}, token);
             launched = identity;
+            launched_config = std::move(launch_config);
             last_status = "browser_ready";
         } catch (...) { close(); throw; }
     }
@@ -656,6 +729,7 @@ struct CamoufoxGateway::Impl {
       language: navigator.language, languages: navigator.languages, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       intlLocale: Intl.DateTimeFormat().resolvedOptions().locale, offset: new Date().getTimezoneOffset(), hasFocus: document.hasFocus(),
       cores: navigator.hardwareConcurrency, screen: [screen.width, screen.height, devicePixelRatio], window: [innerWidth, innerHeight],
+      voices: speechSynthesis.getVoices().length,
       byob: (() => { try { new Response('x').body.getReader({ mode: 'byob' }).releaseLock(); return true; } catch (error) { return false; } })() },
     text: (document.body ? document.body.innerText : '').slice(0, 600) };
 })())", {}, 5s);
@@ -685,7 +759,7 @@ struct CamoufoxGateway::Impl {
     }
     void ensure_account(const Account& account, std::stop_token token, bool bootstrap, bool identity_only = false) {
         phase = "browser_start";
-        ensure_browser(token, identity_for(account));
+        ensure_browser(token, identity_for(account, token));
         auto fingerprint = sha256(json::serialize(account.storage_state) + "\n" + account.auth_user + "\n" + account.email);
         bool verified_session = false;
         if (account.id != account_id || fingerprint != account_fingerprint || page.empty()) {
@@ -795,18 +869,36 @@ CamoufoxGateway::~CamoufoxGateway() = default;
 json::object CamoufoxGateway::verify_runtime(std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
     try {
-        impl_->ensure_browser(cancel, {{}, 0, 0, host_timezone(), host_locale()});
-        auto& bidi = *impl_->bidi;
-        impl_->user_context = string_or(bidi.call("browser.createUserContext", {}, cancel), "userContext");
-        if (impl_->user_context.empty()) incompatible("Browser did not create a verification context");
-        impl_->page = string_or(bidi.call("browsingContext.create", {{"type", "tab"}, {"userContext", impl_->user_context}}, cancel), "context");
-        if (impl_->page.empty()) incompatible("Browser did not create a verification page");
-        impl_->install_bridge(cancel);
-        bidi.call("browsingContext.navigate", {{"context", impl_->page}, {"url", "data:text/html,<title>ais2api</title><textarea autofocus></textarea>"}, {"wait", "complete"}}, cancel, 30s, impl_->page);
+        impl_->ensure_browser(cancel, {});
+        impl_->open_local_page("<title>ais2api</title><textarea autofocus></textarea>", true, cancel);
         auto page = impl_->page_checks(cancel);
         impl_->dispose_context(cancel);
         json::object result{{"product", impl_->browser_name + "/" + impl_->browser_version}, {"protocol_version", "webdriver-bidi"},
                             {"isolated_context", true}, {"google_verified", false}, {"page", std::move(page)}};
+        impl_->close();
+        return result;
+    } catch (...) { impl_->close(); throw; }
+}
+json::object CamoufoxGateway::verify_identity(std::string_view account_id, std::stop_token cancel) {
+    std::lock_guard lock(impl_->mutex);
+    try {
+        Account account;
+        account.id = std::string(account_id);
+        auto identity = impl_->identity_for(account, cancel);
+        // The host's GPU now, which tells whether the identity was generated
+        // on another.
+        const auto host = impl_->host_gpu(cancel);
+        impl_->ensure_browser(cancel, identity);
+        impl_->open_local_page("<title>ais2api</title>", false, cancel);
+        // Camoufox registers the identity's voices for the documents after the
+        // first one that asks for them.
+        impl_->eval("speechSynthesis.getVoices().length", cancel);
+        impl_->navigate_local("<title>ais2api identity</title>", cancel);
+        auto page = impl_->eval(std::string(read_identity), cancel);
+        impl_->dispose_context(cancel);
+        json::object result{{"product", impl_->browser_name + "/" + impl_->browser_version}, {"google_verified", false},
+                            {"identity", impl_->identity_summary(*identity.identity)}, {"hostGpu", gpu_json(host)},
+                            {"expected", expected_identity(impl_->launched_config)}, {"page", std::move(page)}};
         impl_->close();
         return result;
     } catch (...) { impl_->close(); throw; }
@@ -848,15 +940,12 @@ json::object CamoufoxGateway::diagnostics() {
                 {"bridgeSha256", browser_detail::embedded_bridge_sha256()}};
     const auto& launched = impl_->launched;
     json::value fingerprint = nullptr, identity = nullptr, browser = nullptr;
-    bool version_mismatch = false;
     if (launched) {
-        fingerprint = json::object{{"seed", launched->seed}, {"platform", "windows"}, {"timezone", launched->timezone}, {"locale", launched->locale}};
+        fingerprint = json::object{{"seed", launched->seed}, {"timezone", launched->timezone}, {"locale", launched->locale}};
         browser = json::object{{"name", impl_->browser_name}, {"version", impl_->browser_version}};
-        if (!launched->pool.empty()) {
-            identity = json::object{{"pool", launched->pool.substr(0, 12)}, {"index", launched->index}, {"userAgent", impl_->user_agent}};
-            const auto claimed = firefox_major(impl_->user_agent);
-            const auto running = impl_->browser_version.substr(0, impl_->browser_version.find('.'));
-            version_mismatch = !claimed.empty() && !running.empty() && claimed != running;
+        if (launched->identity) {
+            fingerprint.as_object()["platform"] = firefox_identity::os_name(launched->identity->os);
+            identity = impl_->identity_summary(*launched->identity);
         }
     }
     return {{"status", impl_->last_status}, {"phase", impl_->phase}, {"backend", "camoufox"},
@@ -865,8 +954,7 @@ json::object CamoufoxGateway::diagnostics() {
         {"cookieRefresh", impl_->cookie_refresh},
         {"proxy", json::object{{"mode", impl_->config.proxy.empty() ? "none" : impl_->config.browser_proxy_relay ? "relay" : "direct"},
                                {"relayError", impl_->relay ? impl_->relay->last_error() : impl_->relay_error}}},
-        {"fingerprint", std::move(fingerprint)}, {"browser", std::move(browser)}, {"identity", std::move(identity)},
-        {"identityVersionMismatch", version_mismatch}};
+        {"fingerprint", std::move(fingerprint)}, {"browser", std::move(browser)}, {"identity", std::move(identity)}};
 }
 json::object CamoufoxGateway::probe(const Account& account, std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
