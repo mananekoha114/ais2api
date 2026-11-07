@@ -446,29 +446,38 @@ TEST_CASE("the catalogues are embedded with their digest", "[firefox-identity]")
 }
 
 // AIS2API_TEST_FPGEN_MODEL=<directory with the pinned model files>: generate
-// identities from the real model; AIS2API_TEST_FPGEN_OUTPUT=<file> writes them
-// as JSON lines for scripts/camoufox-dev.py check-identities.
-TEST_CASE("the real fpgen model generates coherent Windows identities", "[.fpgen-model]") {
+// identities for this host from the real model. AIS2API_TEST_HOST_GPU=
+// "<vendor>|<renderer>" is the GPU Camoufox reports here (none: every identity
+// draws one); AIS2API_TEST_FPGEN_OUTPUT=<file> writes the identities as JSON
+// lines for scripts/camoufox-dev.py check-identities.
+TEST_CASE("the real fpgen model generates coherent identities for this host", "[.fpgen-model]") {
     const char *directory = std::getenv("AIS2API_TEST_FPGEN_MODEL");
     if (!directory) SKIP("AIS2API_TEST_FPGEN_MODEL is not set");
     std::map<std::string, std::string> pins;
     for (const auto name : {"fingerprint-network.json.zst", "values.json.zst", "values.dat.zst"})
         pins[name] = sha256(read_file(fs::path(directory) / name));
     const auto model = fpgen::Model::load(directory, pins);
+    auto host = local_host();
+    if (const char *gpu = std::getenv("AIS2API_TEST_HOST_GPU")) {
+        const std::string_view text(gpu);
+        REQUIRE(text.find('|') != std::string_view::npos);
+        host.gpu = Gpu{std::string(text.substr(0, text.find('|'))), std::string(text.substr(text.find('|') + 1))};
+    }
     const char *output_path = std::getenv("AIS2API_TEST_FPGEN_OUTPUT");
     std::ofstream output;
     if (output_path) output.open(output_path, std::ios::binary);
     const auto count = std::getenv("AIS2API_TEST_FPGEN_COUNT") ? std::stoi(std::getenv("AIS2API_TEST_FPGEN_COUNT")) : 500;
     std::map<std::string, int> renderers;
     for (int i = 0; i < count; ++i) {
-        // A host GPU fpgen has not recorded, so every identity draws one.
-        const auto identity = generate(model, "model-2/2026", windows_host(std::nullopt), static_cast<std::uint64_t>(i) * 7919 + 1, "158.0.1-beta.41");
+        const auto identity = generate(model, "model-2/2026", host, static_cast<std::uint64_t>(i) * 7919 + 1, "158.0.1-beta.41");
         auto config = identity.config;
-        CHECK(detail::cohere(config, Os::windows).empty());
-        CHECK(std::string_view(config.at("navigator.userAgent").as_string()).find("Windows NT") != std::string_view::npos);
+        CHECK(detail::cohere(config, host.os).empty());
+        CHECK(std::string_view(config.at("navigator.userAgent").as_string()).find(host.os == Os::windows ? "Windows NT" : "Linux") !=
+              std::string_view::npos);
         ++renderers[std::string(config.at("webGl:renderer").as_string())];
         if (output) output << json::serialize(to_json(identity)) << '\n';
     }
-    CHECK(renderers.size() >= 5);
+    // Without a host GPU to claim, identities draw from fpgen's records.
+    if (!host.gpu) CHECK(renderers.size() >= 5);
     for (const auto &[renderer, _] : renderers) CHECK_FALSE(software_renderer(renderer));
 }
