@@ -64,6 +64,7 @@ ais2api stop      停止服务
 - `browser update` 与 `browser rollback` 管理浏览器版本。
 - 执行 `setup`、`browser update`、`browser rollback` 前需先停止服务，它们与服务使用同一把数据目录独占锁。
 - 程序旁存在 `browser-runtime/PLATFORM/chrome[.exe]`（Browser-Local 包）时会自动使用，无需下载；`setup` 仍会校验其完整文件清单并准备系统依赖。
+- 实验性的 `camoufox` 后端下，`setup` 只安装生成 Firefox 身份所需的 fpgen 模型（锁定版本，逐个文件核对 SHA-256），不下载 CloakBrowser，也不改写 `browser_executable`；`doctor` 显示模型状态（`installed`、`missing`、`damaged`，或不是 `setup` 创建的 `foreign`）。
 
 ### 一键启动脚本
 

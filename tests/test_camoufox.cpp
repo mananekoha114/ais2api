@@ -7,6 +7,7 @@
 #include "ais2api/camoufox.hpp"
 #include "ais2api/browser.hpp"
 #include "ais2api/log_sources.hpp"
+#include "ais2api/runtime.hpp"
 #include "ais2api/store.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cstdlib>
@@ -133,51 +134,20 @@ TEST_CASE("user.js sets string, boolean and integer preferences in name order", 
     CHECK(code(R"({"a":-5})") == "accepted");
 }
 
-TEST_CASE("identity pools are validated and digested", "[camoufox][identity]") {
-    Directory directory;
-    const auto file = directory.path / "identity-pool.json";
-    CHECK_THROWS_AS(load_identity_pool(file), Error);
-    write(file, R"({"schema":1,"camoufox":{"tag":"v158.0.1-beta.41"},"identities":[
-        {"config":{"navigator.userAgent":"UA-1"},"prefs":{"a":true}},{"config":{"navigator.userAgent":"UA-2"}}]})");
-    const auto pool = load_identity_pool(file);
-    REQUIRE(pool.identities.size() == 2);
-    CHECK(string_or(pool.camoufox, "tag") == "v158.0.1-beta.41");
-    CHECK(pool.sha256.size() == 64);
-    for (auto invalid : {R"({"schema":2,"identities":[{"config":{"a":1}}]})", R"({"schema":1,"identities":[]})",
-                         R"({"schema":1,"identities":[{"config":{}}]})", R"({"schema":1,"identities":[{"config":{"a":1},"prefs":[]}]})", "not json"}) {
-        write(file, invalid);
-        try {
-            load_identity_pool(file);
-            FAIL("accepted an invalid pool");
-        } catch (const Error& error) { CHECK(error.code == "browser_not_configured"); }
-    }
+TEST_CASE("identity salts mix the installation secret, the account and its seed", "[camoufox][identity]") {
+    const auto salt = identity_salt("secret", "acc_1", 12345);
+    CHECK(salt == identity_salt("secret", "acc_1", 12345));
+    // The first 64 bits of SHA-256 over "secret", "acc_1" and "12345", each
+    // followed by a NUL but the last.
+    CHECK(salt == std::stoull(sha256(std::string("secret") + '\0' + "acc_1" + '\0' + "12345").substr(0, 16), nullptr, 16));
+    CHECK(salt != identity_salt("other", "acc_1", 12345));
+    CHECK(salt != identity_salt("secret", "acc_2", 12345));
+    CHECK(salt != identity_salt("secret", "acc_1", 12346));
+    // The separators keep the fields apart.
+    CHECK(identity_salt("a", "bc", 1) != identity_salt("ab", "c", 1));
 }
 
-TEST_CASE("launch configuration applies the account locale and timezone", "[camoufox][identity]") {
-    const auto identity = json::parse(R"({"navigator.userAgent":"UA","locale:region":"US","timezone":"America/New_York"})").as_object();
-    const auto chinese = camoufox_launch_config(identity, "zh-CN", "Asia/Shanghai");
-    CHECK(string_or(chinese, "navigator.userAgent") == "UA");
-    CHECK(string_or(chinese, "navigator.language") == "zh-CN");
-    CHECK(chinese.at("navigator.languages") == json::array{"zh-CN", "zh"});
-    CHECK(string_or(chinese, "headers.Accept-Language") == "zh-CN,zh;q=0.9");
-    CHECK(string_or(chinese, "locale:language") == "zh");
-    CHECK(string_or(chinese, "locale:region") == "CN");
-    CHECK(string_or(chinese, "locale:all") == "zh-CN, zh");
-    CHECK(string_or(chinese, "timezone") == "Asia/Shanghai");
-    CHECK(bool_or(chinese, "allowMainWorld"));
-    const auto scripted = camoufox_launch_config(identity, "zh-Hant-TW", "Asia/Taipei");
-    CHECK(string_or(scripted, "locale:language") == "zh");
-    CHECK(string_or(scripted, "locale:region") == "TW");
-    const auto bare = camoufox_launch_config(identity, "de", "Europe/Berlin");
-    CHECK(bare.at("navigator.languages") == json::array{"de"});
-    CHECK(string_or(bare, "headers.Accept-Language") == "de");
-    CHECK_FALSE(bare.contains("locale:region"));
-    const auto unchanged = camoufox_launch_config(identity, "", "");
-    CHECK(string_or(unchanged, "timezone") == "America/New_York");
-    CHECK_FALSE(unchanged.contains("navigator.language"));
-}
-
-TEST_CASE("the Camoufox gateway needs an identity pool and a Camoufox executable", "[camoufox][identity]") {
+TEST_CASE("the Camoufox gateway needs the fpgen model and a Camoufox executable", "[camoufox][identity]") {
     Directory directory;
     Config config;
     config.data_dir = directory.path;
@@ -187,16 +157,31 @@ TEST_CASE("the Camoufox gateway needs an identity pool and a Camoufox executable
     CamoufoxGateway gateway(config, store);
     Account account;
     account.id = "account-1";
-    auto code = [](auto&& call) {
-        try { call(); } catch (const Error& error) { return error.code; }
+    auto failure = [](auto&& call) {
+        try { call(); } catch (const Error& error) { return error.code + ": " + error.what(); }
         return std::string("no error");
     };
-    // No process is started for either refusal.
-    CHECK(code([&] { gateway.probe(account); }) == "browser_not_configured");
+    // No process is started for any refusal: generating an identity needs the
+    // model setup installs.
+    CHECK(failure([&] { gateway.probe(account); }).starts_with("browser_not_configured: fpgen model is not installed"));
+    CHECK(failure([&] { gateway.verify_identity("account-1"); }).starts_with("browser_not_configured: fpgen model"));
+    // A stored identity needs no model: the launch stops at the missing
+    // Camoufox files instead.
+    account.id = "acc_stored";
+    account.email = "stored@example.com";
+    account.auth_user = "0";
+    account.storage_state = {{"cookies", json::array{json::object{{"name", "SID"}, {"value", "v"}, {"domain", ".google.com"}, {"path", "/"}}}}};
+    store.put_account(account);
+    store.save_firefox_identity(account.id, {{"format", 1}, {"seed", store.fingerprint(account.id).seed}, {"salt", "0123456789abcdef"},
+                                             {"os", "windows"}, {"config", json::object{}}, {"prefs", json::object{}}});
+    const auto launch = failure([&] { gateway.probe(account); });
+    INFO(launch);
+    CHECK(launch.starts_with("browser_not_configured: Camoufox "));
+    CHECK(launch.find("is missing beside the executable") != std::string::npos);
     config.browser_executable = directory.path / "chrome.exe";
     write(config.browser_executable, "");
     CamoufoxGateway chromium(config, store);
-    CHECK(code([&] { chromium.verify_runtime(); }) == "browser_not_configured");
+    CHECK(failure([&] { chromium.verify_runtime(); }).starts_with("browser_not_configured"));
     CHECK_FALSE(bool_or(gateway.diagnostics(), "running"));
     CHECK(string_or(gateway.diagnostics(), "backend") == "camoufox");
 }
@@ -244,4 +229,53 @@ TEST_CASE("Camoufox runs the bridge with BYOB reads and trusted keys", "[.camouf
     for (const auto& entry : fs::directory_iterator(config.data_dir / "logs"))
         retained_log = retained_log || (entry.is_regular_file() && entry.path().filename().string().starts_with("camoufox-"));
     CHECK(retained_log);
+}
+
+// Hidden by default: select it with a prepared Camoufox executable and the
+// fpgen model's directory. It opens only local pages.
+TEST_CASE("a generated identity is what the page reads", "[.camoufox-runtime]") {
+    const auto executable = std::getenv("AIS2API_TEST_CAMOUFOX");
+    const auto model = std::getenv("AIS2API_TEST_FPGEN_MODEL");
+    REQUIRE(executable != nullptr);
+    REQUIRE(model != nullptr);
+    Directory directory;
+    Config config;
+    config.data_dir = directory.path;
+    config.browser_executable = fs::u8path(executable);
+    config.headless = std::getenv("AIS2API_TEST_CAMOUFOX_HEADED") == nullptr;
+    const auto pin = fpgen_model_pin();
+    const auto installed = fpgen_model_directory(config.data_dir, pin);
+    fs::create_directories(installed);
+    for (const auto& [name, digest] : pin.file_sha256) fs::copy_file(fs::u8path(model) / name, installed / name);
+    Store store(config.data_dir);
+    Account account;
+    account.id = "acc_runtime";
+    account.email = "runtime@example.com";
+    account.auth_user = "0";
+    account.storage_state = {{"cookies", json::array{json::object{{"name", "SID"}, {"value", "v"}, {"domain", ".google.com"}, {"path", "/"}}}}};
+    store.put_account(account);
+    store.set_fingerprint_region(account.id, "Asia/Shanghai", "zh-CN");
+    CamoufoxGateway gateway(config, store);
+
+    const auto result = gateway.verify_identity(account.id);
+    INFO(json::serialize(result));
+    const auto& expected = result.at("expected").as_object();
+    const auto& page = result.at("page").as_object();
+    for (const auto& item : expected) {
+        INFO(std::string(item.key()));
+        if (!item.value().is_null()) CHECK(page.at(item.key()) == item.value());
+    }
+    CHECK(string_or(page, "language") == "zh-CN");
+    CHECK(string_or(page, "timezone") == "Asia/Shanghai");
+    CHECK_FALSE(page.at("voices").as_array().empty());
+    const auto& identity = result.at("identity").as_object();
+    CHECK(string_or(identity, "hostGpu") == "unchanged");
+    CHECK(identity.at("droppedProperties").as_array().empty());
+
+    // Stored with the seed, and launched again as it was.
+    const auto stored = store.firefox_identity(account.id);
+    REQUIRE(stored);
+    const auto again = gateway.verify_identity(account.id);
+    CHECK(again.at("expected") == result.at("expected"));
+    CHECK(store.firefox_identity(account.id) == stored);
 }

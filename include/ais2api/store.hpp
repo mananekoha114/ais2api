@@ -81,6 +81,15 @@ public:
     // nullopt leaves a field unchanged; an empty string restores the host default.
     BrowserFingerprint set_fingerprint_region(std::string_view id, std::optional<std::string> timezone,
                                               std::optional<std::string> locale);
+    // The account's Firefox identity, kept while its fingerprint seed is the
+    // one the identity records as "seed": regenerating the fingerprint, in
+    // this or an older build, retires it.
+    std::optional<json::object> firefox_identity(std::string_view id);
+    // Stores `identity` unless the account's seed changed since its "seed".
+    void save_firefox_identity(std::string_view id, const json::object &identity);
+    // A random secret of this installation, created on first use, that keeps
+    // identities drawn from the same seed apart between installations.
+    std::string identity_secret();
     // With `auth_probe`, when no account is available, one account blocked only
     // by an `auth` cooldown is admitted for a single attempt per cooldown period.
     std::optional<Account> choose(std::string_view model, const std::vector<std::string>& excluded = {},

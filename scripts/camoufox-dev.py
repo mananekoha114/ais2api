@@ -11,18 +11,27 @@
   python scripts/camoufox-dev.py fetch
       Download the pinned Windows x64 Camoufox build into .tools/camoufox/<tag>/,
       verify it and print the browser_executable path.
-  .tools/camoufox-venv/Scripts/python.exe -I scripts/camoufox-dev.py identities \\
-      --executable <camoufox.exe> --out <data_dir>/camoufox/identity-pool.json
-      Generate an identity pool with the camoufox package's own generator.
+  .tools/camoufox-venv/Scripts/python.exe -I scripts/camoufox-dev.py catalog
+      Copy the identity catalogues ais2api embeds (fonts, voices, media devices,
+      launcher constants) from the pinned camoufox package into browser/camoufox/.
+  .tools/camoufox-venv/Scripts/python.exe -I scripts/camoufox-dev.py check-identities \\
+      --executable <camoufox.exe> --identities <identities.jsonl>
+      Check identities ais2api generated (the hidden [.fpgen-model] test writes
+      them to AIS2API_TEST_FPGEN_OUTPUT) with the camoufox package's own
+      validate_config and coherence rules, and compare their user agents,
+      screens, GPUs and cores with as many identities the package generates.
 
-An identity pool describes this machine (its GPU, among other things): keep it
-in the data directory and never commit it.
+Identities describe this machine (its GPU, among other things): keep them out
+of the repository.
 """
 from __future__ import annotations
 import argparse
+import base64
+from collections import Counter
+import contextlib
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -45,6 +54,11 @@ ASSET_SIZE = 1320075455
 URL = f'https://github.com/daijro/camoufox/releases/download/{TAG}/{ASSET}'
 RELEASE = 'release.json'
 INT32 = (-2**31, 2**31 - 1)
+CATALOG = REPO / 'browser' / 'camoufox'
+# The launcher's own data files that the native identity generator reads. Its
+# macOS-only voice URI table is left out: macOS identities are not generated.
+CATALOG_FILES = ('essential-fonts.json', 'font-bases.json', 'font-groups.json', 'fonts.json',
+                 'launcher-constants.json', 'media-devices.json', 'voice-manifests.json')
 
 
 def fail(message):
@@ -158,40 +172,13 @@ def fetch(args):
     print(browser / executable)
 
 
-def release_tag(executable):
-    for parent in executable.parents:
-        if (parent / RELEASE).exists():
-            return json.loads((parent / RELEASE).read_text(encoding='utf-8')).get('tag')
-    return None
-
-
-def check_prefs(prefs):
-    # ais2api writes these to user.js, which holds strings, booleans and
-    # 32-bit integers only.
-    for name, value in prefs.items():
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, int) and INT32[0] <= value <= INT32[1]:
-            continue
-        if isinstance(value, str) and not any(ord(c) < 32 for c in value):
-            continue
-        fail(f'preference {name} has a value user.js cannot hold: {value!r}')
-
-
-def tracked(path):
-    # Refuse to write a pool where git could pick it up.
-    try:
-        path.relative_to(REPO)
-    except ValueError:
-        return False
-    return subprocess.run(['git', '-C', str(REPO), 'check-ignore', '-q', str(path)]).returncode != 0
-
-
-def identities(args):
+def check_identities(args):
     try:
         from importlib.metadata import version
+        from camoufox import coherence
         from camoufox.addons import DefaultAddons
-        from camoufox.utils import launch_options, resolve_verstr
+        from camoufox.host_rendering import has_canvas_placeholder
+        from camoufox.utils import launch_options, validate_config
     except ImportError:
         fail(f'run this with the camoufox package installed: {VENV} (scripts/camoufox-dev.py venv)')
     if version('camoufox') != CAMOUFOX_PYTHON:
@@ -199,37 +186,113 @@ def identities(args):
     executable = Path(args.executable).resolve()
     if executable.stem.lower() != 'camoufox' or not executable.is_file():
         fail(f'{executable} is not a camoufox executable')
-    out = Path(args.out).resolve()
-    if tracked(out):
-        fail(f'{out} is inside the repository and not ignored by git')
-    if args.count < 1:
-        fail('--count must be at least 1')
-    pool = []
-    for index in range(args.count):
-        # uBlock Origin is excluded the way the official launcher does it: the
-        # addon list travels in the config's `addons` key.
-        options = launch_options(executable_path=str(executable), os='windows', headless=True,
-                                 exclude_addons=[DefaultAddons.UBO])
+    native = [json.loads(line) for line in Path(args.identities).read_text(encoding='utf-8').splitlines() if line.strip()]
+    if not native:
+        fail(f'{args.identities} holds no identities')
+    systems = {identity.get('os') for identity in native}
+    if len(systems) != 1 or not systems <= {'windows', 'linux'}:
+        fail(f'expected identities of one OS, windows or linux: {sorted(map(str, systems))}')
+    system = systems.pop()
+
+    problems = []
+    for index, identity in enumerate(native):
+        config, prefs = identity.get('config', {}), identity.get('prefs', {})
+        # validate_config reports a key the build does not read on stdout,
+        # and raises for a value of the wrong type.
+        report = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(report):
+                validate_config(config, executable)
+        except Exception as error:  # noqa: BLE001 - every failure is reported
+            problems.append(f'identity {index}: {error}')
+        problems += [f'identity {index}: {line}' for line in report.getvalue().splitlines()]
+        problems += [f'identity {index}: {v.rule}: {v.detail}' for v in coherence.validate(config, system[:3])]
+        for name, value in prefs.items():
+            if not (isinstance(value, (bool, str)) or (isinstance(value, int) and INT32[0] <= value <= INT32[1])):
+                problems.append(f'identity {index}: preference {name} has a value user.js cannot hold: {value!r}')
+
+    count = args.count or len(native)
+    reference = []
+    for index in range(count):
+        # The launcher's own identity for this machine, uBlock Origin left out
+        # the way the launcher does it.
+        options = launch_options(executable_path=str(executable), os=system, headless=True,
+                                 exclude_addons=[DefaultAddons.UBO], i_know_what_im_doing=True)
         env = options['env']
         pieces = sorted((int(name.rsplit('_', 1)[1]), value) for name, value in env.items() if name.startswith('CAMOU_CONFIG_'))
         config = json.loads(''.join(value for _, value in pieces))
-        config.pop('addons', None)
-        prefs = dict(options['firefox_user_prefs'])
-        check_prefs(prefs)
-        pool.append({'config': config, 'prefs': prefs})
-        print(f'identity {index + 1}/{args.count}: {config.get("navigator.userAgent", "?")}', file=sys.stderr)
-    document = {
-        'schema': 1,
-        'camoufox': {'tag': release_tag(executable), 'firefox': resolve_verstr(executable)},
-        'generator': {'camoufox_python': CAMOUFOX_PYTHON},
-        'created_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-        'identities': pool,
+        reference.append({'config': config, 'canvasCovered': has_canvas_placeholder(options['firefox_user_prefs'])})
+        if (index + 1) % 50 == 0 or index + 1 == count:
+            print(f'reference identity {index + 1}/{count}', file=sys.stderr)
+
+    def screen(identity):
+        config = identity['config']
+        return f'{config.get("screen.width")}x{config.get("screen.height")}'
+
+    features = {
+        'user agent': lambda identity: identity['config'].get('navigator.userAgent'),
+        'screen': screen,
+        'GPU': lambda identity: identity['config'].get('webGl:renderer'),
+        'cores': lambda identity: identity['config'].get('navigator.hardwareConcurrency'),
+        'touch points': lambda identity: identity['config'].get('navigator.maxTouchPoints', 0),
+        'fonts': lambda identity: len(identity['config'].get('fonts', [])),
+        'canvas covered': lambda identity: bool(identity.get('canvasCovered')),
     }
-    out.parent.mkdir(parents=True, exist_ok=True)
-    partial = out.with_name(out.name + '.part')
-    partial.write_text(json.dumps(document, ensure_ascii=False, indent=1) + '\n', encoding='utf-8')
-    partial.replace(out)
-    print(out)
+    print(f'{len(native)} ais2api identities, {len(reference)} from camoufox {CAMOUFOX_PYTHON} ({system})')
+    for name, feature in features.items():
+        ours, theirs = Counter(map(feature, native)), Counter(map(feature, reference))
+        # Total variation distance: half the summed difference of the shares.
+        distance = sum(abs(ours[value] / len(native) - theirs[value] / len(reference)) for value in ours | theirs) / 2
+        print(f'\n{name}: total variation {distance:.3f}   ais2api  camoufox')
+        for value, _ in (ours + theirs).most_common(args.top):
+            print(f'  {ours[value] / len(native):6.1%} {theirs[value] / len(reference):8.1%}  {value}')
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    if problems:
+        fail(f'{len(problems)} problems in the ais2api identities')
+    print('\nno validation or coherence problems')
+
+
+def catalog(_args):
+    from importlib.metadata import PackageNotFoundError, distribution
+    try:
+        package = distribution('camoufox')
+    except PackageNotFoundError:
+        fail(f'run this with the camoufox package installed: {VENV} (scripts/camoufox-dev.py venv)')
+    if package.version != CAMOUFOX_PYTHON:
+        fail(f'camoufox {package.version} is installed; this script is pinned to {CAMOUFOX_PYTHON}')
+    records = {str(entry).replace('\\', '/'): entry for entry in package.files or []}
+
+    def recorded(name):
+        # The wheel's RECORD names each file's sha256 (urlsafe base64, unpadded).
+        entry = records.get('camoufox/' + name)
+        if entry is None or entry.hash is None or entry.hash.mode != 'sha256':
+            fail(f'camoufox/{name} is not listed with a sha256 in the package RECORD')
+        data = Path(package.locate_file(entry)).read_bytes()
+        digest = hashlib.sha256(data)
+        if base64.urlsafe_b64encode(digest.digest()).rstrip(b'=').decode() != entry.hash.value:
+            fail(f'camoufox/{name} does not match the camoufox {CAMOUFOX_PYTHON} RECORD')
+        return data, digest.hexdigest()
+
+    staged, files = {}, {}
+    for name in CATALOG_FILES:
+        staged[name], files[name] = recorded(name)
+    pin = json.loads(recorded('browser-pin.json')[0])
+    if pin.get('tag') != TAG:
+        fail(f'camoufox {CAMOUFOX_PYTHON} pins {pin.get("tag")}, not {TAG}')
+    # runtime-manifest.json pins the fpgen model the launcher was released with.
+    model = json.loads(recorded('fpgen-model.json')[0])
+    manifest = json.loads((REPO / 'runtime-manifest.json').read_text(encoding='utf-8')).get('fpgen_model', {})
+    for key in ('tag', 'url', 'size', 'sha256', 'file_sha256'):
+        if manifest.get(key) != model.get(key):
+            print(f'warning: runtime-manifest.json fpgen_model.{key} differs from the launcher pin: {model.get(key)!r}', file=sys.stderr)
+    CATALOG.mkdir(parents=True, exist_ok=True)
+    for name, data in staged.items():
+        (CATALOG / name).write_bytes(data)
+    document = {'camoufox_python': CAMOUFOX_PYTHON, 'browser': TAG, 'files': files}
+    # LF on every OS: the build embeds this file's digest.
+    (CATALOG / 'catalog.json').write_bytes((json.dumps(document, indent=1) + '\n').encode('utf-8'))
+    print(CATALOG)
 
 
 def main():
@@ -241,11 +304,13 @@ def main():
     command.add_argument('--archive', help='use an already downloaded archive')
     command.add_argument('--keep-archive', action='store_true')
     command.set_defaults(run=fetch)
-    command = commands.add_parser('identities', help='generate an identity pool')
+    commands.add_parser('catalog', help='copy the embedded identity catalogues from the camoufox package').set_defaults(run=catalog)
+    command = commands.add_parser('check-identities', help='check identities ais2api generated against the camoufox package')
     command.add_argument('--executable', required=True)
-    command.add_argument('--count', type=int, default=16)
-    command.add_argument('--out', required=True)
-    command.set_defaults(run=identities)
+    command.add_argument('--identities', required=True, help='JSON lines, one stored identity each')
+    command.add_argument('--count', type=int, default=0, help='reference identities to draw (default: as many)')
+    command.add_argument('--top', type=int, default=8, help='values listed per feature')
+    command.set_defaults(run=check_identities)
     args = parser.parse_args()
     args.run(args)
 

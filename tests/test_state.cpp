@@ -564,6 +564,58 @@ TEST_CASE("fingerprints follow account lifetime and back-fill older stores", "[f
     CHECK(reopened.fingerprint(id).seed == seed);
 }
 
+TEST_CASE("Firefox identities live as long as the fingerprint seed", "[fingerprint]") {
+    Directory dir;
+    std::string id, secret;
+    {
+        Store store(dir.path);
+        id = string_or(store.import_accounts(credential())[0].as_object(), "id");
+        CHECK_FALSE(store.firefox_identity(id));
+        const auto seed = store.fingerprint(id).seed;
+        store.save_firefox_identity(id, {{"seed", seed}, {"config", {{"screen.width", 1920}}}});
+        auto stored = store.firefox_identity(id);
+        REQUIRE(stored);
+        CHECK(stored->at("config").at("screen.width") == 1920);
+        // An identity drawn for an earlier seed is not stored.
+        store.save_firefox_identity(id, {{"seed", seed + 1}, {"config", {{"screen.width", 1280}}}});
+        CHECK(store.firefox_identity(id)->at("config").at("screen.width") == 1920);
+        // Credential updates keep it.
+        auto account = store.account(id);
+        account.storage_state = credential("refreshed");
+        store.put_account(account);
+        CHECK(store.firefox_identity(id));
+        // Regenerating the fingerprint retires it, and so does a seed an older
+        // build changed without knowing the identity.
+        const auto regenerated = store.regenerate_fingerprint(id);
+        CHECK_FALSE(store.firefox_identity(id));
+        store.save_firefox_identity(id, {{"seed", regenerated.seed}, {"config", json::object{}}});
+        CHECK(store.firefox_identity(id));
+        {
+            sqlite3* database = nullptr;
+            REQUIRE(sqlite3_open((dir.path / "state.sqlite3").string().c_str(), &database) == SQLITE_OK);
+            REQUIRE(sqlite3_exec(database, "UPDATE fingerprints SET seed=seed+1", nullptr, nullptr, nullptr) == SQLITE_OK);
+            sqlite3_close(database);
+        }
+        CHECK_FALSE(store.firefox_identity(id));
+        CHECK_THROWS_AS(store.firefox_identity("acc_missing"), Error);
+        secret = store.identity_secret();
+        CHECK(secret.size() == 64);
+        CHECK(store.identity_secret() == secret);
+    }
+    {
+        // A store written before the column existed.
+        sqlite3* database = nullptr;
+        REQUIRE(sqlite3_open((dir.path / "state.sqlite3").string().c_str(), &database) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(database, "ALTER TABLE fingerprints DROP COLUMN firefox", nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(database);
+    }
+    Store reopened(dir.path);
+    CHECK(reopened.identity_secret() == secret);
+    CHECK_FALSE(reopened.firefox_identity(id));
+    reopened.save_firefox_identity(id, {{"seed", reopened.fingerprint(id).seed}, {"config", json::object{}}});
+    CHECK(reopened.firefox_identity(id));
+}
+
 TEST_CASE("An auth cooldown admits one probe attempt only when no account is usable", "[auth-probe]") {
     Directory d;
     Store store(d.path);

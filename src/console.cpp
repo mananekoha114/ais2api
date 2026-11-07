@@ -160,6 +160,9 @@ std::string setup_stage(const std::string &stage) {
     if (stage == "extract") return "解压浏览器";
     if (stage == "verify") return "校验浏览器";
     if (stage == "complete") return "浏览器安装完成";
+    if (stage == "model-download") return "下载指纹模型";
+    if (stage == "model-install") return "安装指纹模型";
+    if (stage == "model-complete") return "指纹模型就绪";
     return stage;
 }
 enum class Level { info, note, warning, error };
@@ -313,6 +316,7 @@ std::optional<Line> describe(const json::object &r) {
         line.title = setup_stage(text_of(r, "stage"));
         line.add(text_of(r, "browser_version"));
         line.add(text_of(r, "platform"));
+        line.add(text_of(r, "fpgen_model"));
     } else if (event == "setup_download") {
         const auto received = integer(r, "received_bytes"), total = integer(r, "maximum_bytes");
         line.title = "下载中";

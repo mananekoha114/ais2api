@@ -6,6 +6,7 @@
 
 #pragma once
 #include "backend.hpp"
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -34,20 +35,16 @@ std::vector<std::pair<std::string, std::string>> camoufox_environment(std::strin
 // user.js contents setting `prefs` (strings, booleans and 32-bit integers),
 // sorted by name. Other values are rejected.
 std::string firefox_user_js(const json::object &prefs);
-// Pre-generated Camoufox identities (scripts/camoufox-dev.py identities).
-struct CamoufoxIdentityPool {
-    json::object camoufox;
-    std::vector<json::object> identities;  // {config, prefs}
-    std::string sha256;
-};
-CamoufoxIdentityPool load_identity_pool(const fs::path &file);
-// The launch configuration for `identity_config`: the identity with the
-// account's locale and timezone, and page-world script evaluation allowed.
-json::object camoufox_launch_config(const json::object &identity_config, std::string_view locale, std::string_view timezone);
+// The salt an account's Firefox identity is generated from: the first 64 bits
+// of SHA-256 over this installation's secret, the account id and its
+// fingerprint seed. Cookie import and the account's first launch draw the
+// same identity.
+std::uint64_t identity_salt(std::string_view secret, std::string_view account_id, unsigned seed);
 } // namespace browser_detail
 // The experimental Camoufox backend (browser_backend "camoufox"): the same
-// account flow as BrowserGateway over WebDriver BiDi, with each account on a
-// fixed identity from <data_dir>/camoufox/identity-pool.json.
+// account flow as BrowserGateway over WebDriver BiDi. Each account keeps a
+// Firefox identity generated on this machine from the fpgen model setup
+// installs, stored with its fingerprint seed.
 class CamoufoxGateway final : public GenerationBackend {
   public:
     CamoufoxGateway(const Config &config, Store &store);
@@ -63,6 +60,11 @@ class CamoufoxGateway final : public GenerationBackend {
     // what generation depends on: the bridge preload, navigator.webdriver,
     // BYOB stream readers and trusted key presses. No Google request.
     json::object verify_runtime(std::stop_token cancel = {});
+    // Launches the browser with the identity of `account_id` (generated, and
+    // saved for a stored account, when it has none) and reads on a local page
+    // what the identity sets, beside what it should read. No cookies and no
+    // Google request.
+    json::object verify_identity(std::string_view account_id, std::stop_token cancel = {});
     void close() override;
     void reset_session() override;
     void clear_template() override;

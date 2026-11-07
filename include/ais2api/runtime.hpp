@@ -6,6 +6,7 @@
 
 #pragma once
 #include "config.hpp"
+#include <map>
 #include <memory>
 namespace ais2api {
 fs::path executable_path();
@@ -41,6 +42,22 @@ json::object rollback_runtime(Config &config);
 void download_verified(std::string_view url, const fs::path &destination, std::string_view digest,
                        std::string_view proxy = {}, std::uint64_t expected_size = 0);
 void extract_archive(const fs::path &archive, const fs::path &destination);
+// The fpgen model the Camoufox backend generates identities from, pinned by
+// runtime-manifest.json and installed by setup.
+struct FpgenModelPin {
+    std::string tag, url, sha256;
+    std::uint64_t size = 0;
+    std::map<std::string, std::string> file_sha256;  // the archive's files
+};
+FpgenModelPin fpgen_model_pin();  // from the runtime manifest
+FpgenModelPin fpgen_model_pin(const json::object &manifest);
+// <data_dir>/runtime/fpgen/<tag with '/' as '-'>
+fs::path fpgen_model_directory(const fs::path &data_dir, const FpgenModelPin &pin);
+// "installed"; "missing"; "damaged": setup's, but not the pinned files;
+// "foreign": not created by setup, so setup leaves it alone.
+std::string fpgen_model_state(const fs::path &directory, const FpgenModelPin &pin);
+// Installs the model from its downloaded archive, replacing a damaged one.
+void install_fpgen_model(const fs::path &archive, const fs::path &directory, const FpgenModelPin &pin);
 std::string fetch_public_media(std::string_view url, std::size_t limit, std::string_view proxy = {},
                                std::stop_token cancel = {});
 } // namespace ais2api
