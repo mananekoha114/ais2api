@@ -9,8 +9,10 @@
   python scripts/camoufox-dev.py venv
       Create .tools/camoufox-venv with the pinned camoufox Python package.
   python scripts/camoufox-dev.py fetch
-      Download the pinned Windows x64 Camoufox build into .tools/camoufox/<tag>/,
-      verify it and print the browser_executable path.
+      Download the Windows x64 Camoufox build runtime-manifest.json pins into
+      .tools/camoufox/<tag>/, verify it and print its executable. Unlike the
+      install setup makes, it keeps the bundled fonts: the hidden
+      [.camoufox-fonts] test compares the two.
   .tools/camoufox-venv/Scripts/python.exe -I scripts/camoufox-dev.py catalog
       Copy the identity catalogues ais2api embeds (fonts, voices, media devices,
       launcher constants) from the pinned camoufox package into browser/camoufox/.
@@ -47,11 +49,13 @@ REPO = Path(__file__).resolve().parent.parent
 TOOLS = REPO / '.tools'
 VENV = TOOLS / 'camoufox-venv'
 CAMOUFOX_PYTHON = '0.5.9'  # pins TAG in its browser-pin.json
-TAG = 'v158.0.1-beta.41'
-ASSET = 'camoufox-158.0.1-beta.41-win.x86_64.zip'
-ASSET_SHA256 = '2644bd14f1cc345c768f6a70b576bcc87eb3d0bf0df54856d6fe0bbc3027515f'
-ASSET_SIZE = 1320075455
-URL = f'https://github.com/daijro/camoufox/releases/download/{TAG}/{ASSET}'
+# The Camoufox build setup installs, as runtime-manifest.json pins it.
+MANIFEST = json.loads((REPO / 'runtime-manifest.json').read_text(encoding='utf-8'))
+TAG = 'v' + MANIFEST['camoufox']['version']
+URL = MANIFEST['camoufox']['artifacts']['windows-x64']['url']
+ASSET = URL.rsplit('/', 1)[1]
+ASSET_SHA256 = MANIFEST['camoufox']['artifacts']['windows-x64']['sha256']
+ASSET_SIZE = MANIFEST['camoufox']['artifacts']['windows-x64']['size']
 RELEASE = 'release.json'
 INT32 = (-2**31, 2**31 - 1)
 CATALOG = REPO / 'browser' / 'camoufox'
@@ -279,10 +283,10 @@ def catalog(_args):
         staged[name], files[name] = recorded(name)
     pin = json.loads(recorded('browser-pin.json')[0])
     if pin.get('tag') != TAG:
-        fail(f'camoufox {CAMOUFOX_PYTHON} pins {pin.get("tag")}, not {TAG}')
+        fail(f'camoufox {CAMOUFOX_PYTHON} pins {pin.get("tag")}, not {TAG} (runtime-manifest.json)')
     # runtime-manifest.json pins the fpgen model the launcher was released with.
     model = json.loads(recorded('fpgen-model.json')[0])
-    manifest = json.loads((REPO / 'runtime-manifest.json').read_text(encoding='utf-8')).get('fpgen_model', {})
+    manifest = MANIFEST.get('fpgen_model', {})
     for key in ('tag', 'url', 'size', 'sha256', 'file_sha256'):
         if manifest.get(key) != model.get(key):
             print(f'warning: runtime-manifest.json fpgen_model.{key} differs from the launcher pin: {model.get(key)!r}', file=sys.stderr)
