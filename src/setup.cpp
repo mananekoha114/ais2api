@@ -16,6 +16,7 @@
 #include <boost/asio.hpp>
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -252,6 +253,135 @@ void extract_archive(const fs::path &input, const fs::path &destination) {
     if (result != ARCHIVE_EOF)
         throw Error(400, "invalid_archive", "Truncated runtime archive");
 }
+namespace {
+// Written last into a model directory setup installed.
+constexpr std::string_view model_marker = ".ais2api-model.json";
+bool model_name(std::string_view name, bool slashes) {
+    return !name.empty() && name.front() != '.' && name.find("..") == std::string_view::npos &&
+           std::all_of(name.begin(), name.end(), [&](unsigned char c) {
+               return std::isalnum(c) || c == '.' || c == '-' || c == '_' || (slashes && c == '/');
+           });
+}
+bool digest(std::string_view text) {
+    return text.size() == 64 && text.find_first_not_of("0123456789abcdef") == std::string_view::npos;
+}
+} // namespace
+FpgenModelPin fpgen_model_pin(const json::object &manifest) {
+    FpgenModelPin pin;
+    try {
+        const auto &model = manifest.at("fpgen_model").as_object();
+        pin.tag = json::value_to<std::string>(model.at("tag"));
+        pin.url = json::value_to<std::string>(model.at("url"));
+        pin.sha256 = json::value_to<std::string>(model.at("sha256"));
+        pin.size = json::value_to<std::uint64_t>(model.at("size"));
+        for (const auto &file : model.at("file_sha256").as_object())
+            pin.file_sha256[std::string(file.key())] = json::value_to<std::string>(file.value());
+    } catch (const std::exception &) {
+        pin = {};
+    }
+    const bool valid = model_name(pin.tag, true) && pin.url.starts_with("https://") && digest(pin.sha256) &&
+                       !pin.file_sha256.empty() &&
+                       std::all_of(pin.file_sha256.begin(), pin.file_sha256.end(), [](const auto &file) {
+                           return model_name(file.first, false) && digest(file.second);
+                       });
+    if (!valid) throw Error(400, "invalid_manifest", "runtime-manifest.json has no valid fpgen_model");
+    return pin;
+}
+FpgenModelPin fpgen_model_pin() { return fpgen_model_pin(manifest()); }
+fs::path fpgen_model_directory(const fs::path &data_dir, const FpgenModelPin &pin) {
+    auto name = pin.tag;
+    std::replace(name.begin(), name.end(), '/', '-');
+    return data_dir / "runtime" / "fpgen" / fs::u8path(name);
+}
+std::string fpgen_model_state(const fs::path &directory, const FpgenModelPin &pin) {
+    std::error_code error;
+    const auto status = fs::symlink_status(directory, error);
+    if (!fs::exists(status)) return "missing";
+    if (!fs::is_directory(status)) return "foreign";
+    json::object owner;
+    try {
+        owner = json::parse(read_file(directory / model_marker, 65536)).as_object();
+    } catch (const std::exception &) {
+        return "foreign";
+    }
+    if (string_or(owner, "tag") != pin.tag || string_or(owner, "sha256") != pin.sha256) return "damaged";
+    for (const auto &[name, expected] : pin.file_sha256) {
+        const auto path = directory / fs::u8path(name);
+        if (!fs::is_regular_file(fs::symlink_status(path, error)) || sha256(read_file(path)) != expected)
+            return "damaged";
+    }
+    return "installed";
+}
+void install_fpgen_model(const fs::path &archive, const fs::path &directory, const FpgenModelPin &pin) {
+    const auto state = fpgen_model_state(directory, pin);
+    if (state == "foreign")
+        throw Error(409, "unknown_runtime",
+                    path_utf8(directory) + " was not created by setup; move it away and rerun setup");
+    const auto parent = directory.parent_path();
+    secure_directory(parent);
+    const auto staging = parent / ("staging-" + random_hex(8));
+    try {
+        extract_archive(archive, staging);
+        // Exactly the pinned files, each checked before the model is moved
+        // into place.
+        std::set<std::string> found, pinned;
+        for (const auto &entry : fs::directory_iterator(staging)) {
+            if (!entry.is_regular_file())
+                throw Error(502, "archive_layout", "fpgen model archive holds a directory");
+            found.insert(path_utf8(entry.path().filename()));
+        }
+        for (const auto &[name, expected] : pin.file_sha256) pinned.insert(name);
+        if (found != pinned)
+            throw Error(502, "archive_layout", "fpgen model archive does not hold the pinned files");
+        for (const auto &[name, expected] : pin.file_sha256)
+            if (sha256(read_file(staging / fs::u8path(name))) != expected)
+                throw Error(502, "digest_mismatch", "fpgen model file " + name + " does not match its pinned sha256");
+        atomic_write(staging / model_marker,
+                     json::serialize(json::object{{"version", 1}, {"tag", pin.tag}, {"sha256", pin.sha256}}));
+        if (state != "missing") fs::remove_all(directory);
+        fs::rename(staging, directory);
+    } catch (...) {
+        std::error_code error;
+        fs::remove_all(staging, error);
+        throw;
+    }
+}
+namespace {
+// The Camoufox backend needs the fpgen model. Camoufox itself is configured
+// by hand for now, so setup neither downloads CloakBrowser nor changes
+// browser_executable.
+json::object setup_camoufox(const Config &config) {
+    const auto pin = fpgen_model_pin();
+    const auto root = config.data_dir / "runtime";
+    secure_directory(config.data_dir);
+    secure_directory(root);
+    const auto directory = fpgen_model_directory(config.data_dir, pin);
+    const auto stage = [&](std::string name) {
+        console::emit_record({{"event", "setup_stage"},
+                              {"stage", name},
+                              {"browser_backend", config.browser_backend},
+                              {"fpgen_model", pin.tag}});
+    };
+    const auto state = fpgen_model_state(directory, pin);
+    if (state == "foreign")
+        throw Error(409, "unknown_runtime",
+                    path_utf8(directory) + " was not created by setup; move it away and rerun setup");
+    if (state != "installed") {
+        stage("model-download");
+        const auto archive = root / "downloads" / "fpgen-model.zip";
+        download_verified(pin.url, archive, pin.sha256, config.proxy, pin.size);
+        stage("model-install");
+        install_fpgen_model(archive, directory, pin);
+    }
+    stage("model-complete");
+    return {{"status", "prepared"},
+            {"browser_backend", config.browser_backend},
+            {"fpgen_model", json::object{{"tag", pin.tag},
+                                         {"directory", path_utf8(directory)},
+                                         {"installed_now", state != "installed"}}},
+            {"note", "setup does not install Camoufox yet: set browser_executable to a Camoufox build"}};
+}
+} // namespace
 std::vector<std::string> linux_runtime_packages(std::string_view os_release) {
     // Read os-release as data: never source distribution metadata in a shell.
     std::istringstream input{std::string(os_release)};
@@ -285,6 +415,8 @@ std::vector<std::string> linux_runtime_packages(std::string_view os_release) {
             "fonts-noto-cjk", "fonts-noto-color-emoji", "ca-certificates"};
 }
 json::object setup_runtime(Config &config, bool approved) {
+    if (config.browser_backend == "camoufox")
+        return setup_camoufox(config);
     auto m = manifest();
     auto system = platform();
     auto version = string_or(m, "browser_version");
@@ -475,7 +607,7 @@ json::object rollback_runtime(Config &config) {
             {"browser_verification", browser_verification}};
 }
 json::object doctor(const Config &config) {
-    return {{"config_version", config.version},
+    json::object result{{"config_version", config.version},
             {"program_directory", path_utf8(Config::default_directory())},
             {"config_file", path_utf8(config.config_file)},
             {"download_directory", path_utf8(config.data_dir / "runtime/downloads")},
@@ -484,7 +616,16 @@ json::object doctor(const Config &config) {
             {"browser_exists", fs::is_regular_file(config.browser_executable)},
             {"data_directory", path_utf8(config.data_dir)},
             {"manifest_available", !manifest().empty()},
+            {"browser_backend", config.browser_backend},
             {"google_access", "not_checked"}};
+    if (config.browser_backend == "camoufox") {
+        const auto pin = fpgen_model_pin();
+        const auto directory = fpgen_model_directory(config.data_dir, pin);
+        result["fpgen_model"] = json::object{{"tag", pin.tag},
+                                             {"directory", path_utf8(directory)},
+                                             {"state", fpgen_model_state(directory, pin)}};
+    }
+    return result;
 }
 std::string media_detail::fetch_with_resolver(std::string_view input, std::size_t limit, std::string_view proxy,
                                std::stop_token cancel, const Resolver& resolve) {
