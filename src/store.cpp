@@ -489,6 +489,11 @@ void init_state(sqlite3 *db) {
              "accounts(id) ON DELETE CASCADE,seed INTEGER NOT NULL,timezone TEXT NOT NULL "
              "DEFAULT '',locale TEXT NOT NULL DEFAULT '');INSERT OR IGNORE INTO "
              "fingerprints(account,seed) SELECT id,10000+abs(random()%90000) FROM accounts");
+    // The account's Firefox identity (JSON), generated on first use.
+    bool firefox_identity = false;
+    { Statement columns(db, "PRAGMA table_info(fingerprints)");
+      while (columns.row()) firefox_identity |= columns.str(1) == "firefox"; }
+    if (!firefox_identity) exec(db, "ALTER TABLE fingerprints ADD COLUMN firefox TEXT NOT NULL DEFAULT ''");
     if (version <= 1)
         exec(db, "PRAGMA user_version=1");
 }
@@ -1583,7 +1588,7 @@ BrowserFingerprint Store::regenerate_fingerprint(std::string_view id) {
         // Same 10000..99999 range CloakBrowser uses for its own random seeds.
         while (next.seed == previous.seed)
             next.seed = 10000 + static_cast<unsigned>(std::stoul(random_hex(4), nullptr, 16) % 90000);
-        Statement s(impl_->db, "UPDATE fingerprints SET seed=? WHERE account=?");
+        Statement s(impl_->db, "UPDATE fingerprints SET seed=?,firefox='' WHERE account=?");
         s.integer(1, next.seed);
         s.text(2, id);
         s.row();
@@ -1606,6 +1611,42 @@ BrowserFingerprint Store::set_fingerprint_region(std::string_view id, std::optio
         s.text(3, id);
         s.row();
         return result;
+    });
+}
+std::optional<json::object> Store::firefox_identity(std::string_view id) {
+    return impl_->run([&]() -> std::optional<json::object> {
+        const auto current = read_fingerprint(impl_->db, id);
+        Statement s(impl_->db, "SELECT firefox FROM fingerprints WHERE account=?");
+        s.text(1, id);
+        if (!s.row()) return std::nullopt;
+        boost::system::error_code error;
+        auto value = json::parse(s.str(0), error);
+        if (error || !value.is_object()) return std::nullopt;
+        const auto *seed = value.as_object().if_contains("seed");
+        if (!seed || !(seed->is_int64() || seed->is_uint64()) || seed->to_number<std::int64_t>() != current.seed) return std::nullopt;
+        return std::move(value.as_object());
+    });
+}
+void Store::save_firefox_identity(std::string_view id, const json::object &identity) {
+    const auto *seed = identity.if_contains("seed");
+    if (!seed || !(seed->is_int64() || seed->is_uint64())) throw std::invalid_argument("Firefox identity without a seed");
+    impl_->run([&] {
+        read_fingerprint(impl_->db, id);
+        Statement s(impl_->db, "UPDATE fingerprints SET firefox=? WHERE account=? AND seed=?");
+        s.text(1, json::serialize(identity));
+        s.text(2, id);
+        s.integer(3, seed->to_number<std::int64_t>());
+        s.row();
+    });
+}
+std::string Store::identity_secret() {
+    return impl_->run([&] {
+        Statement create(impl_->db, "INSERT OR IGNORE INTO settings(k,v) VALUES('identity_secret',?)");
+        create.text(1, random_hex(32));
+        create.row();
+        Statement s(impl_->db, "SELECT v FROM settings WHERE k='identity_secret'");
+        s.row();
+        return s.str(0);
     });
 }
 json::array Store::account_status() {
