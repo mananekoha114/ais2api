@@ -62,9 +62,11 @@ class CamoufoxGateway final : public GenerationBackend {
     json::object verify_runtime(std::stop_token cancel = {});
     // Launches the browser with the identity of `account_id` (generated, and
     // saved for a stored account, when it has none) and reads on a local page
-    // what the identity sets, beside what it should read. No cookies and no
-    // Google request.
-    json::object verify_identity(std::string_view account_id, std::stop_token cancel = {});
+    // what the identity sets, beside what it should read. The page also looks
+    // for the identity's fonts and for `probe_fonts`, and measures text in the
+    // generic families. No cookies and no Google request.
+    json::object verify_identity(std::string_view account_id, std::stop_token cancel = {},
+                                 const std::vector<std::string> &probe_fonts = {});
     void close() override;
     void reset_session() override;
     void clear_template() override;

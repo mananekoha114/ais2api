@@ -36,7 +36,8 @@ struct Config {
     fs::path config_file;
     fs::path browser_executable;
     // "cloakbrowser" (Chromium over CDP) or "camoufox" (Firefox over WebDriver
-    // BiDi, experimental). Camoufox needs browser_executable to name it.
+    // BiDi, experimental). Camoufox runs the build setup installed, or
+    // browser_executable when that names a Camoufox executable.
     std::string browser_backend = "cloakbrowser";
     std::string proxy;
     // Route the browser through a local relay that authenticates to `proxy`
