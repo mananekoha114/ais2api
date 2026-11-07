@@ -65,7 +65,7 @@ if [ "$target" = termux ]; then
   [ "$(uname -m)" = aarch64 ] || { echo 'Supported Termux target: ARM64 (aarch64).' >&2; exit 1; }
   [ "$sanitize" = OFF ] && [ "$fuzz" = OFF ] && [ "$package" -eq 0 ] && [ -z "$browser_bundle" ] || { echo 'Desktop sanitizer/fuzzer/archive targets are separate from Termux device acceptance.' >&2; exit 2; }
   if [ "$packages" -eq 1 ]; then
-    pkg install -y clang cmake ninja git curl pkg-config boost libcurl openssl libarchive libsqlite
+    pkg install -y clang cmake ninja git curl pkg-config boost libcurl openssl libarchive libsqlite zstd
   fi
   for tool in cmake ninja clang++ curl tar sha512sum; do need "$tool"; done
   prefix_path=$PREFIX

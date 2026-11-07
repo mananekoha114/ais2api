@@ -25,6 +25,19 @@ else()
 endif()
 find_package(LibArchive REQUIRED)
 find_package(Threads REQUIRED)
+# vcpkg installs zstd's CMake package; Termux ships only its pkg-config file.
+find_package(zstd CONFIG QUIET)
+if(TARGET zstd::libzstd)
+  set(AIS2API_ZSTD_TARGET zstd::libzstd)
+elseif(TARGET zstd::libzstd_static)
+  set(AIS2API_ZSTD_TARGET zstd::libzstd_static)
+elseif(TARGET zstd::libzstd_shared)
+  set(AIS2API_ZSTD_TARGET zstd::libzstd_shared)
+else()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+  set(AIS2API_ZSTD_TARGET PkgConfig::ZSTD)
+endif()
 add_library(ais2api_core src/common.cpp src/config.cpp src/store.cpp src/pricing.cpp src/cookie_import.cpp src/schema.cpp src/protocol.cpp src/responses.cpp src/browser.cpp src/browser_process.cpp src/camoufox.cpp src/runtime.cpp src/setup.cpp src/download.cpp src/bundle.cpp src/server.cpp src/control.cpp src/management.cpp src/logs.cpp src/console.cpp src/log_sources.cpp src/webui.cpp src/region.cpp)
 set(browser_bridge_inc "${CMAKE_CURRENT_BINARY_DIR}/generated/browser_bridge.inc")
 target_sources(ais2api_core PRIVATE src/price_service.cpp src/usage.cpp src/continuation.cpp src/browser_generation.cpp)
@@ -39,12 +52,19 @@ add_custom_command(OUTPUT "${pricing_snapshot_inc}"
     "-DOUTPUT=${pricing_snapshot_inc}" -P "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-pricing.cmake"
   DEPENDS pricing/gemini.json scripts/embed-pricing.cmake VERBATIM)
 target_sources(ais2api_core PRIVATE "${pricing_snapshot_inc}")
+set(camoufox_catalog_inc "${CMAKE_CURRENT_BINARY_DIR}/generated/camoufox_catalog.inc")
+file(GLOB camoufox_catalog_files CONFIGURE_DEPENDS browser/camoufox/*.json)
+add_custom_command(OUTPUT "${camoufox_catalog_inc}"
+  COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/browser/camoufox"
+    "-DOUTPUT=${camoufox_catalog_inc}" -P "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-camoufox.cmake"
+  DEPENDS ${camoufox_catalog_files} scripts/embed-camoufox.cmake VERBATIM)
+target_sources(ais2api_core PRIVATE "${camoufox_catalog_inc}")
 target_include_directories(ais2api_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 include(scripts/webui.cmake)
 target_include_directories(ais2api_core PUBLIC include)
 target_compile_definitions(ais2api_core PUBLIC BOOST_ASIO_NO_DEPRECATED BOOST_BEAST_USE_STD_STRING_VIEW)
 target_compile_definitions(ais2api_core PRIVATE AIS2API_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(ais2api_core PUBLIC Boost::json Boost::headers OpenSSL::Crypto CURL::libcurl ${AIS2API_SQLITE_TARGET} LibArchive::LibArchive Threads::Threads)
+target_link_libraries(ais2api_core PUBLIC Boost::json Boost::headers OpenSSL::Crypto CURL::libcurl ${AIS2API_SQLITE_TARGET} LibArchive::LibArchive ${AIS2API_ZSTD_TARGET} Threads::Threads)
 if(WIN32)
   target_compile_definitions(ais2api_core PUBLIC _WIN32_WINNT=0x0A00 WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(ais2api_core PUBLIC ws2_32 mswsock advapi32 userenv bcrypt)
@@ -110,6 +130,7 @@ endif()
 install(FILES LICENSE docs/platforms.md DESTINATION share/doc/ais2api)
 install(FILES NOTICE THIRD_PARTY_NOTICES.md docs/github-publishing.md DESTINATION share/doc/ais2api)
 install(FILES licenses/CloakBrowser-BINARY-LICENSE.md DESTINATION share/doc/ais2api/browser)
+install(FILES licenses/fpgen-LICENSE.txt licenses/camoufox-launcher-LICENSE.txt DESTINATION share/doc/ais2api/licenses)
 install(FILES docs/README.md docs/getting-started.md docs/clients.md docs/configuration.md docs/troubleshooting.md
               docs/cli.md docs/protocol.md docs/responses.md docs/true-role.md docs/browser.md
               docs/validation.md docs/performance.md docs/roadmap.md docs/security-review.md

@@ -14,6 +14,7 @@ ais2api 的自有实现采用 [MPL 2.0](LICENSE)。该许可不替换第三方�
 | OpenSSL | Apache License 2.0 |
 | SQLite | 上游 public-domain dedication |
 | libarchive | 上游 BSD 及各组件对应条款 |
+| Zstandard (zstd) | BSD License |
 | zlib 等传递依赖 | 各自的上游许可 |
 
 此表不是传递依赖的完整清单。桌面 CMake 安装和 CPack 流程会保留 vcpkg 提供的 `copyright` 文件，位置为 `share/licenses/ais2api-dependencies/`。修改依赖或分发方式时，应一并检查对应声明。Termux 系统依赖由其包管理器分发，不属于本仓库的 MPL 源码。
@@ -34,10 +35,19 @@ CloakBrowser/Chromium 二进制不纳入后端源码仓库。精简包按锁定�
 
 本仓库保存了 2026-10-20 获取的官方许可原文 [CloakBrowser-BINARY-LICENSE.md](licenses/CloakBrowser-BINARY-LICENSE.md)，SHA-256 为 `a959b6f9db58f7e273694368659140e9d82960d964ab48b5f6cf9c4545cc2981`。它作为第三方许可文件按原文保留。打包工具从锁定原始附件重新提取浏览器、校验每个文件并附带该许可，不打包已有浏览器资料目录。
 
+## Firefox 身份生成
+
+Camoufox 后端的身份生成器（`src/fpgen.cpp`、`src/firefox_identity.cpp`）是两个上游项目的 C++ 移植，许可文本保存在 `licenses/`，并随运行包安装到 `share/doc/ais2api/licenses/`：
+
+- [fpgen](https://github.com/scrapfly/fingerprint-generator) 1.3.0（Apache License 2.0，[fpgen-LICENSE.txt](licenses/fpgen-LICENSE.txt)）：`src/fpgen.cpp` 按其 Python 实现移植了贝叶斯网络的读取、beam search 条件分布和采样。fpgen 的模型数据不纳入仓库和运行包，由 `ais2api setup` 从其 GitHub Release 下载，并按 `runtime-manifest.json` 中锁定的 SHA-256 校验。
+- [Camoufox](https://github.com/daijro/camoufox) Python 启动器 0.5.9（MIT License，Copyright (c) 2024-2026 daijro and the Camoufox contributors，[camoufox-launcher-LICENSE.txt](licenses/camoufox-launcher-LICENSE.txt)）：`src/firefox_identity.cpp` 移植了启动器组装身份、修正几何与核数、抽取字体、语音、媒体设备和 WebGL、检查身份一致性的逻辑。`browser/camoufox/` 中的 JSON 目录数据是该启动器安装包中的原文件，未作修改，`catalog.json` 记录其版本和 SHA-256，构建时嵌入程序。
+
+移植部分的许可不因 ais2api 的许可选择而改变。Camoufox 浏览器本身（MPL 2.0）不纳入仓库和运行包。
+
 ## 原理参考
 
 [aistudio-api-termux](https://github.com/ReedSein/aistudio-api-termux/tree/84b50663fcae79058fe33e0e45b5c3452da7c461) 用于理解行为和私有协议事实。其本身采用 MIT 许可，版权归其贡献者；该许可不因 ais2api 的许可选择而改变。
 
 [AIStudio2API](https://github.com/Mag1cFall/AIStudio2API/tree/80847a7665c442a238918c957963217773f36291)（MIT License，Copyright (c) 2026 Mag1cFall）是 Camoufox 后端的参考。`src/camoufox.cpp` 中按账号语言与时区改写 Camoufox 配置的键、`CAMOU_CONFIG_N` 的分段大小、BiDi 端点的读取方式和 Firefox 首选项清单参照了其 `internal/camoufoxnative`（Go）的做法，由本项目用 C++ 重新编写；该许可不因 ais2api 的许可选择而改变。
 
-本仓库的 C++ 实现、网页桥接脚本及回归样例独立编写，不包含参考项目的 Python/JavaScript 实现文件或测试实现。本地 `.analysis/` 克隆、依赖 checkout 和生成文件不纳入 Git 提交。如果后续引入任何第三方源码，应逐文件保留其许可和版权声明，并更新本说明。
+除上文“Firefox 身份生成”列出的移植代码和目录数据外，本仓库的 C++ 实现、网页桥接脚本及回归样例独立编写，不包含参考项目的 Python/JavaScript 实现文件或测试实现。本地 `.analysis/` 克隆、依赖 checkout 和生成文件不纳入 Git 提交。如果后续引入任何第三方源码，应逐文件保留其许可和版权声明，并更新本说明。

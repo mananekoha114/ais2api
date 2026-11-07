@@ -14,12 +14,16 @@
   .tools/camoufox-venv/Scripts/python.exe -I scripts/camoufox-dev.py identities \\
       --executable <camoufox.exe> --out <data_dir>/camoufox/identity-pool.json
       Generate an identity pool with the camoufox package's own generator.
+  .tools/camoufox-venv/Scripts/python.exe -I scripts/camoufox-dev.py catalog
+      Copy the identity catalogues ais2api embeds (fonts, voices, media devices,
+      launcher constants) from the pinned camoufox package into browser/camoufox/.
 
 An identity pool describes this machine (its GPU, among other things): keep it
 in the data directory and never commit it.
 """
 from __future__ import annotations
 import argparse
+import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
@@ -45,6 +49,11 @@ ASSET_SIZE = 1320075455
 URL = f'https://github.com/daijro/camoufox/releases/download/{TAG}/{ASSET}'
 RELEASE = 'release.json'
 INT32 = (-2**31, 2**31 - 1)
+CATALOG = REPO / 'browser' / 'camoufox'
+# The launcher's own data files that the native identity generator reads. Its
+# macOS-only voice URI table is left out: macOS identities are not generated.
+CATALOG_FILES = ('essential-fonts.json', 'font-bases.json', 'font-groups.json', 'fonts.json',
+                 'launcher-constants.json', 'media-devices.json', 'voice-manifests.json')
 
 
 def fail(message):
@@ -232,6 +241,48 @@ def identities(args):
     print(out)
 
 
+def catalog(_args):
+    from importlib.metadata import PackageNotFoundError, distribution
+    try:
+        package = distribution('camoufox')
+    except PackageNotFoundError:
+        fail(f'run this with the camoufox package installed: {VENV} (scripts/camoufox-dev.py venv)')
+    if package.version != CAMOUFOX_PYTHON:
+        fail(f'camoufox {package.version} is installed; this script is pinned to {CAMOUFOX_PYTHON}')
+    records = {str(entry).replace('\\', '/'): entry for entry in package.files or []}
+
+    def recorded(name):
+        # The wheel's RECORD names each file's sha256 (urlsafe base64, unpadded).
+        entry = records.get('camoufox/' + name)
+        if entry is None or entry.hash is None or entry.hash.mode != 'sha256':
+            fail(f'camoufox/{name} is not listed with a sha256 in the package RECORD')
+        data = Path(package.locate_file(entry)).read_bytes()
+        digest = hashlib.sha256(data)
+        if base64.urlsafe_b64encode(digest.digest()).rstrip(b'=').decode() != entry.hash.value:
+            fail(f'camoufox/{name} does not match the camoufox {CAMOUFOX_PYTHON} RECORD')
+        return data, digest.hexdigest()
+
+    staged, files = {}, {}
+    for name in CATALOG_FILES:
+        staged[name], files[name] = recorded(name)
+    pin = json.loads(recorded('browser-pin.json')[0])
+    if pin.get('tag') != TAG:
+        fail(f'camoufox {CAMOUFOX_PYTHON} pins {pin.get("tag")}, not {TAG}')
+    # runtime-manifest.json pins the fpgen model the launcher was released with.
+    model = json.loads(recorded('fpgen-model.json')[0])
+    manifest = json.loads((REPO / 'runtime-manifest.json').read_text(encoding='utf-8')).get('fpgen_model', {})
+    for key in ('tag', 'url', 'size', 'sha256', 'file_sha256'):
+        if manifest.get(key) != model.get(key):
+            print(f'warning: runtime-manifest.json fpgen_model.{key} differs from the launcher pin: {model.get(key)!r}', file=sys.stderr)
+    CATALOG.mkdir(parents=True, exist_ok=True)
+    for name, data in staged.items():
+        (CATALOG / name).write_bytes(data)
+    document = {'camoufox_python': CAMOUFOX_PYTHON, 'browser': TAG, 'files': files}
+    # LF on every OS: the build embeds this file's digest.
+    (CATALOG / 'catalog.json').write_bytes((json.dumps(document, indent=1) + '\n').encode('utf-8'))
+    print(CATALOG)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -246,6 +297,7 @@ def main():
     command.add_argument('--count', type=int, default=16)
     command.add_argument('--out', required=True)
     command.set_defaults(run=identities)
+    commands.add_parser('catalog', help='copy the embedded identity catalogues from the camoufox package').set_defaults(run=catalog)
     args = parser.parse_args()
     args.run(args)
 
