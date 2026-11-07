@@ -1,6 +1,6 @@
 # Firefox 后端迁移计划
 
-状态截至 2026-11-06。本文记录从 CloakBrowser 迁移到 Firefox 系后端的已定决策、分阶段计划和待实测事项。方向已确定，开发在维护者确认本文后开始。
+状态截至 2026-11-06。本文记录从 CloakBrowser 迁移到 Firefox 系后端的已定决策、分阶段计划和待实测事项。P1 Camoufox 原型已在 Windows 上完成验证，结果见 [原型报告](reports/camoufox-prototype-2026-11-06.md)。
 
 ## 背景
 
@@ -57,7 +57,7 @@
 ## Camoufox 后端
 
 - **平台顺序**：Windows → Linux x64（含 Docker）→ Termux → macOS（可暂缓）。
-- **显示模式**：Linux 上用 Xvfb 虚拟显示、以有界面模式运行，`setup` 负责安装 Xvfb。Termux 上用 Linux arm64 版，像现在的 CloakBrowser 一样跑在 proot Ubuntu 中，proot 内同样使用 Xvfb。Windows 上用无界面还是有界面模式，在原型阶段实测决定。
+- **显示模式**：Linux 上用 Xvfb 虚拟显示、以有界面模式运行，`setup` 负责安装 Xvfb。Termux 上用 Linux arm64 版，像现在的 CloakBrowser 一样跑在 proot Ubuntu 中，proot 内同样使用 Xvfb。Windows 上用无界面模式：P1 实测两种模式功能相同，无界面模式私有内存少约 270–300 MiB，也不弹出窗口；有界面模式只用于排查登录。
 - **安装**：
   - 正式分发版由 `setup` 从 Camoufox 官方 GitHub Release 下载锁定版本并校验 SHA-256；运行包和 Docker 镜像都不包含 Camoufox，Docker 在第一次启动时下载到数据卷。
   - 解压后删除本机 OS 身份用不到的字体组。Camoufox 158 的压缩包约 1.3 GB，其中约 2 GB（解压后）是三套 OS 的字体，浏览器本体约 350 MB。
@@ -105,6 +105,8 @@ CMake 选项 `AIS2API_DEV_BUNDLE` 区分开发版与正式分发版，默认关�
 | P3 SpiderMonkey 原型 | 用 clang-cl 编译 SpiderMonkey 152.0.4，移植宿主，使用参考项目的对象结构表，以 Camoufox 作对照，验证 proof 被接受；调研网络指纹方案 | 生成的 proof 被 AI Studio 接受；决定网络指纹实现方案 |
 | P4 SpiderMonkey 主线 | 静态库仓库与四平台 CI、对象结构表采集工具、升到最新版、Firefox 网络指纹、版本同步升级、自动切换后端、Termux NDK 版 | 与 Camoufox 共用身份、同版本运行；决定新账号的默认后端 |
 
+P1 已于 2026-11-06 在 Windows 上用测试账号完成验证，见 [原型报告](reports/camoufox-prototype-2026-11-06.md)。
+
 每项工作单独开分支、提 PR 到 main，由维护者审核合并。
 
 ## 低成本改进（独立推进）
@@ -131,7 +133,6 @@ CMake 选项 `AIS2API_DEV_BUNDLE` 区分开发版与正式分发版，默认关�
 |---|---|
 | 新账号的默认后端 | SpiderMonkey 原型结果出来后 |
 | Linux 主机是否伪装 Windows | Linux 阶段实测 |
-| Windows 上 Camoufox 用无界面还是有界面模式 | Camoufox 原型阶段实测 |
 | Firefox 网络指纹的实现方案 | SpiderMonkey 原型阶段调研后 |
 | 多账号并发 | SpiderMonkey 后端稳定后 |
 | 整个核心拆成库 | 桌面 App 或 Android App 立项时 |

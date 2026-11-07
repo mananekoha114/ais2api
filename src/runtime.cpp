@@ -28,6 +28,7 @@ std::map<std::string, std::string> child_overrides(const Config &effective) {
                       {"port", "AIS2API_PORT"},
                       {"data_dir", "AIS2API_DATA_DIR"},
                       {"browser_executable", "AIS2API_BROWSER_EXECUTABLE"},
+                      {"browser_backend", "AIS2API_BROWSER_BACKEND"},
                       {"proxy", "AIS2API_PROXY"},
                       {"browser_proxy_relay", "AIS2API_BROWSER_PROXY_RELAY"},
                       {"browser_remote_allow_origins", "AIS2API_BROWSER_REMOTE_ALLOW_ORIGINS"},

@@ -54,6 +54,12 @@
       "type": "string",
       "description": "Explicit browser path, or empty to auto-detect the locked browser-runtime bundle beside the executable."
     },
+    "browser_backend": {
+      "type": "string",
+      "enum": ["cloakbrowser", "camoufox"],
+      "default": "cloakbrowser",
+      "description": "Browser backend. camoufox (experimental) drives Camoufox over WebDriver BiDi and needs browser_executable to name camoufox; it uses the identity pool in <data_dir>/camoufox/identity-pool.json. Requires a restart."
+    },
     "proxy": {
       "type": "string",
       "description": "Upstream proxy for the browser and for downloads. The browser can use a proxy with credentials only through browser_proxy_relay."

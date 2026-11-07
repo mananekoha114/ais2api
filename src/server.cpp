@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/browser.hpp"
+#include "ais2api/camoufox.hpp"
 #include "ais2api/flow.hpp"
 #include "ais2api/retry_policy.hpp"
 #include "ais2api/management.hpp"
@@ -75,13 +76,16 @@ struct CookieImportJob {
         if (!finished.exchange(true)) completion.set_exception(std::make_exception_ptr(error));
     }
 };
+std::unique_ptr<GenerationBackend> browser_gateway(const Config &config, Store &store) {
+    if (config.browser_backend == "camoufox") return std::make_unique<CamoufoxGateway>(config, store);
+    return std::make_unique<BrowserGateway>(config, store);
+}
 class Service {
   public:
     explicit Service(Config config, std::unique_ptr<GenerationBackend> backend)
         : config_(std::move(config)), journal_(config_.data_dir), store_(config_.data_dir),
           prices_(store_, [this] { return this->config(); }, !backend),
-          gateway_(backend ? std::move(backend)
-                           : std::make_unique<BrowserGateway>(config_, store_)),
+          gateway_(backend ? std::move(backend) : browser_gateway(config_, store_)),
           worker_([this](std::stop_token token) { work_loop(token); }) { store_.recover_requests(); }
     ~Service() { shutdown(); log_writer_.join(); }
     void shutdown() {

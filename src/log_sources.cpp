@@ -19,7 +19,7 @@ std::map<std::string, fs::path> sources(const fs::path& directory) {
     if (!fs::is_symlink(fs::symlink_status(browsers)) && fs::is_directory(browsers))
         for (const auto& entry : fs::directory_iterator(browsers)) {
             auto name = path_utf8(entry.path().filename());
-            if (name.starts_with("browser-") && name.ends_with(".log"))
+            if ((name.starts_with("browser-") || name.starts_with("camoufox-")) && name.ends_with(".log"))
                 add(name, entry.path());
         }
     return result;
