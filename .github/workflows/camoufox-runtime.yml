@@ -183,14 +183,12 @@ jobs:
           docker run --rm --entrypoint /app/bin/ais2api -e AIS2API_BROWSER_BACKEND=camoufox -v "$data:/data" "$IMAGE" \
             doctor --config /data/config.json > "$RUNNER_TEMP/image-doctor.json"
           grep -q '"browser_exists":true' "$RUNNER_TEMP/image-doctor.json"
-  # Termux runs Camoufox and Xvfb in the proot container setup creates. Whether
-  # proot runs inside the Termux CI container is not established, so a failure
-  # here does not fail the workflow; a real device is the reference.
+  # Termux runs Camoufox and Xvfb in the proot container setup creates. The
+  # Termux CI container runs proot; a real device remains the reference.
   termux:
-    name: Camoufox / Termux ARM64 (proot, experimental)
+    name: Camoufox / Termux ARM64 (proot)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 150
-    continue-on-error: true
     env:
       TERMUX_CI_IMAGE: termux/termux-docker@sha256:3a0a340fca9947f7139a0d695f1234edf0172daed6a2f1e0b1413ef91453c9ce
     steps:

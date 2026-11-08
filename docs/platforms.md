@@ -174,7 +174,7 @@ C++ 服务运行在 Termux 宿主上，浏览器运行在 Ubuntu 用户空间中
   - 网关用 `proot-distro login` 在容器内启动 Xvfb 和 Camoufox，数据目录与 Camoufox 所在目录按原路径绑定进去。
   - `proot-distro` 不传递宿主的环境变量，所以身份配置、`DISPLAY`、`FONTCONFIG_FILE` 和私有目录都用 `--env` 传入。容器内的 `HOME` 由 proot-distro 设为容器自己的 `/root`。
   - 显示：`headless=true` 时使用容器内的 Xvfb。`headless=false` 时使用 Termux:X11 的显示：先启动 Termux:X11 并设置 `DISPLAY`，网关会加上 `--shared-x11`。
-  - Termux 上的 Camoufox 还没有在真机上验证。
+  - CI 在 Termux ARM64 容器中验证了以上流程（见 [持续集成](#持续集成)），Termux 上的 Camoufox 还没有在真机上验证。
 
 当前官方 proot-distro 使用 OCI 镜像和命名容器，以下仅演示语法：
 
@@ -316,7 +316,14 @@ Camoufox 位于运行包的 `bin/camoufox-runtime/<版本>-<平台>/`。`doctor`
 4. 用 camoufox Python 包的 `check-identities` 检查生成的身份；
 5. 构建容器镜像，确认第一次启动时会安装并验证 Camoufox。
 
-另有一个实验性任务在 Termux ARM64 容器内构建，用 `setup --yes` 创建 proot 容器并安装 Camoufox，再通过 proot 运行 `[.camoufox-runtime]`。proot 能否在这个容器里运行还不确定，所以这个任务失败不会让工作流失败，以真机结果为准。
+另有一个任务在 Termux ARM64 容器（termux-docker）内构建，然后：
+
+1. 确认没有 `--yes` 时 `setup` 拒绝创建 proot 容器；
+2. 用 `setup --yes` 创建容器、在容器内安装系统包，并安装 Camoufox；
+3. 再运行一次 `setup`，确认不再安装任何东西；
+4. 通过 proot 运行隐藏测试 `[.camoufox-runtime]`。
+
+容器不等于真机，Termux 上的实际使用仍以真机结果为准。
 
 全程只打开本地页面，不使用账号，也不访问 Google。
 
