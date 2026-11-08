@@ -30,6 +30,7 @@ jobs:
         run: |
           sh -n scripts/build.sh
           sh -n scripts/build-dev.sh
+          sh -n scripts/ci-termux-camoufox.sh
           sh -n docker/entrypoint.sh
           sh -n launcher/start.sh
           python3 -m unittest discover -s tests -p 'test_launcher.py'
