@@ -50,4 +50,21 @@ if [ ! -f "$config" ]; then
     esac
 fi
 
+# Camoufox lives in the data volume. Install it when the default backend or a
+# stored account needs it and it is missing or outdated: about 1.3 GB on the
+# first start. A failure leaves the service running, and not ready.
+doctor=$(/app/bin/ais2api doctor --config "$config" || true)
+case "$doctor" in
+    *'"browser_exists":false'*)
+        case "$doctor" in
+            *'"camoufox":{'*)
+                echo "ais2api: installing Camoufox into $data/runtime/camoufox" >&2
+                if ! /app/bin/ais2api browser update camoufox --yes --config "$config" >&2; then
+                    echo "ais2api: Camoufox setup failed; run \"ais2api browser update camoufox --yes\" in the container to retry." >&2
+                fi
+                ;;
+        esac
+        ;;
+esac
+
 exec /app/bin/ais2api serve --config "$config"
