@@ -91,6 +91,7 @@
     - Linux 上 Camoufox 不用系统字体，而是通过它自带的 Linux fontconfig 读取自带字体。
       - 解压时按 `fonts/groups.json` 只保留 Linux 身份读取的四组字体（约 0.9 GB）和 Linux 的 fontconfig，并核对分组没有变化。
       - 启动时把 fontconfig 中相对于工作目录的字体路径换成这几组字体的绝对路径，把缓存移到数据目录，再通过 `FONTCONFIG_FILE` 交给浏览器。
+      - 裁剪还去掉了完整版的一处泄漏：Firefox 递归启用自带的字体目录，完整版里其他 OS 的字体组也能被 Linux 身份读到（Camoufox 的 `FONTS.md` 记述了这一点，例如 Windows 的 Calibri 与 Cambria）。所以 Linux 上的 `[.camoufox-fonts]` 只要求有 Linux 字体的字体族、通用字体族与完整版一致，并且裁剪后不多出字体。CI 实测，差异只出现在没有 Linux 字体的名称上（Calibri、Cambria、Helvetica、Times、Palatino 等）。
   - **扩展**：不加载自带的 uBlock Origin，与现有的 `--disable-extensions` 一致，解压时就跳过 `addons/UBO`。
   - 开发版可以把 Camoufox 一起打包。
 

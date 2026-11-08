@@ -319,6 +319,18 @@ Account runtime_account(const Config& config, Store& store, const std::string& t
     store.set_fingerprint_region(account.id, timezone, locale);
     return account;
 }
+#ifndef _WIN32
+// The families a Linux identity renders with a face from the Linux font
+// groups: those of the Ubuntu bases and of the bundles a draw adds.
+std::set<std::string> linux_font_faces() {
+    std::set<std::string> families;
+    const auto catalog = fs::path(AIS2API_SOURCE_DIR) / "browser" / "camoufox";
+    for (const auto* file : {"font-bases.json", "font-groups.json"})
+        for (const auto& entry : json::parse(read_file(catalog / file, 1 << 22)).at("lin").as_array())
+            for (const auto& family : entry.at("fonts").as_array()) families.emplace(family.as_string());
+    return families;
+}
+#endif
 // Families no identity of this OS has. The Camoufox build bundles each of them.
 #ifdef _WIN32
 const std::vector<std::string> foreign_fonts{"PingFang SC", "Helvetica Neue", "Apple Color Emoji", "Noto Sans", "DejaVu Sans", "Ubuntu"};
@@ -424,10 +436,32 @@ TEST_CASE("Camoufox without its bundled fonts renders text as the full build doe
     };
     INFO("found only in the full build: " << missing(fonts.at("detected"), reference_fonts.at("detected")));
     INFO("found only without the bundled fonts: " << missing(reference_fonts.at("detected"), fonts.at("detected")));
+#ifdef _WIN32
+    const auto leaked = [](std::string_view) { return false; };
     CHECK(fonts.at("detected") == reference_fonts.at("detected"));
+#else
+    // On Linux the full build is no exact reference. Firefox activates the
+    // bundled fonts directory recursively, so there the other OSes' groups
+    // reach a Linux identity too: Camoufox's FONTS.md describes this leak
+    // (Windows' Calibri and Cambria). Trimmed, only the Linux groups remain.
+    // A family with a Linux face renders as in the full build; one without
+    // may lose the leaked face.
+    const auto faces = linux_font_faces();
+    const auto leaked = [&](std::string_view family) {
+        return family != "Twemoji Mozilla" && !faces.contains(std::string(family));
+    };
+    const auto& detected = fonts.at("detected").as_array();
+    const auto& reference_detected = reference_fonts.at("detected").as_array();
+    CHECK(missing(reference_fonts.at("detected"), fonts.at("detected")) == "[]");
+    for (const auto& font : reference_detected) {
+        INFO("found only in the full build: " << json::serialize(font));
+        if (std::find(detected.begin(), detected.end(), font) == detected.end()) CHECK(leaked(font.as_string()));
+    }
+#endif
     for (const auto* key : {"widths", "families"})
         for (const auto& width : reference_fonts.at(key).as_object()) {
             INFO(key << ": " << std::string(width.key()));
+            if (std::string_view(key) == "families" && leaked(width.key())) continue;
             CHECK(fonts.at(key).as_object().at(width.key()) == width.value());
         }
 }
