@@ -44,6 +44,12 @@ void pause(std::stop_token token, std::chrono::milliseconds duration) {
     const auto deadline = Clock::now() + duration;
     while (Clock::now() < deadline) { check_cancel(token); std::this_thread::sleep_for(20ms); }
 }
+std::vector<std::pair<std::string, std::string>> private_environment(const fs::path& private_root) {
+    const auto root = fs::absolute(private_root);
+    return {{"HOME", path_utf8(root / "home")},           {"XDG_CONFIG_HOME", path_utf8(root / "settings")},
+            {"XDG_CACHE_HOME", path_utf8(root / "cache")}, {"XDG_DATA_HOME", path_utf8(root / "files")},
+            {"XDG_STATE_HOME", path_utf8(root / "state")}, {"TMPDIR", path_utf8(root / "tmp")}};
+}
 void OwnedProcess::start(const fs::path& executable, const std::vector<std::string>& args, const fs::path& private_root,
                          const ProcessOptions& options) {
     stop();
@@ -185,11 +191,8 @@ void OwnedProcess::start(const fs::path& executable, const std::vector<std::stri
     }
     for (const auto& unset : options.unset_prefixes)
         std::erase_if(inherited, [&](const auto& item) { return item.first.starts_with(unset); });
-    inherited["XDG_CONFIG_HOME"] = settings.string();
-    inherited["XDG_CACHE_HOME"] = cache.string();
-    inherited["XDG_DATA_HOME"] = data.string();
-    inherited["XDG_STATE_HOME"] = state.string();
-    inherited["TMPDIR"] = temporary.string();
+    for (const auto& [key, value] : private_environment(private_root))
+        if (key != "HOME" || !termux) inherited[key] = value;
 #if defined(__linux__) && !defined(__ANDROID__)
     if (!termux) {
         // Chromium binds AF_UNIX singleton sockets below TMPDIR. Their
@@ -203,7 +206,6 @@ void OwnedProcess::start(const fs::path& executable, const std::vector<std::stri
         inherited["TMPDIR"] = alias;
     }
 #endif
-    if (!termux) inherited["HOME"] = home.string();
     for (const auto& [key, value] : options.environment) inherited[key] = value;
     std::vector<std::string> environment;
     for (const auto& [key, value] : inherited) environment.push_back(key + "=" + value);

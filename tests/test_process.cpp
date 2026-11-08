@@ -70,6 +70,34 @@ TEST_CASE("owned process passes extra environment and captures both output strea
     CHECK(lines.contains("unset:"));
 }
 
+TEST_CASE("private_environment names the directories a child is given", "[process]") {
+    Directory directory;
+    const auto root = directory.path / "private";
+    const auto environment = private_environment(root);
+    std::vector<std::string> names;
+    for (const auto& [name, value] : environment) {
+        names.push_back(name);
+        CHECK(fs::path(value).parent_path() == fs::absolute(root));
+    }
+    CHECK(names == std::vector<std::string>{"HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "TMPDIR"});
+#ifndef _WIN32
+    // A Linux child's TMPDIR is a short alias of the same directory.
+    Lines lines;
+    ProcessOptions options;
+    options.on_output = [&](std::string_view line) { std::lock_guard lock(lines.mutex); lines.values.emplace_back(line); };
+    auto [executable, args] = shell(R"(echo "$XDG_CONFIG_HOME"; echo "$XDG_CACHE_HOME"; echo "$XDG_DATA_HOME"; echo "$XDG_STATE_HOME")", "");
+    OwnedProcess process;
+    process.start(executable, args, root, options);
+    const auto deadline = Clock::now() + 60s;
+    while (process.alive() && Clock::now() < deadline) std::this_thread::sleep_for(20ms);
+    process.stop();
+    for (const auto& [name, value] : environment) {
+        CHECK(fs::is_directory(value));
+        if (name.starts_with("XDG_")) CHECK(lines.contains(value));
+    }
+#endif
+}
+
 TEST_CASE("stopping an owned process ends its output reader at once", "[process]") {
     Directory directory;
     Lines lines;

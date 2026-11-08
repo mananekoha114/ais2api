@@ -34,6 +34,10 @@ struct ProcessOptions {
     // thread, never after stop() returns. Without it the output is discarded.
     std::function<void(std::string_view)> on_output;
 };
+// The private home, cache, settings, data, state and temporary directories
+// below `private_root` that start() gives the child, as the POSIX variables
+// naming them.
+std::vector<std::pair<std::string, std::string>> private_environment(const fs::path& private_root);
 class OwnedProcess {
 public:
     OwnedProcess() = default;
