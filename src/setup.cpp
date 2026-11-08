@@ -905,6 +905,7 @@ json::object rollback_runtime(Config &config) {
 }
 json::object doctor(const Config &config) {
     json::object result{{"config_version", config.version},
+            {"build_mode", build_mode()},
             {"program_directory", path_utf8(Config::default_directory())},
             {"config_file", path_utf8(config.config_file)},
             {"download_directory", path_utf8(config.data_dir / "runtime/downloads")},

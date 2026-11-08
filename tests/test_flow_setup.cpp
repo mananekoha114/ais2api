@@ -330,6 +330,7 @@ TEST_CASE("doctor tells the launcher when Camoufox needs setup", "[setup]") {
     config.data_dir = d.root;
     config.browser_backend = "camoufox";
     auto result = doctor(config);
+    CHECK(string_or(result, "build_mode") == build_mode());
     CHECK_FALSE(bool_or(result, "browser_configured"));
     CHECK_FALSE(bool_or(result, "browser_exists"));
     CHECK(string_or(result.at("camoufox").as_object(), "source").empty());

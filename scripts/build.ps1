@@ -32,11 +32,16 @@ $BuildDirectory = Resolve-ProjectPath $project $BuildDirectory
 if ([string]::IsNullOrEmpty($VcpkgRoot)) { $VcpkgRoot = Join-Path $project 'build/deps/vcpkg' }
 $VcpkgRoot = Resolve-ProjectPath $project $VcpkgRoot
 $BrowserBundleDirectory = Resolve-ProjectPath $project $BrowserBundleDirectory
+# Release archives never come from a dev build (scripts/build-dev.ps1).
+$cache = Join-Path $BuildDirectory 'CMakeCache.txt'
+if ((Test-Path -LiteralPath $cache) -and (Select-String -LiteralPath $cache -Pattern '^AIS2API_DEV_BUNDLE:BOOL=ON$' -Quiet)) {
+    throw "$BuildDirectory holds a dev build; use another -BuildDirectory."
+}
 Enter-BuildTools
 Initialize-Vcpkg $project $VcpkgRoot
 $testing = if ($SkipTests) { 'OFF' } else { 'ON' }
 $webUiBuild = if ($WebUI) { 'ON' } else { 'OFF' }
-Invoke-Checked cmake.exe @('-S', $project, '-B', $BuildDirectory, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Configuration", "-DBUILD_TESTING=$testing", "-DCMAKE_TOOLCHAIN_FILE=$VcpkgRoot/scripts/buildsystems/vcpkg.cmake", "-DVCPKG_TARGET_TRIPLET=$Triplet", "-DCMAKE_INSTALL_PREFIX=$BuildDirectory/install", "-DAIS2API_BROWSER_BUNDLE_DIR=$BrowserBundleDirectory", "-DAIS2API_BUILD_WEBUI=$webUiBuild")
+Invoke-Checked cmake.exe @('-S', $project, '-B', $BuildDirectory, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Configuration", "-DBUILD_TESTING=$testing", "-DCMAKE_TOOLCHAIN_FILE=$VcpkgRoot/scripts/buildsystems/vcpkg.cmake", "-DVCPKG_TARGET_TRIPLET=$Triplet", "-DCMAKE_INSTALL_PREFIX=$BuildDirectory/install", "-DAIS2API_BROWSER_BUNDLE_DIR=$BrowserBundleDirectory", '-DAIS2API_DEV_BUNDLE=OFF', "-DAIS2API_BUILD_WEBUI=$webUiBuild")
 Invoke-Checked cmake.exe @('--build', $BuildDirectory, '--parallel', "$Jobs")
 if (-not $SkipTests) { Invoke-Checked ctest.exe @('--test-dir', $BuildDirectory, '--output-on-failure') }
 Invoke-Checked cmake.exe @('--install', $BuildDirectory)

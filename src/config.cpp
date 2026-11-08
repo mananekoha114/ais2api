@@ -180,8 +180,14 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   // A brand-new installation starts with the well-known management password;
   // the service forces it to be replaced on first sign-in. Existing files keep
   // their stored value, including an empty key that disables management.
-  if (!fs::exists(c.config_file))
+  if (!fs::exists(c.config_file)) {
     c.admin_key = std::string(default_admin_key);
+#ifdef AIS2API_DEV_BUNDLE
+    // A dev bundle carries the Camoufox backend. Existing files keep their
+    // backend: switching an account's identity is always explicit.
+    c.browser_backend = "camoufox";
+#endif
+  }
   bool explicit_browser = false;
   auto o = c.to_json();
   std::optional<json::object> upgraded;
