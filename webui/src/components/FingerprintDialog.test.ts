@@ -21,7 +21,7 @@ function fakeFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Re
     failNext = null
     return Promise.resolve(json({ error: { code: status, message: 'synthetic', status: 'INVALID_ARGUMENT', reason } }, status))
   }
-  if (method === 'PATCH') {
+  if (method === 'PATCH' && 'timezone' in body) {
     stored = {
       ...stored,
       timezone: body.timezone ?? '',
@@ -29,6 +29,10 @@ function fakeFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Re
       effective_timezone: body.timezone ?? stored.host_timezone,
       effective_locale: body.locale ?? stored.host_locale,
     }
+  }
+  if (method === 'PATCH' && body.backend) {
+    const firefox = body.backend !== 'cloakbrowser'
+    stored = { ...stored, backend: body.backend, effective_backend: firefox ? 'camoufox' : 'cloakbrowser', identity: firefox ? 'firefox' : 'chrome' }
   }
   if (method === 'POST' && path.endsWith('/regenerate')) stored = { ...stored, seed: stored.seed + 1 }
   return Promise.resolve(json(stored))
@@ -68,6 +72,10 @@ beforeEach(() => {
     effective_locale: 'zh-CN',
     host_timezone: 'Asia/Shanghai',
     host_locale: 'zh-CN',
+    backend: 'cloakbrowser',
+    effective_backend: 'cloakbrowser',
+    identity: 'chrome',
+    firefox_identity_saved: false,
   }
   calls = []
   failNext = null
@@ -88,7 +96,7 @@ describe('browser fingerprint dialog', () => {
     await mountDialog()
     expect(calls[0]).toMatchObject({ method: 'GET', path: '/accounts/acc_one/fingerprint' })
     expect(body()).toContain('54321')
-    expect(body()).toContain('Windows')
+    expect(body()).toContain('Chrome · Windows')
     expect(body()).toContain('本机时区：Asia/Shanghai')
     expect(body()).toContain('本机语言：zh-CN')
     expect(button('保存').disabled).toBe(true)
@@ -150,6 +158,32 @@ describe('browser fingerprint dialog', () => {
     expect(calls.at(-1)).toMatchObject({ method: 'POST', path: '/accounts/acc_one/fingerprint/regenerate' })
     expect(body()).toContain('54322')
     expect(wrapper!.emitted('changed')).toHaveLength(1)
+  })
+
+  it('moves the account to a Firefox identity only with the warning shown', async () => {
+    await mountDialog()
+    expect(segment('浏览器后端', 'CloakBrowser').getAttribute('aria-checked')).toBe('true')
+    expect(segment('浏览器后端', 'SpiderMonkey').disabled).toBe(true)
+    segment('浏览器后端', 'Camoufox').click()
+    await flushPromises()
+    expect(body()).toContain('换成 Firefox 身份？')
+    button('确认切换并保存').click()
+    await flushPromises()
+    expect(calls.at(-1)).toMatchObject({ method: 'PATCH', body: { backend: 'camoufox', confirm_identity_change: true } })
+    expect(calls.at(-1)?.body).not.toHaveProperty('timezone')
+    expect(toasts.map((t) => t.title)).toContain('浏览器指纹与后端已保存')
+  })
+
+  it('switches between Firefox backends without a warning', async () => {
+    stored = { ...stored, backend: 'camoufox', effective_backend: 'camoufox', identity: 'firefox', firefox_identity_saved: true }
+    await mountDialog()
+    expect(body()).toContain('Firefox · Windows')
+    segment('浏览器后端', '自动').click()
+    await flushPromises()
+    expect(body()).not.toContain('Firefox 身份？')
+    button('保存').click()
+    await flushPromises()
+    expect(calls.at(-1)?.body).toEqual({ backend: 'auto', confirm_identity_change: false })
   })
 
   it('shows the service error and stays open when saving fails', async () => {

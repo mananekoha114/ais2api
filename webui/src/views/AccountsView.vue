@@ -13,7 +13,7 @@ import { api, describeError, enc, runOperation } from '../api/client'
 import type { Account, ProbeResult, Rotation } from '../api/types'
 import { refreshStatus, service } from '../stores/service'
 import { confirm, notify, notifyError } from '../stores/ui'
-import { accountLabel, accountState, cooldownReason, now } from '../utils/accounts'
+import { accountLabel, accountState, backendLabel, cooldownReason, now } from '../utils/accounts'
 import { formatRelative, formatTimestamp, isIndefinite } from '../utils/format'
 import { usePolling } from '../utils/media'
 
@@ -251,6 +251,7 @@ function menuFor(a: Account): MenuItem[] {
                 >
                   <FIcon name="desktop" :size="12" /> #{{ account.fingerprint.seed }}
                 </span>
+                <span v-if="account.backend" :title="`浏览器后端：${backendLabel(account.backend)}`">{{ backendLabel(account.backend) }}</span>
               </div>
             </div>
             <span class="badge state" :class="accountState(account, clock).tone !== 'neutral' ? accountState(account, clock).tone : ''">

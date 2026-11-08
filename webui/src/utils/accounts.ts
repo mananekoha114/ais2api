@@ -43,6 +43,18 @@ const cooldownKinds: Record<string, string> = {
   rate_limit_model: '模型额度',
 }
 
+const backendNames: Record<string, string> = {
+  cloakbrowser: 'CloakBrowser',
+  auto: '自动（Firefox）',
+  camoufox: 'Camoufox',
+  spidermonkey: 'SpiderMonkey',
+}
+
+/** Display name of a stored account backend. */
+export const backendLabel = (backend: string | undefined) => (backend ? backendNames[backend] ?? backend : '—')
+/** CloakBrowser presents Chrome; every other backend a Firefox identity. */
+export const backendIdentity = (backend: string) => (backend === 'cloakbrowser' ? 'chrome' : 'firefox')
+
 /** Human-readable reason of a stored cooldown kind. */
 export const cooldownReason = (kind: string | undefined) => (kind ? cooldownKinds[kind] ?? kind : '—')
 

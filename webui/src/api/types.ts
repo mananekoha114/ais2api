@@ -39,14 +39,23 @@ export interface Account {
   failures?: Cooldown[]
   /** A Firefox identity is saved for the current seed. */
   firefox_identity?: boolean
+  /** Stored browser backend; empty only before the account settles. */
+  backend?: AccountBackend | ''
   /** Stored per-account browser identity; empty timezone/locale follow the host. */
   fingerprint?: { seed: number; timezone: string; locale: string }
 }
+
+export type AccountBackend = 'cloakbrowser' | 'auto' | 'camoufox' | 'spidermonkey'
 
 /** GET/PATCH /accounts/{id}/fingerprint and POST .../regenerate. */
 export interface FingerprintView {
   seed: number
   platform: string
+  backend: AccountBackend
+  /** Gateway that serves the account; auto runs on Camoufox. */
+  effective_backend: 'cloakbrowser' | 'camoufox'
+  identity: 'chrome' | 'firefox'
+  firefox_identity_saved: boolean
   /** Stored overrides; empty means "follow this computer". */
   timezone: string
   locale: string
