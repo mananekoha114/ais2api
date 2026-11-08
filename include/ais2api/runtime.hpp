@@ -42,6 +42,9 @@ int serve_with_backend(Config config, std::unique_ptr<GenerationBackend> backend
 json::object setup_runtime(Config &config, bool approve_system_changes = false);
 std::vector<std::string> linux_runtime_packages(std::string_view os_release);
 json::object doctor(const Config &config, const fs::path &program_directory = Config::default_directory());
+// This host's runtime platform key, such as "windows-x64", "linux-x64" or
+// "termux-arm64"; empty on a platform setup does not support.
+std::string runtime_platform();
 json::object rollback_runtime(Config &config, const fs::path &program_directory = Config::default_directory());
 void download_verified(std::string_view url, const fs::path &destination, std::string_view digest,
                        std::string_view proxy = {}, std::uint64_t expected_size = 0);

@@ -1702,18 +1702,26 @@ json::array Store::account_status() {
             auto o = summary(decode(s));
             o["expired"] = sqlite3_column_int(s.p, 6) != 0;
             json::array failures;
-            Statement f(impl_->db, "SELECT model,until,count FROM failures WHERE account=?");
+            Statement f(impl_->db, "SELECT model,until,count,kind FROM failures WHERE account=?");
             f.text(1, s.str(0));
             while (f.row())
                 failures.push_back(json::object{{"model", f.str(0)},
                                                 {"until", sqlite3_column_int64(f.p, 1)},
-                                                {"count", sqlite3_column_int(f.p, 2)}});
+                                                {"count", sqlite3_column_int(f.p, 2)},
+                                                {"kind", f.str(3)}});
             o["failures"] = failures;
-            Statement fp(impl_->db, "SELECT seed,timezone,locale FROM fingerprints WHERE account=?");
+            Statement fp(impl_->db, "SELECT seed,timezone,locale,firefox FROM fingerprints WHERE account=?");
             fp.text(1, s.str(0));
-            if (fp.row())
+            if (fp.row()) {
                 o["fingerprint"] = json::object{{"seed", sqlite3_column_int64(fp.p, 0)},
                                                 {"timezone", fp.str(1)}, {"locale", fp.str(2)}};
+                // As firefox_identity(): an identity drawn for an older seed is retired.
+                boost::system::error_code error;
+                const auto identity = fp.str(3).empty() ? json::value() : json::parse(fp.str(3), error);
+                const auto seed = identity.is_object() ? identity.as_object().if_contains("seed") : nullptr;
+                o["firefox_identity"] = !error && seed && (seed->is_int64() || seed->is_uint64()) &&
+                                        seed->to_number<std::int64_t>() == sqlite3_column_int64(fp.p, 0);
+            }
             rows.push_back(o);
         }
         return rows;

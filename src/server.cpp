@@ -6,6 +6,8 @@
 
 #include "ais2api/browser.hpp"
 #include "ais2api/camoufox.hpp"
+#include "ais2api/diagnostics.hpp"
+#include "ais2api/runtime.hpp"
 #include "ais2api/flow.hpp"
 #include "ais2api/retry_policy.hpp"
 #include "ais2api/management.hpp"
@@ -330,6 +332,7 @@ class Service {
         if (action == "stats.reset") { store_.reset_stats(); return {{"ok", true}}; }
         if (action == "models.list" || action == "accounts.probe")
             return maintenance(command);
+        if (action == "diagnostics.report") return diagnostics_report();
         // HTTP may reach only the explicitly allowlisted management routes,
         // behind the separate admin credential. IPC remains owner-only.
         auto cfg = config();
@@ -337,6 +340,21 @@ class Service {
         if (action == "accounts.import")
             discover_models_after_import(result.at("accounts").as_array());
         return result;
+    }
+    json::object diagnostics_report() {
+        const auto cfg = config();
+        DiagnosticsSources sources;
+        sources.status = control({{"command", "status"}});
+        try { sources.browser = gateway_->diagnostics(); }
+        catch (...) { sources.browser = {{"status", "unavailable"}}; }
+        sources.runtime = doctor(cfg);
+        sources.config = cfg;
+        sources.accounts = store_.account_status();
+        sources.events = store_.backend_events();
+        sources.journal = recent_failure_records(journal_);
+        sources.logs = log_sources(cfg.data_dir);
+        sources.platform = runtime_platform();
+        return safe_report(sources);
     }
     // Model reads stay local, so an imported account without a saved catalog
     // gets one background discovery. Best effort: the import already succeeded.
@@ -1378,7 +1396,7 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
         else throw Error(404, "route_not_found", "Unknown management route or method");
     }
     else if (get && path == "/logs/sources") { state.audit = false; result = log_sources(cfg.data_dir); }
-    else if ((get && path == "/diagnostics") || (post && path == "/diagnostics/export")) {
+    else if (get && path == "/diagnostics") {
         result = {{"version", "0.1.0"}, {"build_mode", build_mode()}, {"status", service.control({{"command", "status"}})},
             {"browser", service.control({{"command", "browser.diagnostics"}})},
             {"config", service.control({{"command", "config.show"}})},
@@ -1386,6 +1404,8 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
             {"events", service.control({{"command", "diagnostics.events"}})},
             {"logs", log_sources(cfg.data_dir)}, {"google_verified", false}};
     }
+    // The report users attach to bug reports holds allowlisted fields only.
+    else if (post && path == "/diagnostics/export") result = service.control({{"command", "diagnostics.report"}});
     else if (post && path == "/service/stop") {
         state.response_status = 202;
         co_await send_json(stream, 202, {{"status", "stopping"}}, state.origin);

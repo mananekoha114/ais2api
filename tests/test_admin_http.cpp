@@ -130,6 +130,13 @@ TEST_CASE("management HTTP authentication origins and disabled configuration", "
     REQUIRE(diagnostics.result_int() == 200);
     CHECK(object(diagnostics).at("browser").as_object().at("synthetic") == true);
     CHECK(object(diagnostics).at("events").as_object().contains("backends"));
+    // The export is the allowlisted report, not the administrator's snapshot.
+    auto report = server.send(http::verb::post, "/diagnostics/export");
+    REQUIRE(report.result_int() == 200);
+    CHECK(object(report).at("report") == "ais2api-diagnostics");
+    CHECK(object(report).at("service").at("running") == true);
+    CHECK_FALSE(object(report).contains("config_file"));
+    CHECK(report.body().find(server.admin) == std::string::npos);
     CHECK(server.call(http::verb::get, "/v1/models", {}, server.admin).result_int() == 401);
     CHECK(server.call(http::verb::get, "/api/admin/v1/status", {}, server.admin, "https://denied.example").result_int() == 403);
     auto allowed = server.call(http::verb::get, "/api/admin/v1/status", {}, server.admin, "https://allowed.example");

@@ -122,7 +122,7 @@ void help() {
                  "  accounts list | import (--file PATH | --stdin) [--name NAME]\n"
                  "  accounts select ID | remove ID | reset ID | probe (ID | all)\n"
                  "  keys list (edit api_key in config.json to set or rotate)\n"
-                 "  stats | models list | config show | config validate | config reload\n"
+                 "  stats | diagnostics | models list | config show | config validate | config reload\n"
                  "  operations status ID\n\n"
                  "Global options: --config PATH --data-dir PATH --bind ADDRESS --port PORT\n"
                  "  --browser PATH --proxy URL --browser-proxy-relay=true|false\n"
@@ -377,6 +377,10 @@ json::object execute(Arguments args) {
     if (command == "stats") {
         count(1, 1);
         return dispatch(config, {{"command", "stats"}});
+    }
+    if (command == "diagnostics") {
+        count(1, 1);
+        return dispatch(config, {{"command", "diagnostics.report"}});
     }
     if (command == "config") {
         count(2, 2);

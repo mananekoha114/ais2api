@@ -5,7 +5,10 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/management.hpp"
+#include "ais2api/diagnostics.hpp"
+#include "ais2api/log_sources.hpp"
 #include "ais2api/region.hpp"
+#include "ais2api/runtime.hpp"
 #include <algorithm>
 #include <cctype>
 
@@ -19,7 +22,7 @@ std::string identifier(const json::object& command) {
 
 json::object account_summary(const json::object& input) {
     json::object output;
-    for (auto key : {"id", "name", "email", "auth_user", "disabled", "expired", "failures", "fingerprint"}) {
+    for (auto key : {"id", "name", "email", "auth_user", "disabled", "expired", "failures", "fingerprint", "firefox_identity"}) {
         if (auto value = input.if_contains(key)) output[key] = *value;
     }
     return output;
@@ -146,6 +149,18 @@ json::object manage(Store& store, Config& config, const json::object& command) {
                     "Edit api_key in config.json, then run config reload or restart; clear it to revoke access");
     if (name == "stats") return store.stats();
     if (name == "diagnostics.events") return store.backend_events();
+    if (name == "diagnostics.report") {
+        // The service is not running: no service status or browser state.
+        DiagnosticsSources sources;
+        sources.runtime = doctor(config);
+        sources.config = config;
+        sources.accounts = store.account_status();
+        sources.events = store.backend_events();
+        sources.journal = recent_failure_records(logs::Journal(config.data_dir));
+        sources.logs = log_sources(config.data_dir);
+        sources.platform = runtime_platform();
+        return safe_report(sources);
+    }
     if (name == "config.show") {
         json::value value(config.to_json());
         redact(value);

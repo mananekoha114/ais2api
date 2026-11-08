@@ -450,6 +450,7 @@ void write_selection(const fs::path &data_dir, const CamoufoxSelection &selectio
                                               {"held", selection.held}}));
 }
 } // namespace
+std::string runtime_platform() { return host_platform(); }
 std::optional<CamoufoxPin> camoufox_pin(const json::object &manifest, std::string_view platform) {
     const auto *camoufox = manifest.if_contains("camoufox");
     if (!camoufox) return std::nullopt;
