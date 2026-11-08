@@ -325,9 +325,11 @@ Account runtime_account(const Config& config, Store& store, const std::string& t
 std::set<std::string> linux_font_faces() {
     std::set<std::string> families;
     const auto catalog = fs::path(AIS2API_SOURCE_DIR) / "browser" / "camoufox";
-    for (const auto* file : {"font-bases.json", "font-groups.json"})
-        for (const auto& entry : json::parse(read_file(catalog / file, 1 << 22)).at("lin").as_array())
+    for (const auto* file : {"font-bases.json", "font-groups.json"}) {
+        const auto document = json::parse(read_file(catalog / file, 1 << 22));
+        for (const auto& entry : document.at("lin").as_array())
             for (const auto& family : entry.at("fonts").as_array()) families.emplace(family.as_string());
+    }
     return families;
 }
 #endif
