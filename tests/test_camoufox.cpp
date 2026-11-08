@@ -377,12 +377,23 @@ TEST_CASE("a generated identity is what the page reads", "[.camoufox-runtime]") 
         INFO(json::serialize(font));
         CHECK(std::find(claimed.begin(), claimed.end(), font) != claimed.end());
     }
+    // Canvas and WebGL read a drawing back alike each time and launch after
+    // launch: none of the random readback that keeps a Linux host from
+    // presenting another OS.
+    const auto& readback = page.at("readback").as_object();
+    for (const auto* kind : {"canvas", "webgl"}) {
+        INFO(kind);
+        const auto& reads = readback.at(kind).as_array();
+        CHECK_FALSE(reads.at(0).is_null());
+        CHECK(reads.at(0) == reads.at(1));
+    }
 
     // Stored with the seed, and launched again as it was.
     const auto stored = store.firefox_identity(account.id);
     REQUIRE(stored);
     const auto again = gateway.verify_identity(account.id);
     CHECK(again.at("expected") == result.at("expected"));
+    CHECK(again.at("page").at("readback") == page.at("readback"));
     CHECK(store.firefox_identity(account.id) == stored);
 }
 

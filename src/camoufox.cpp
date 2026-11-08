@@ -360,13 +360,46 @@ constexpr std::string_view read_identity = R"((async (families) => {
   });
   const gl = document.createElement('canvas').getContext('webgl');
   const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
+  // One drawing read back from a new canvas each time, hashed (FNV-1a).
+  const hash = (bytes) => { let h = 0x811c9dc5; for (const b of bytes) h = Math.imul(h ^ b, 0x01000193) >>> 0; return h.toString(16); };
+  const draw2d = () => {
+    const c = document.createElement('canvas');
+    c.width = 240; c.height = 60;
+    const g = c.getContext('2d');
+    const gradient = g.createLinearGradient(0, 0, 240, 0);
+    gradient.addColorStop(0, '#f60'); gradient.addColorStop(1, '#069');
+    g.fillStyle = gradient; g.fillRect(0, 0, 240, 60);
+    g.fillStyle = '#fff'; g.font = '18px sans-serif'; g.fillText('ais2api \u263a', 8, 36);
+    g.beginPath(); g.arc(200, 30, 20, 0, Math.PI * 2); g.stroke();
+    return hash(g.getImageData(0, 0, 240, 60).data);
+  };
+  const drawWebgl = () => {
+    const c = document.createElement('canvas');
+    c.width = 64; c.height = 64;
+    const w = c.getContext('webgl', { preserveDrawingBuffer: true });
+    if (!w) return null;
+    const shader = (type, source) => { const s = w.createShader(type); w.shaderSource(s, source); w.compileShader(s); return s; };
+    const program = w.createProgram();
+    w.attachShader(program, shader(w.VERTEX_SHADER, 'attribute vec2 p; varying vec2 v; void main() { v = p; gl_Position = vec4(p, 0.0, 1.0); }'));
+    w.attachShader(program, shader(w.FRAGMENT_SHADER, 'precision mediump float; varying vec2 v; void main() { gl_FragColor = vec4(v * 0.5 + 0.5, sin(v.x * 7.0) * 0.5 + 0.5, 1.0); }'));
+    w.linkProgram(program); w.useProgram(program);
+    w.bindBuffer(w.ARRAY_BUFFER, w.createBuffer());
+    w.bufferData(w.ARRAY_BUFFER, new Float32Array([-0.9, -0.9, 0.9, -0.7, 0.1, 0.9]), w.STATIC_DRAW);
+    const location = w.getAttribLocation(program, 'p');
+    w.enableVertexAttribArray(location); w.vertexAttribPointer(location, 2, w.FLOAT, false, 0, 0);
+    w.clearColor(0, 0, 0, 1); w.clear(w.COLOR_BUFFER_BIT); w.drawArrays(w.TRIANGLES, 0, 3);
+    const pixels = new Uint8Array(64 * 64 * 4);
+    w.readPixels(0, 0, 64, 64, w.RGBA, w.UNSIGNED_BYTE, pixels);
+    return hash(pixels);
+  };
   return { userAgent: navigator.userAgent, platform: navigator.platform, oscpu: navigator.oscpu,
     hardwareConcurrency: navigator.hardwareConcurrency, maxTouchPoints: navigator.maxTouchPoints,
     language: navigator.language, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     screen: [screen.width, screen.height],
     webgl: info ? [gl.getParameter(info.UNMASKED_VENDOR_WEBGL), gl.getParameter(info.UNMASKED_RENDERER_WEBGL)] : null,
     voices: voices.map((voice) => voice.name),
-    fonts: { detected, widths, families: Object.fromEntries(families.map((family, f) => [family, measured[f]])) } };
+    fonts: { detected, widths, families: Object.fromEntries(families.map((family, f) => [family, measured[f]])) },
+    readback: { canvas: [draw2d(), draw2d()], webgl: [drawWebgl(), drawWebgl()] } };
 }))";
 // The same readings from a launch configuration.
 json::object expected_identity(const json::object& config) {
