@@ -85,6 +85,10 @@ RUN triplet=$(cat /tmp/vcpkg-triplet) \
 # The runtime image carries the tested CMake install tree and Debian Chromium.
 # CloakBrowser is not included: its binary license does not permit
 # redistribution. A private image or a read-only mount can provide it.
+# Camoufox is not included either: it is about 1.3 GB, and only accounts on a
+# Firefox backend need it. The image carries the packages it runs with (Xvfb
+# among them), and the entrypoint installs Camoufox into the data volume the
+# first time it is needed.
 FROM debian:13-slim AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -97,8 +101,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       chromium \
       curl \
+      fontconfig \
       fonts-noto-cjk \
       fonts-noto-color-emoji \
+      libasound2t64 \
+      libdbus-1-3 \
+      libegl1 \
+      libgl1-mesa-dri \
+      libgtk-3-0t64 \
+      libx11-xcb1 \
+      xvfb \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /data
 
