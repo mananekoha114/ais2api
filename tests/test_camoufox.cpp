@@ -10,6 +10,7 @@
 #include "ais2api/runtime.hpp"
 #include "ais2api/store.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 
@@ -147,7 +148,7 @@ TEST_CASE("identity salts mix the installation secret, the account and its seed"
     CHECK(identity_salt("a", "bc", 1) != identity_salt("ab", "c", 1));
 }
 
-TEST_CASE("the Camoufox gateway needs the fpgen model and a Camoufox executable", "[camoufox][identity]") {
+TEST_CASE("the Camoufox gateway needs the fpgen model and Camoufox", "[camoufox][identity]") {
     Directory directory;
     Config config;
     config.data_dir = directory.path;
@@ -178,10 +179,15 @@ TEST_CASE("the Camoufox gateway needs the fpgen model and a Camoufox executable"
     INFO(launch);
     CHECK(launch.starts_with("browser_not_configured: Camoufox "));
     CHECK(launch.find("is missing beside the executable") != std::string::npos);
+    // CloakBrowser's executable is not Camoufox: the backend looks for the
+    // build setup installs instead.
     config.browser_executable = directory.path / "chrome.exe";
     write(config.browser_executable, "");
     CamoufoxGateway chromium(config, store);
-    CHECK(failure([&] { chromium.verify_runtime(); }).starts_with("browser_not_configured"));
+    CHECK(failure([&] { chromium.verify_runtime(); }) == "browser_not_configured: Camoufox is not installed: run ais2api setup");
+    config.browser_executable = directory.path / "missing" / "camoufox.exe";
+    CamoufoxGateway missing(config, store);
+    CHECK(failure([&] { missing.verify_runtime(); }).starts_with("browser_not_configured: browser_executable names a Camoufox"));
     CHECK_FALSE(bool_or(gateway.diagnostics(), "running"));
     CHECK(string_or(gateway.diagnostics(), "backend") == "camoufox");
 }
@@ -231,33 +237,44 @@ TEST_CASE("Camoufox runs the bridge with BYOB reads and trusted keys", "[.camouf
     CHECK(retained_log);
 }
 
-// Hidden by default: select it with a prepared Camoufox executable and the
-// fpgen model's directory. It opens only local pages.
-TEST_CASE("a generated identity is what the page reads", "[.camoufox-runtime]") {
-    const auto executable = std::getenv("AIS2API_TEST_CAMOUFOX");
+namespace {
+// Copies the fpgen model from AIS2API_TEST_FPGEN_MODEL where setup installs
+// it, and stores an account in the region given.
+Account runtime_account(const Config& config, Store& store, const std::string& timezone, const std::string& locale) {
     const auto model = std::getenv("AIS2API_TEST_FPGEN_MODEL");
-    REQUIRE(executable != nullptr);
     REQUIRE(model != nullptr);
-    Directory directory;
-    Config config;
-    config.data_dir = directory.path;
-    config.browser_executable = fs::u8path(executable);
-    config.headless = std::getenv("AIS2API_TEST_CAMOUFOX_HEADED") == nullptr;
     const auto pin = fpgen_model_pin();
     const auto installed = fpgen_model_directory(config.data_dir, pin);
     fs::create_directories(installed);
     for (const auto& [name, digest] : pin.file_sha256) fs::copy_file(fs::u8path(model) / name, installed / name);
-    Store store(config.data_dir);
     Account account;
     account.id = "acc_runtime";
     account.email = "runtime@example.com";
     account.auth_user = "0";
     account.storage_state = {{"cookies", json::array{json::object{{"name", "SID"}, {"value", "v"}, {"domain", ".google.com"}, {"path", "/"}}}}};
     store.put_account(account);
-    store.set_fingerprint_region(account.id, "Asia/Shanghai", "zh-CN");
+    store.set_fingerprint_region(account.id, timezone, locale);
+    return account;
+}
+// Families no Windows identity has. The Camoufox build bundles each of them.
+const std::vector<std::string> foreign_fonts{"PingFang SC", "Helvetica Neue", "Apple Color Emoji", "Noto Sans", "DejaVu Sans", "Ubuntu"};
+} // namespace
+
+// Hidden by default: select it with a prepared Camoufox executable and the
+// fpgen model's directory. It opens only local pages.
+TEST_CASE("a generated identity is what the page reads", "[.camoufox-runtime]") {
+    const auto executable = std::getenv("AIS2API_TEST_CAMOUFOX");
+    REQUIRE(executable != nullptr);
+    Directory directory;
+    Config config;
+    config.data_dir = directory.path;
+    config.browser_executable = fs::u8path(executable);
+    config.headless = std::getenv("AIS2API_TEST_CAMOUFOX_HEADED") == nullptr;
+    Store store(config.data_dir);
+    const auto account = runtime_account(config, store, "Asia/Shanghai", "zh-CN");
     CamoufoxGateway gateway(config, store);
 
-    const auto result = gateway.verify_identity(account.id);
+    const auto result = gateway.verify_identity(account.id, {}, foreign_fonts);
     INFO(json::serialize(result));
     const auto& expected = result.at("expected").as_object();
     const auto& page = result.at("page").as_object();
@@ -271,6 +288,14 @@ TEST_CASE("a generated identity is what the page reads", "[.camoufox-runtime]") 
     const auto& identity = result.at("identity").as_object();
     CHECK(string_or(identity, "hostGpu") == "unchanged");
     CHECK(identity.at("droppedProperties").as_array().empty());
+    // The page finds only fonts the identity claims.
+    const auto& claimed = result.at("claimedFonts").as_array();
+    const auto& detected = page.at("fonts").as_object().at("detected").as_array();
+    CHECK_FALSE(detected.empty());
+    for (const auto& font : detected) {
+        INFO(json::serialize(font));
+        CHECK(std::find(claimed.begin(), claimed.end(), font) != claimed.end());
+    }
 
     // Stored with the seed, and launched again as it was.
     const auto stored = store.firefox_identity(account.id);
@@ -278,4 +303,56 @@ TEST_CASE("a generated identity is what the page reads", "[.camoufox-runtime]") 
     const auto again = gateway.verify_identity(account.id);
     CHECK(again.at("expected") == result.at("expected"));
     CHECK(store.firefox_identity(account.id) == stored);
+}
+
+// Hidden by default: select it with the Camoufox setup installed
+// (AIS2API_TEST_CAMOUFOX), the full build it came from
+// (AIS2API_TEST_CAMOUFOX_FULL, as camoufox-dev.py fetch leaves it) and the
+// fpgen model's directory. It opens only local pages.
+TEST_CASE("Camoufox without its bundled fonts renders text as the full build does", "[.camoufox-fonts]") {
+    const auto trimmed = std::getenv("AIS2API_TEST_CAMOUFOX");
+    const auto full = std::getenv("AIS2API_TEST_CAMOUFOX_FULL");
+    REQUIRE(trimmed != nullptr);
+    REQUIRE(full != nullptr);
+    REQUIRE(fs::is_directory(fs::u8path(full).parent_path() / "fonts"));
+    // setup keeps only the emoji font.
+    REQUIRE(std::distance(fs::directory_iterator(fs::u8path(trimmed).parent_path() / "fonts"), fs::directory_iterator()) == 1);
+    Directory directory;
+    Config config;
+    config.data_dir = directory.path;
+    config.headless = std::getenv("AIS2API_TEST_CAMOUFOX_HEADED") == nullptr;
+    Store store(config.data_dir);
+    // Japanese text falls back across more families than English.
+    const auto account = runtime_account(config, store, "Asia/Tokyo", "ja-JP");
+    const auto read = [&](const char* executable) {
+        config.browser_executable = fs::u8path(executable);
+        CamoufoxGateway gateway(config, store);
+        return gateway.verify_identity(account.id, {}, foreign_fonts);
+    };
+    // The same stored identity in both.
+    const auto a = read(trimmed), b = read(full);
+    CHECK(a.at("expected") == b.at("expected"));
+    const auto& page = a.at("page").as_object();
+    const auto& reference = b.at("page").as_object();
+    CHECK(page.size() == reference.size());
+    for (const auto& item : page) {
+        INFO(std::string(item.key()));
+        if (item.key() != "fonts") CHECK(item.value() == reference.at(item.key()));
+    }
+    const auto& fonts = page.at("fonts").as_object();
+    const auto& reference_fonts = reference.at("fonts").as_object();
+    const auto missing = [](const json::value& found, const json::value& from) {
+        json::array result;
+        for (const auto& font : from.as_array())
+            if (std::find(found.as_array().begin(), found.as_array().end(), font) == found.as_array().end()) result.push_back(font);
+        return json::serialize(result);
+    };
+    INFO("found only in the full build: " << missing(fonts.at("detected"), reference_fonts.at("detected")));
+    INFO("found only without the bundled fonts: " << missing(reference_fonts.at("detected"), fonts.at("detected")));
+    CHECK(fonts.at("detected") == reference_fonts.at("detected"));
+    for (const auto* key : {"widths", "families"})
+        for (const auto& width : reference_fonts.at(key).as_object()) {
+            INFO(key << ": " << std::string(width.key()));
+            CHECK(fonts.at(key).as_object().at(width.key()) == width.value());
+        }
 }

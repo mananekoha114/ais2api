@@ -7,12 +7,16 @@
 #pragma once
 #include "ais2api/common.hpp"
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <string_view>
 namespace ais2api::download_detail {
 struct Options {
     unsigned connections = 4;
     fs::path ca_file;
+    // Before the attempt after an interrupted one, doubled for each further
+    // failure without progress.
+    std::chrono::milliseconds retry_delay{1000};
 };
 void download_with_options(std::string_view url, const fs::path &destination,
                            std::string_view digest, std::string_view proxy,

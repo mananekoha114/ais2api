@@ -314,9 +314,14 @@ std::optional<Line> describe(const json::object &r) {
         line.title = "日志已轮转";
     } else if (event == "setup_stage") {
         line.title = setup_stage(text_of(r, "stage"));
+        line.add(text_of(r, "browser"));
         line.add(text_of(r, "browser_version"));
         line.add(text_of(r, "platform"));
         line.add(text_of(r, "fpgen_model"));
+    } else if (event == "setup_download_interrupted") {
+        line.level = Level::note;
+        line.title = "下载中断，稍后续传";
+        line.add(text_of(r, "reason"));
     } else if (event == "setup_download") {
         const auto received = integer(r, "received_bytes"), total = integer(r, "maximum_bytes");
         line.title = "下载中";

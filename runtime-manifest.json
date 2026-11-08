@@ -19,6 +19,16 @@
       "size": 208053005
     }
   },
+  "camoufox": {
+    "version": "158.0.1-beta.41",
+    "artifacts": {
+      "windows-x64": {
+        "url": "https://github.com/daijro/camoufox/releases/download/v158.0.1-beta.41/camoufox-158.0.1-beta.41-win.x86_64.zip",
+        "sha256": "2644bd14f1cc345c768f6a70b576bcc87eb3d0bf0df54856d6fe0bbc3027515f",
+        "size": 1320075455
+      }
+    }
+  },
   "fpgen_model": {
     "tag": "model-2/2026",
     "url": "https://github.com/scrapfly/fingerprint-generator/releases/download/model-2/2026/model-release.zip",

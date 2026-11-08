@@ -51,7 +51,7 @@ doctor=$("$program" doctor "$@")
 case $doctor in
   *'"browser_exists":true'*) ;;
   *)
-    echo "尚未准备浏览器。setup 会下载浏览器，并安装所需的系统依赖（Linux 可能通过 sudo 使用 apt-get，Termux 会创建 proot Ubuntu 容器）。"
+    echo "浏览器尚未准备或需要更新。setup 会下载浏览器，并安装所需的系统依赖（Linux 可能通过 sudo 使用 apt-get，Termux 会创建 proot Ubuntu 容器）。"
     if [ ! -t 0 ]; then
       echo "请在终端中确认后运行：\"$program\" setup --yes" >&2
       exit 1

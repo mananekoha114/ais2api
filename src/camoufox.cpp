@@ -245,7 +245,26 @@ constexpr std::string_view read_gpu = R"((() => {
   return info ? [gl.getParameter(info.UNMASKED_VENDOR_WEBGL), gl.getParameter(info.UNMASKED_RENDERER_WEBGL)] : null;
 })())";
 // What an identity sets, as a page reads it.
-constexpr std::string_view read_identity = R"((async () => {
+// A family is found as fingerprinting scripts find it: text set in the family,
+// with a generic fallback, measures differently from the fallback alone.
+constexpr std::string_view read_identity = R"((async (families) => {
+  const context = document.createElement('canvas').getContext('2d');
+  const measure = (font, text) => { context.font = font; return context.measureText(text).width; };
+  const generics = ['monospace', 'serif', 'sans-serif'];
+  const probe = 'mmmmmmmmmmlli1WwQ@#\u4e2d\u6587\u3042\ud83d\ude00';
+  const base = generics.map((generic) => measure('32px ' + generic, probe));
+  const measureAll = () => families.map((family) => generics.map((generic) => measure('32px ' + JSON.stringify(family) + ', ' + generic, probe)));
+  // Firefox loads localized family names after a lookup misses one, so what
+  // the first pass finds depends on timing; the second finds them loaded.
+  measureAll();
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  const measured = measureAll();
+  const detected = families.filter((family, f) => measured[f].some((width, i) => width !== base[i]));
+  const samples = { latin: 'The quick brown fox 0123456789', cjk: '\u4e2d\u6587\u65e5\u672c\u8a9e\ud55c\uad6d\uc5b4',
+    emoji: '\ud83d\ude00\ud83d\udc4d\ud83c\udffd\ud83c\uddef\ud83c\uddf5', symbols: '\u2603\u2665\u221e\u2211' };
+  const widths = {};
+  for (const generic of generics)
+    for (const [name, text] of Object.entries(samples)) widths[generic + ':' + name] = measure('32px ' + generic, text);
   const voices = await new Promise((resolve) => {
     if (speechSynthesis.getVoices().length) return resolve(speechSynthesis.getVoices());
     const timer = setTimeout(() => resolve(speechSynthesis.getVoices()), 2000);
@@ -258,8 +277,9 @@ constexpr std::string_view read_identity = R"((async () => {
     language: navigator.language, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     screen: [screen.width, screen.height],
     webgl: info ? [gl.getParameter(info.UNMASKED_VENDOR_WEBGL), gl.getParameter(info.UNMASKED_RENDERER_WEBGL)] : null,
-    voices: voices.map((voice) => voice.name) };
-})())";
+    voices: voices.map((voice) => voice.name),
+    fonts: { detected, widths, families: Object.fromEntries(families.map((family, f) => [family, measured[f]])) } };
+}))";
 // The same readings from a launch configuration.
 json::object expected_identity(const json::object& config) {
     const auto value = [&](std::string_view key) { const auto* found = config.if_contains(key); return found ? *found : json::value(nullptr); };
@@ -297,6 +317,9 @@ struct CamoufoxGateway::Impl {
     std::string last_status = "not_started";
     std::string phase = "idle";
     std::string browser_name, browser_version, user_agent;
+    // The executable the last launch resolved, and the version the manifest pins.
+    CamoufoxExecutable executable;
+    std::string pinned_version;
     // Camoufox applies an identity per process, so the running browser is tied
     // to the identity it was launched with. No identity: verify_runtime and
     // the host GPU probe.
@@ -364,13 +387,24 @@ struct CamoufoxGateway::Impl {
         if (!root.empty()) { std::error_code ec; fs::remove_all(root, ec); root.clear(); }
         last_status = "closed";
     }
-    void check_executable() const {
-        if (config.browser_executable.empty() || !fs::is_regular_file(config.browser_executable))
-            throw Error(503, "browser_not_configured", "Configure browser_executable as the Camoufox executable");
-        if (lower(path_utf8(config.browser_executable.stem())) != "camoufox")
-            throw Error(503, "browser_not_configured", "browser_backend camoufox needs browser_executable to name the Camoufox executable (camoufox.exe)");
+    // Resolved again for each launch: setup may have installed or rolled back
+    // Camoufox meanwhile.
+    void check_executable() {
+        auto found = camoufox_executable(config);
+        if (found.path.empty())
+            throw Error(503, "browser_not_configured", "Camoufox is not installed: run ais2api setup");
+        std::error_code error;
+        if (!fs::is_regular_file(found.path, error))
+            throw Error(503, "browser_not_configured", "browser_executable names a Camoufox executable that does not exist");
+        executable = std::move(found);
+        try {
+            const auto pin = camoufox_pin();
+            pinned_version = pin ? pin->version : "";
+        } catch (const std::exception&) {
+            pinned_version.clear();
+        }
     }
-    fs::path browser_directory() const { return config.browser_executable.parent_path(); }
+    fs::path browser_directory() const { return executable.path.parent_path(); }
     // Opens a page in a new user context on a local document.
     void open_local_page(std::string_view html, bool bridge, std::stop_token token) {
         user_context = string_or(bidi->call("browser.createUserContext", {}, token), "userContext");
@@ -387,6 +421,7 @@ struct CamoufoxGateway::Impl {
     // preferences an identity launches with, as the Python launcher's
     // host_gpu does.
     std::optional<firefox_identity::Gpu> host_gpu(std::stop_token token) {
+        check_executable();
         const auto version = firefox_identity::browser_version(browser_directory());
         if (host && host->browser == version && host->headless == config.headless) return host->gpu;
         ensure_browser(token, {});
@@ -604,7 +639,7 @@ struct CamoufoxGateway::Impl {
             std::vector<std::string> args{"--remote-debugging-port", "0", "-no-remote", "-wait-for-browser", "-profile", path_utf8(fs::absolute(profile))};
             if (config.headless) args.emplace_back("-headless");
             args.emplace_back("about:blank");
-            process.start(config.browser_executable, args, root, options);
+            process.start(executable.path, args, root, options);
             const auto deadline = Clock::now() + 45s;
             unsigned short port = 0;
             while (!port) {
@@ -879,7 +914,8 @@ json::object CamoufoxGateway::verify_runtime(std::stop_token cancel) {
         return result;
     } catch (...) { impl_->close(); throw; }
 }
-json::object CamoufoxGateway::verify_identity(std::string_view account_id, std::stop_token cancel) {
+json::object CamoufoxGateway::verify_identity(std::string_view account_id, std::stop_token cancel,
+                                              const std::vector<std::string>& probe_fonts) {
     std::lock_guard lock(impl_->mutex);
     try {
         Account account;
@@ -894,11 +930,16 @@ json::object CamoufoxGateway::verify_identity(std::string_view account_id, std::
         // first one that asks for them.
         impl_->eval("speechSynthesis.getVoices().length", cancel);
         impl_->navigate_local("<title>ais2api identity</title>", cancel);
-        auto page = impl_->eval(std::string(read_identity), cancel);
+        json::array claimed;
+        if (const auto* fonts = impl_->launched_config.if_contains("fonts"); fonts && fonts->is_array()) claimed = fonts->as_array();
+        auto families = claimed;
+        for (const auto& font : probe_fonts) families.emplace_back(font);
+        auto page = impl_->eval(std::string(read_identity) + "(" + json::serialize(families) + ")", cancel);
         impl_->dispose_context(cancel);
         json::object result{{"product", impl_->browser_name + "/" + impl_->browser_version}, {"google_verified", false},
                             {"identity", impl_->identity_summary(*identity.identity)}, {"hostGpu", gpu_json(host)},
-                            {"expected", expected_identity(impl_->launched_config)}, {"page", std::move(page)}};
+                            {"expected", expected_identity(impl_->launched_config)}, {"claimedFonts", std::move(claimed)},
+                            {"page", std::move(page)}};
         impl_->close();
         return result;
     } catch (...) { impl_->close(); throw; }
@@ -942,7 +983,8 @@ json::object CamoufoxGateway::diagnostics() {
     json::value fingerprint = nullptr, identity = nullptr, browser = nullptr;
     if (launched) {
         fingerprint = json::object{{"seed", launched->seed}, {"timezone", launched->timezone}, {"locale", launched->locale}};
-        browser = json::object{{"name", impl_->browser_name}, {"version", impl_->browser_version}};
+        browser = json::object{{"name", impl_->browser_name}, {"version", impl_->browser_version},
+                               {"source", impl_->executable.source}, {"pinned", impl_->pinned_version}};
         if (launched->identity) {
             fingerprint.as_object()["platform"] = firefox_identity::os_name(launched->identity->os);
             identity = impl_->identity_summary(*launched->identity);
