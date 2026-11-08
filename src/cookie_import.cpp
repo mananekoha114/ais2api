@@ -142,6 +142,8 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
             record_duration();
             check_cancel(token);
             if (e.status == 499 || e.code == "cancelled") throw Error(499, "cancelled", "Request cancelled");
+            if (e.code == "terms_required")
+                throw Error(409, "cookie_terms_required", "AI Studio asks this account to accept its terms; accept them in a normal browser, then import again");
             if (e.code == "identity_unverified" || e.code == "identity_mismatch")
                 throw Error(409, "identity_unverified", "Cookie account identity could not be verified");
             if (e.code == "region_blocked" || e.code == "cookie_region_blocked")

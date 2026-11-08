@@ -550,6 +550,8 @@ class Service {
                                  // prove expiry; other auth failures cool down.
                                  if (e.code == "session_expired" || e.code == "missing_cookies")
                                      store_.failure(a.id, "probe", "login_expired");
+                                 else if (e.code == "terms_required")
+                                     store_.failure(a.id, "probe", "terms_required");
                                  else if (e.status == 401)
                                      store_.failure(a.id, "probe", "auth");
                                  if (!id.empty() || e.code == "cancelled")

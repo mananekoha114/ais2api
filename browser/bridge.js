@@ -220,7 +220,24 @@
       for (const match of label.matchAll(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig)) emails.add(match[0].toLowerCase());
     }
     const pageReady = url.hostname === 'aistudio.google.com' && !login && document.readyState === 'complete';
-    return { login, regionBlocked: url.pathname.includes('available-regions'), ready: pageReady && !!document.querySelector('textarea'), identityReady: pageReady && emails.size === 1, email: emails.size === 1 ? [...emails][0] : '', identityAmbiguous: emails.size > 1 };
+    return { login, regionBlocked: url.pathname.includes('available-regions'), ready: pageReady && !!document.querySelector('textarea'), identityReady: pageReady && emails.size === 1, email: emails.size === 1 ? [...emails][0] : '', identityAmbiguous: emails.size > 1, termsRequired: termsDialog(url) };
+  }
+  // AI Studio can open a modal that asks the account to accept its terms. The
+  // page behind it is aria-hidden, so the account badge never appears; report
+  // the dialog so the gateway fails at once. It is never agreed to here.
+  function termsDialog(url) {
+    for (const dialog of document.querySelectorAll('mat-dialog-container, cdk-dialog-container, [role="dialog"], [role="alertdialog"]')) {
+      if (typeof dialog.getClientRects === 'function' && dialog.getClientRects().length === 0) continue;
+      const links = typeof dialog.querySelectorAll === 'function' ? [...dialog.querySelectorAll('a[href]')] : [];
+      if (links.some(el => {
+        try {
+          const target = new URL(el.getAttribute('href'), url.href);
+          return /(^|\.)google\.(com|dev)$/.test(target.hostname) && /\/terms(\/|$)/.test(target.pathname);
+        } catch (_) { return false; }
+      })) return true;
+      if (/terms of service|additional terms|服务条款/i.test(dialog.innerText || dialog.textContent || '')) return true;
+    }
+    return false;
   }
   const controlLabel = el => (el.innerText || el.getAttribute('aria-label') || '').trim();
   // Overlays such as welcome or announcement dialogs are only ever dismissed:

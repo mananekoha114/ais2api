@@ -256,6 +256,31 @@ test('identity probe reports ambiguity and Google sign-in redirects', () => {
   assert.equal(h.bridge.identity().ready, false); h.bridge.dispose();
 });
 
+test('identity probe reports an AI Studio terms dialog and nothing else', () => {
+  const h = harness();
+  const link = href => ({ getAttribute: name => name === 'href' ? href : null });
+  const modal = ({ text = '', links = [], shown = true } = {}) => ({
+    innerText: text, clicks: 0, getClientRects: () => shown ? [{}] : [],
+    querySelectorAll: selector => selector === 'a[href]' ? links : selector === 'button' ? [control('Continue')] : []
+  });
+  let dialogs = [];
+  h.context.document.querySelectorAll = selector => selector.includes('[role="dialog"]') ? dialogs : [];
+  assert.equal(h.bridge.identity().termsRequired, false);
+  dialogs = [modal({ text: 'What is new in AI Studio', links: [link('https://blog.google/technology/')] })];
+  assert.equal(h.bridge.identity().termsRequired, false);
+  dialogs = [modal({ text: 'Welcome to AI Studio', links: [link('https://ai.google.dev/gemini-api/terms')] })];
+  assert.equal(h.bridge.identity().termsRequired, true);
+  dialogs = [modal({ text: '继续即表示您同意 Gemini API 附加服务条款' })];
+  assert.equal(h.bridge.identity().termsRequired, true);
+  dialogs = [modal({ links: [link('https://policies.google.com/terms?hl=en')] })];
+  assert.equal(h.bridge.identity().termsRequired, true);
+  // Look-alike hosts, other paths and closed dialogs are not the terms modal.
+  dialogs = [modal({ links: [link('https://google.com.example.com/terms'), link('https://policies.google.com/termsfeed')] }),
+             modal({ text: 'Additional Terms of Service', shown: false })];
+  assert.equal(h.bridge.identity().termsRequired, false);
+  h.bridge.dispose();
+});
+
 test('a textarea on any other origin cannot make the account ready', () => {
   const h = harness();
   assert.equal(h.bridge.identity().ready, true);

@@ -970,8 +970,10 @@ void Store::failure(std::string_view id, std::string_view model, std::string_vie
                 s.text(1, id);
                 s.row();
             } else {
-                // Authentication trouble affects every model of the account.
-                std::string m = (kind == "429" || kind == "rate_limit" || kind == "auth") ? "*" : std::string(model);
+                // Authentication trouble and pending AI Studio terms affect
+                // every model of the account.
+                std::string m = (kind == "429" || kind == "rate_limit" || kind == "auth" || kind == "terms_required")
+                    ? "*" : std::string(model);
                 Statement prior(impl_->db,
                                 "SELECT count FROM failures WHERE account=? AND model=?");
                 prior.text(1, id);
@@ -996,6 +998,9 @@ void Store::failure(std::string_view id, std::string_view model, std::string_vie
                     base_delay = minute || quota_count <= 2 ? 60u : quota_count <= 4 ? 300u : 600u;
                 } else {
                     if (kind == "permission_temporary" || kind == "auth") base_delay = 300;
+                    // Only the account's owner can accept the terms; retrying
+                    // sooner just reopens the dialog.
+                    if (kind == "terms_required") base_delay = 3600;
                     Statement active_quota(impl_->db, "SELECT cooldown_until FROM quota_counters WHERE account=? AND model=?");
                     active_quota.text(1, id); active_quota.text(2, m);
                     if (active_quota.row()) quota_deadline = sqlite3_column_int64(active_quota.p, 0);

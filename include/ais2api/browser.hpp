@@ -15,6 +15,23 @@ std::string_view embedded_bridge_sha256();
 std::string wire_content_hash(const json::array &wire);
 enum class IdentityVerdict { pending, verified, mismatch, ambiguous };
 IdentityVerdict identity_verdict(const json::object &identity, std::string_view expected_email);
+// What the page identity probe proves at once: a sign-in page (unless the
+// caller tolerates one while navigating), a region block, and an AI Studio
+// terms dialog, which only the account's owner may accept.
+void check_identity(const json::object &identity, bool allow_login);
+// How a gateway reads the account page. `bridge_ready` and `identity` take a
+// timeout; `identity` returns the probe already passed through check_identity
+// with sign-in allowed. `timed_out` runs before the final error.
+struct IdentityPage {
+    std::function<bool(std::chrono::seconds)> bridge_ready;
+    std::function<json::object(std::chrono::seconds)> identity;
+    std::function<void()> pause;
+    std::function<void()> timed_out = {};
+};
+// Waits up to 60 s until the page shows exactly the account's identity and,
+// with `require_editor`, the prompt editor.
+void await_account_identity(const IdentityPage &page, std::string_view expected_email, bool require_editor,
+                            std::stop_token token);
 json::array import_cookies(const json::array &cookies, std::size_t *skipped_partition_cookies = nullptr);
 // Stored cookies as passed to Storage.setCookies: supported fields only, and
 // without the volatile cookies that conflict with a new session (unless

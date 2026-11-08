@@ -257,6 +257,15 @@ TEST_CASE("cookie import distinguishes safe browser failures without leaking exc
         }
     }
 }
+TEST_CASE("cookie import reports pending AI Studio terms") {
+    ImportBackend backend; backend.fail_at = 1; backend.failure_code = "terms_required";
+    try {
+        probe_cookie_import(request(), 8, backend, {});
+        FAIL("expected failure");
+    } catch (const Error &e) {
+        CHECK(e.code == "cookie_terms_required"); CHECK(e.status == 409);
+    }
+}
 TEST_CASE("cookie push rejects ambiguous identities infrastructure errors and cancellation atomically") {
     Temp temp; Store store(temp.path);
     ImportBackend backend;

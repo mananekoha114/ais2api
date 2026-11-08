@@ -484,6 +484,25 @@ TEST_CASE("authentication cooldowns are account-wide and temporary", "[cookie-re
     CHECK(until > unix_seconds() + 240);
     CHECK(until <= unix_seconds() + 300);
 }
+TEST_CASE("pending AI Studio terms cool the whole account for an hour without an auth probe", "[recovery]") {
+    Directory dir;
+    Store store(dir.path);
+    Account account;
+    account.id = "acc_terms";
+    account.email = "terms@example.com";
+    account.storage_state = credential();
+    store.put_account(account);
+    store.failure(account.id, "gemini-test", "terms_required");
+    CHECK_FALSE(store.choose("gemini-test"));
+    CHECK_FALSE(store.choose("other-model", {}, true));
+    const auto& failure = store.account_status()[0].as_object().at("failures").as_array()[0].as_object();
+    CHECK(string_or(failure, "model") == "*");
+    const auto until = failure.at("until").to_number<std::int64_t>();
+    CHECK(until > unix_seconds() + 3500);
+    CHECK(until <= unix_seconds() + 3600);
+    store.reset_account(account.id);
+    CHECK(store.choose("gemini-test"));
+}
 TEST_CASE("accounts receive a permanent browser fingerprint when first stored", "[fingerprint]") {
     Directory dir;
     Store store(dir.path);

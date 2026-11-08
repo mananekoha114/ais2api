@@ -70,6 +70,13 @@ TEST_CASE("Only proven sign-in loss expires an account", "[upstream-policy][reco
     CHECK(mismatch.cooldown == "auth");
 }
 
+TEST_CASE("An AI Studio terms dialog rebuilds once and then waits for the account's owner", "[upstream-policy][recovery]") {
+    CHECK(decide(409, "terms_required").action == FailureAction::rebuild_session);
+    auto repeated = decide(409, "terms_required", 1, true);
+    CHECK(repeated.action == FailureAction::cool_and_switch);
+    CHECK(repeated.cooldown == "terms_required");
+}
+
 TEST_CASE("Browser failures restart the browser once without penalty", "[upstream-policy][recovery]") {
     for (const auto& [status, code] : std::vector<std::pair<unsigned, std::string>>{
              {502, "browser_incompatible"}, {502, "browser_disconnected"}, {504, "browser_timeout"},
