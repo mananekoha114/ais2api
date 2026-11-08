@@ -13,7 +13,7 @@ usage() {
 Usage: sh scripts/build.sh [linux|termux] [options]
   --install-deps       install Termux host packages (changes shared packages)
   --package            create desktop CPack TGZ after tests
-  --browser-bundle PATH include a verified local browser (desktop only)
+  --browser-bundle PATH include a verified local browser (desktop x86_64 only)
   --webui              build and embed the WebUI (requires Node.js 20.19+ or 22.12+)
   --sanitizers         enable desktop Linux ASan/UBSan
   --fuzzer             build Clang libFuzzer target (also enables sanitizers)
@@ -101,7 +101,12 @@ if [ "$target" = termux ]; then
   fi
   cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DAIS2API_BUILD_WEBUI="$webui" -DAIS2API_DEV_BUNDLE=OFF -DCMAKE_PREFIX_PATH="$prefix_path" -DCMAKE_CXX_COMPILER="${CXX:-clang++}" -DCMAKE_INSTALL_PREFIX="$build_dir/install"
 else
-  [ "$(uname -m)" = x86_64 ] || { echo 'This desktop preset targets Linux x86_64.' >&2; exit 1; }
+  # ARM64 builds the Camoufox backend only: CloakBrowser has no Linux ARM64 build to bundle.
+  case "$(uname -m)" in
+    x86_64) triplet=x64-linux ;;
+    aarch64) triplet=arm64-linux; [ -z "$browser_bundle" ] || { echo '--browser-bundle needs Linux x86_64.' >&2; exit 2; } ;;
+    *) echo 'This desktop preset targets Linux x86_64 and ARM64.' >&2; exit 1 ;;
+  esac
   [ "$packages" -eq 0 ] || { echo 'Install Linux build prerequisites using your OS package manager; see docs/platforms.md.' >&2; exit 2; }
   for tool in cmake ninja git; do need "$tool"; done
   baseline=$(cmake "-DAIS2API_MANIFEST=$project/vcpkg.json" -P "$project/scripts/read-baseline.cmake")
@@ -115,7 +120,7 @@ else
   actual=$(git -C "$vcpkg_root" rev-parse HEAD)
   [ "$actual" = "$baseline" ] || { echo 'VCPKG_ROOT must match the manifest baseline; existing checkout was left unchanged.' >&2; exit 1; }
   [ -f "$vcpkg_root/vcpkg" ] || "$vcpkg_root/bootstrap-vcpkg.sh" -disableMetrics
-  cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DAIS2API_SANITIZE="$sanitize" -DAIS2API_BUILD_FUZZER="$fuzz" -DAIS2API_BUILD_WEBUI="$webui" -DAIS2API_DEV_BUNDLE=OFF -DCMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-linux -DCMAKE_INSTALL_PREFIX="$build_dir/install" -DAIS2API_BROWSER_BUNDLE_DIR="$browser_bundle"
+  cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DAIS2API_SANITIZE="$sanitize" -DAIS2API_BUILD_FUZZER="$fuzz" -DAIS2API_BUILD_WEBUI="$webui" -DAIS2API_DEV_BUNDLE=OFF -DCMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET="$triplet" -DCMAKE_INSTALL_PREFIX="$build_dir/install" -DAIS2API_BROWSER_BUNDLE_DIR="$browser_bundle"
 fi
 cmake --build "$build_dir" --parallel "$jobs"
 if [ "$testing" = ON ]; then ctest --test-dir "$build_dir" --output-on-failure; fi

@@ -165,8 +165,9 @@ def check_build_mode(binary: bytes, dev: bool) -> None:
         raise ValueError('not_a_dev_build')
 
 
-def check_camoufox(files, relative, read, manifest, platform) -> None:
-    """A dev bundle's Camoufox: the pinned build, trimmed as its marker says."""
+def check_camoufox(files, relative, read, manifest, platform, mode=None) -> None:
+    """A dev bundle's Camoufox: the pinned build, trimmed as its marker says.
+    `mode` gives a tar member's permissions, which a Linux browser needs."""
     pin = manifest.get('camoufox', {})
     artifact = pin.get('artifacts', {}).get(platform)
     if not artifact:
@@ -186,10 +187,15 @@ def check_camoufox(files, relative, read, manifest, platform) -> None:
         raise ValueError('camoufox_bundle_marker_without_trim_rules')
     for name in files:
         local = name[len(prefix):]
-        if local not in kept and any(local == rule or local.startswith(rule + '/') for rule in skipped):
+        def under(rule):
+            return local == rule or local.startswith(rule + '/')
+        if not any(map(under, kept)) and any(map(under, skipped)):
             raise ValueError('camoufox_bundle_untrimmed')
-    if prefix + ('camoufox.exe' if platform == 'windows-x64' else 'camoufox') not in relative:
+    program = prefix + ('camoufox.exe' if platform == 'windows-x64' else 'camoufox-bin')
+    if program not in relative:
         raise ValueError('missing_camoufox_executable')
+    if mode is not None and not mode(program) & 0o100:
+        raise ValueError('camoufox_is_not_executable')
 
 
 def check(path: Path, with_browser=False, target='desktop', dev=False) -> int:
@@ -279,7 +285,8 @@ def check(path: Path, with_browser=False, target='desktop', dev=False) -> int:
         if camoufox_files:
             check_camoufox(camoufox_files, relative, lambda name, limit=None: read(original[name], limit),
                            json.loads(read(original['bin/runtime-manifest.json'], 100000)),
-                           'windows-x64' if path.suffix == '.zip' else 'linux-x64')
+                           'windows-x64' if path.suffix == '.zip' else 'linux-x64',
+                           None if path.suffix == '.zip' else lambda name: names[original[name]].mode)
         browser_files = {name for name in relative if name.startswith('bin/browser-runtime/')}
         if with_browser:
             platform = 'windows-x64' if path.suffix == '.zip' else 'linux-x64'
