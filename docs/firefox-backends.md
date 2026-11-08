@@ -36,7 +36,10 @@
 ## 身份
 
 - **内容**：navigator、屏幕、字体、WebGL、语音、媒体设备、时区与语言。
-- **OS**：非 macOS 主机呈现宿主真实的 OS（Linux 主机呈现 Linux）。Camoufox 在 Linux 上伪装 Windows 时 canvas/WebGL 读回随机数据，本身就是特征；是否伪装 Windows 留到 Linux 阶段实测决定。
+- **OS**：非 macOS 主机呈现宿主真实的 OS（Linux 主机呈现 Linux），不伪装 Windows。
+  - Camoufox 在 Linux 上伪装 Windows 时 canvas/WebGL 读回随机数据，这本身就是特征。
+  - Linux 阶段在 CI 的 Ubuntu 24.04 x64 与 ARM64 上实测了呈现 Linux 的情况（Xvfb，软件渲染）：页面读数与身份一致；同一幅 canvas 和 WebGL 图案在一次启动中读两次、换一次启动再读，结果都相同；`check-identities` 的分布与启动器相近。
+  - 有硬件 GPU 的 Linux 主机留到测试阶段在真机上确认，包括 fpgen 没有记录这块 GPU、开启了 canvas 读回保护的情况。
 - **GPU**：按 Camoufox 官方启动器的做法，不带身份启动一次 Camoufox，在本地页面读出 WebGL 厂商与渲染器。读取时的显示模式和首选项与身份启动相同，每个进程只读一次。
   - fpgen 记录过这块 GPU：身份就声称它。
   - 是硬件 GPU 但没有记录：抽一块 GPU，并开启 canvas 读回保护。
@@ -174,7 +177,6 @@ P1 已于 2026-11-06 在 Windows 上用测试账号完成验证，见 [原型报
 | 事项 | 决定时机 |
 |---|---|
 | 新账号的默认后端 | SpiderMonkey 原型结果出来后 |
-| Linux 主机是否伪装 Windows | Linux 阶段实测 |
 | Firefox 网络指纹的实现方案 | SpiderMonkey 原型阶段调研后 |
 | 多账号并发 | SpiderMonkey 后端稳定后 |
 | 整个核心拆成库 | 桌面 App 或 Android App 立项时 |
