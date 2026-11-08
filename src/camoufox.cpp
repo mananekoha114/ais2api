@@ -26,6 +26,11 @@
 #include <fstream>
 #include <limits>
 #include <mutex>
+#ifndef _WIN32
+#include <cerrno>
+#include <csignal>
+#include <unistd.h>
+#endif
 
 namespace ais2api {
 namespace {
@@ -176,6 +181,51 @@ bool browser_detail::camoufox_log_noise(std::string_view line) {
     return (has("juggler/SimpleChannel.js") && has("redeclaration of let SimpleChannel")) ||
            (has("webdriver-bidi/modules/root/browsingContext.sys.mjs") && has("WeakMap key null must be an object"));
 }
+namespace {
+// What Camoufox's Linux fonts.conf holds in place of absolute paths.
+constexpr std::string_view fontconfig_fonts = R"(<dir prefix="cwd">fonts</dir>)";
+constexpr std::string_view fontconfig_cache = R"(<cachedir prefix="xdg">fontconfig</cachedir>)";
+std::string xml_text(std::string_view text) {
+    std::string result;
+    for (const char c : text) {
+        if (c == '&') result += "&amp;";
+        else if (c == '<') result += "&lt;";
+        else if (c == '>') result += "&gt;";
+        else result += c;
+    }
+    return result;
+}
+} // namespace
+std::string browser_detail::camoufox_fontconfig(std::string_view conf, const std::vector<fs::path>& font_directories,
+                                                const fs::path& cache_directory) {
+    const auto fonts = conf.find(fontconfig_fonts), cache = conf.find(fontconfig_cache);
+    if (font_directories.empty() || fonts == std::string_view::npos || cache == std::string_view::npos ||
+        conf.find(fontconfig_fonts, fonts + 1) != std::string_view::npos ||
+        conf.find(fontconfig_cache, cache + 1) != std::string_view::npos)
+        throw Error(502, "camoufox_layout_changed", "Camoufox's Linux fonts.conf no longer names its fonts and cache as ais2api expects");
+    std::string directories;
+    for (const auto& directory : font_directories)
+        directories += (directories.empty() ? "" : "\n\t") + ("<dir>" + xml_text(path_utf8(directory)) + "</dir>");
+    std::string result(conf);
+    // The later one first, so the earlier offset still holds.
+    const auto replace = [&](std::size_t at, std::string_view old, const std::string& text) { result.replace(at, old.size(), text); };
+    const auto cachedir = "<cachedir>" + xml_text(path_utf8(cache_directory)) + "</cachedir>";
+    if (cache > fonts) { replace(cache, fontconfig_cache, cachedir); replace(fonts, fontconfig_fonts, directories); }
+    else { replace(fonts, fontconfig_fonts, directories); replace(cache, fontconfig_cache, cachedir); }
+    return result;
+}
+std::vector<std::string> browser_detail::xvfb_arguments() {
+    return {"-displayfd", "1", "-screen", "0", "1x1x24", "-ac", "-nolisten", "tcp",
+            "-extension", "RENDER", "+extension", "GLX", "-extension", "COMPOSITE",
+            "-extension", "XVideo", "-extension", "XVideo-MotionCompensation", "-extension", "XINERAMA",
+            "-fp", "built-ins", "-nocursor", "-br"};
+}
+std::optional<unsigned> browser_detail::xvfb_display(std::string_view line) {
+    if (line.empty() || line.size() > 5 ||
+        !std::all_of(line.begin(), line.end(), [](unsigned char c) { return std::isdigit(c); }))
+        return std::nullopt;
+    return static_cast<unsigned>(std::stoul(std::string(line)));
+}
 std::uint64_t browser_detail::identity_salt(std::string_view secret, std::string_view account_id, unsigned seed) {
     std::string input(secret);
     input += '\0';
@@ -192,6 +242,39 @@ using browser_detail::OwnedProcess;
 using browser_detail::pause;
 
 [[noreturn]] void incompatible(std::string message) { throw Error(502, "browser_incompatible", std::move(message)); }
+#ifndef _WIN32
+// The executable `name` in a PATH directory; empty when there is none.
+fs::path program_on_path(std::string_view name) {
+    const char* value = std::getenv("PATH");
+    std::string_view rest = value ? value : "";
+    while (!rest.empty()) {
+        const auto colon = rest.find(':');
+        const auto directory = rest.substr(0, colon);
+        rest.remove_prefix(colon == std::string_view::npos ? rest.size() : colon + 1);
+        if (directory.empty() || directory.front() != '/') continue;
+        const auto candidate = fs::path(std::string(directory)) / std::string(name);
+        std::error_code error;
+        if (fs::is_regular_file(candidate, error) && ::access(candidate.c_str(), X_OK) == 0) return candidate;
+    }
+    return {};
+}
+// Xvfb removes its lock and socket when it stops. One killed leaves them,
+// and each stale socket pushes the displays after it higher.
+void remove_stale_display(unsigned display) {
+    const auto number = std::to_string(display);
+    const fs::path lock = "/tmp/.X" + number + "-lock";
+    long pid = 0;
+    try {
+        pid = std::stol(read_file(lock, 64));
+    } catch (const std::exception&) {
+        return;
+    }
+    if (pid <= 0 || ::kill(static_cast<pid_t>(pid), 0) == 0 || errno != ESRCH) return;
+    std::error_code error;
+    fs::remove(lock, error);
+    fs::remove(fs::path("/tmp/.X11-unix") / ("X" + number), error);
+}
+#endif
 std::string quote_js(std::string_view text) {
     std::string quoted;
     browser_detail::append_quoted(quoted, text);
@@ -362,6 +445,12 @@ struct CamoufoxGateway::Impl {
     std::ofstream output_log;
     std::deque<std::string> output_tail;
     unsigned short endpoint_port = 0;
+#ifndef _WIN32
+    // Xvfb, the display a headless Linux launch runs on. Its display number
+    // arrives on the reader thread, under output_mutex.
+    OwnedProcess display_process;
+    std::optional<unsigned> display_number;
+#endif
     // Credentials the current context was built from, for write-back CAS.
     json::object session_state;
     Clock::time_point cookies_saved_at{};
@@ -386,6 +475,7 @@ struct CamoufoxGateway::Impl {
         if (bidi) bidi->close();
         launched.reset(); launched_config = {};
         bidi.reset(); process.stop();
+        stop_display();
         if (relay) { relay_error = relay->last_error(); relay.reset(); }
         { std::lock_guard lock(output_mutex); output_log.close(); }
         user_context.clear(); page.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); models_discovered = false; session_state = {};
@@ -410,6 +500,80 @@ struct CamoufoxGateway::Impl {
         }
     }
     fs::path browser_directory() const { return executable.path.parent_path(); }
+#ifndef _WIN32
+    // Starts Xvfb below the launch's directory and returns its DISPLAY.
+    std::string start_display(std::stop_token token) {
+        const auto xvfb = program_on_path("Xvfb");
+        if (xvfb.empty())
+            throw Error(503, "display_unavailable", "Xvfb is not installed: run ais2api setup --yes, or turn headless off on a desktop");
+        browser_detail::ProcessOptions options;
+        // Mesa's software OpenGL, as Camoufox's launcher runs Xvfb.
+        options.environment = {{"__GLX_VENDOR_LIBRARY_NAME", "mesa"}, {"LIBGL_ALWAYS_SOFTWARE", "1"}};
+        options.on_output = [this](std::string_view line) {
+            std::lock_guard lock(output_mutex);
+            if (!display_number)
+                if (const auto display = browser_detail::xvfb_display(line)) { display_number = display; return; }
+            const auto text = "Xvfb: " + std::string(line.substr(0, 1024));
+            if (output_log.is_open()) { output_log << text << '\n'; output_log.flush(); }
+            output_tail.push_back(text);
+            if (output_tail.size() > 20) output_tail.pop_front();
+        };
+        display_process.start(xvfb, browser_detail::xvfb_arguments(), root / "display", options);
+        // A cold first Xvfb on a fresh host took seconds to report.
+        const auto deadline = Clock::now() + 30s;
+        for (;;) {
+            check_cancel(token);
+            {
+                std::lock_guard lock(output_mutex);
+                if (display_number) return ":" + std::to_string(*display_number);
+            }
+            if (!display_process.alive()) throw Error(503, "display_unavailable", "Xvfb exited before it reported a display" + output_hint());
+            if (Clock::now() >= deadline) throw Error(504, "browser_timeout", "Xvfb did not report a display" + output_hint());
+            pause(token, 50ms);
+        }
+    }
+    // FONTCONFIG_FILE for the install: its Linux fonts.conf, scanning the
+    // font groups a Linux identity reads, written once for each content below
+    // runtime/camoufox-fontconfig. Empty for a build without one.
+    fs::path fontconfig_file() const {
+        const auto directory = fs::absolute(browser_directory());
+        const auto source = directory / "fontconfig" / "linux" / "fonts.conf";
+        std::error_code error;
+        if (!fs::is_regular_file(source, error)) return {};
+        std::vector<fs::path> fonts;
+        try {
+            const auto groups = json::parse(read_file(directory / "fonts" / "groups.json", 1 << 20)).as_object();
+            for (const auto& value : groups.at("readBy").as_object().at("lin").as_array()) {
+                const std::string group(value.as_string());
+                if (group.empty() || !std::all_of(group.begin(), group.end(), [](unsigned char c) { return std::isalnum(c); })) continue;
+                if (fs::is_directory(directory / "fonts" / group, error)) fonts.push_back(directory / "fonts" / group);
+            }
+        } catch (const std::exception&) {
+            fonts.clear();
+        }
+        // Older builds keep every font in fonts/ itself.
+        if (fonts.empty()) fonts.push_back(directory / "fonts");
+        const auto written = fs::absolute(config.data_dir / "runtime" / "camoufox-fontconfig");
+        secure_directory(written);
+        secure_directory(written / "cache");
+        const auto text = browser_detail::camoufox_fontconfig(read_file(source, 16 << 20), fonts, written / "cache");
+        const auto file = written / ("fonts-" + sha256(text).substr(0, 12) + ".conf");
+        if (!fs::is_regular_file(file, error)) atomic_write(file, text);
+        return file;
+    }
+#endif
+    void stop_display() noexcept {
+#ifndef _WIN32
+        display_process.stop();
+        std::optional<unsigned> display;
+        {
+            std::lock_guard lock(output_mutex);
+            display = display_number;
+            display_number.reset();
+        }
+        if (display) remove_stale_display(*display);
+#endif
+    }
     // Opens a page in a new user context on a local document.
     void open_local_page(std::string_view html, bool bridge, std::stop_token token) {
         user_context = string_or(bidi->call("browser.createUserContext", {}, token), "userContext");
@@ -643,7 +807,21 @@ struct CamoufoxGateway::Impl {
             // -wait-for-browser keeps the Windows launcher process until the
             // browser exits, so the owned process is the browser's lifetime.
             std::vector<std::string> args{"--remote-debugging-port", "0", "-no-remote", "-wait-for-browser", "-profile", path_utf8(fs::absolute(profile))};
+#ifdef _WIN32
             if (config.headless) args.emplace_back("-headless");
+#else
+            // Linux runs Camoufox with a display, as a desktop does: Xvfb's
+            // when headless, else the session's.
+            if (config.headless) {
+                options.environment.emplace_back("DISPLAY", start_display(token));
+                // GTK would otherwise prefer a Wayland session's display.
+                options.unset_prefixes.emplace_back("WAYLAND_DISPLAY");
+                options.environment.emplace_back("MOZ_ENABLE_WAYLAND", "0");
+            } else if (!std::getenv("DISPLAY") && !std::getenv("WAYLAND_DISPLAY"))
+                throw Error(503, "display_unavailable", "headless is off and there is no display: set DISPLAY, or turn headless on to use Xvfb");
+            if (const auto fontconfig = fontconfig_file(); !fontconfig.empty())
+                options.environment.emplace_back("FONTCONFIG_FILE", path_utf8(fontconfig));
+#endif
             args.emplace_back("about:blank");
             process.start(executable.path, args, root, options);
             const auto deadline = Clock::now() + 45s;
