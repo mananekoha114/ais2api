@@ -495,7 +495,8 @@ TEST_CASE("pending AI Studio terms cool the whole account for an hour without an
     store.failure(account.id, "gemini-test", "terms_required");
     CHECK_FALSE(store.choose("gemini-test"));
     CHECK_FALSE(store.choose("other-model", {}, true));
-    const auto& failure = store.account_status()[0].as_object().at("failures").as_array()[0].as_object();
+    const auto status = store.account_status();
+    const auto& failure = status[0].as_object().at("failures").as_array()[0].as_object();
     CHECK(string_or(failure, "model") == "*");
     const auto until = failure.at("until").to_number<std::int64_t>();
     CHECK(until > unix_seconds() + 3500);
