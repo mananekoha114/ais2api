@@ -26,6 +26,16 @@
         "url": "https://github.com/daijro/camoufox/releases/download/v158.0.1-beta.41/camoufox-158.0.1-beta.41-win.x86_64.zip",
         "sha256": "2644bd14f1cc345c768f6a70b576bcc87eb3d0bf0df54856d6fe0bbc3027515f",
         "size": 1320075455
+      },
+      "linux-x64": {
+        "url": "https://github.com/daijro/camoufox/releases/download/v158.0.1-beta.41/camoufox-158.0.1-beta.41-lin.x86_64.zip",
+        "sha256": "3f2eb1d0451fa58e45e43e55f5e6181565069791ae60c0574f0ceb1f01341c33",
+        "size": 1303577033
+      },
+      "linux-arm64": {
+        "url": "https://github.com/daijro/camoufox/releases/download/v158.0.1-beta.41/camoufox-158.0.1-beta.41-lin.arm64.zip",
+        "sha256": "60e25f6eb95e13d9ec655bc02913d51057e669cb31542e6ace9d2190ab5380af",
+        "size": 1297503606
       }
     }
   },
