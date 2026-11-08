@@ -222,12 +222,14 @@ jobs:
         run: |
           mkdir -p build/vcpkg-cache
           echo "count=$(find build/vcpkg-cache -name '*.zip' | wc -l)" >> "$GITHUB_OUTPUT"
-      - name: Parse PowerShell build entry point
+      - name: Parse PowerShell build scripts
         shell: pwsh
         run: |
-          $parseErrors = $null
-          [Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'scripts/build.ps1'), [ref]$null, [ref]$parseErrors) | Out-Null
-          if ($parseErrors.Count) { throw 'PowerShell syntax check failed' }
+          Get-ChildItem scripts/*.ps1 | ForEach-Object {
+            $parseErrors = $null
+            [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count) { throw "PowerShell syntax check failed: $($_.Name)" }
+          }
       - name: Build, test, install, and package
         shell: pwsh
         run: ./scripts/build.ps1 -Triplet $env:VCPKG_TRIPLET -Jobs $env:NUMBER_OF_PROCESSORS -Package -WebUI

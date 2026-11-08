@@ -26,49 +26,14 @@ if ($Help) {
 }
 # The -release triplet skips debug dependency builds, so it cannot link a Debug (/MTd) configuration.
 if ($Configuration -eq 'Debug' -and $Triplet.EndsWith('-release')) { throw "Triplet $Triplet has no debug libraries; use x64-windows-static for Debug." }
-function Invoke-Checked([string]$Program, [string[]]$Arguments) {
-    & $Program @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "Native command failed: $Program (exit $LASTEXITCODE)" }
-}
-# GitHub occasionally times out (HTTP 408) on large partial-clone fetches.
-function Invoke-Retried([scriptblock]$Action, [scriptblock]$Cleanup = {}) {
-    for ($attempt = 1; ; $attempt++) {
-        try { & $Action; return }
-        catch {
-            if ($attempt -ge 3) { throw }
-            Write-Warning "$($_.Exception.Message); retrying ($attempt/3)"
-            & $Cleanup
-            Start-Sleep -Seconds (15 * $attempt)
-        }
-    }
-}
+. (Join-Path $PSScriptRoot 'build-common.ps1')
 $project = Split-Path -Parent $PSScriptRoot
-if (-not [IO.Path]::IsPathRooted($BuildDirectory)) { $BuildDirectory = Join-Path $project $BuildDirectory }
+$BuildDirectory = Resolve-ProjectPath $project $BuildDirectory
 if ([string]::IsNullOrEmpty($VcpkgRoot)) { $VcpkgRoot = Join-Path $project 'build/deps/vcpkg' }
-if (-not [IO.Path]::IsPathRooted($VcpkgRoot)) { $VcpkgRoot = Join-Path $project $VcpkgRoot }
-if ($BrowserBundleDirectory -and -not [IO.Path]::IsPathRooted($BrowserBundleDirectory)) { $BrowserBundleDirectory = Join-Path $project $BrowserBundleDirectory }
-if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue) -or [string]::IsNullOrEmpty($env:INCLUDE)) {
-    $locator = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-    if (-not (Test-Path -LiteralPath $locator)) { throw 'Install Visual Studio C++ build tools or use Developer PowerShell.' }
-    $installation = & $locator -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    if (-not $installation) { throw 'Visual Studio x64 C++ tools were not found.' }
-    & (Join-Path $installation 'Common7/Tools/Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-}
-foreach ($tool in @('cl.exe', 'git.exe', 'cmake.exe', 'ctest.exe', 'ninja.exe')) {
-    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "Missing build tool: $tool" }
-}
-$baseline = (Get-Content -Raw -LiteralPath (Join-Path $project 'vcpkg.json') | ConvertFrom-Json).'builtin-baseline'
-if ($baseline -notmatch '^[0-9a-f]{40}$') { throw 'vcpkg builtin-baseline must be a full commit SHA.' }
-if (-not (Test-Path -LiteralPath $VcpkgRoot)) {
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $VcpkgRoot) | Out-Null
-    Invoke-Retried { Invoke-Checked git.exe @('clone', '--filter=blob:none', '--no-checkout', 'https://github.com/microsoft/vcpkg.git', $VcpkgRoot) } { if (Test-Path -LiteralPath $VcpkgRoot) { Remove-Item -Recurse -Force -LiteralPath $VcpkgRoot } }
-    Invoke-Retried { Invoke-Checked git.exe @('-C', $VcpkgRoot, 'checkout', '--detach', $baseline) }
-}
-$revision = & git.exe -C $VcpkgRoot rev-parse HEAD
-if ($LASTEXITCODE -ne 0 -or $revision -ne $baseline) { throw 'VcpkgRoot must match the manifest baseline; existing checkout was left unchanged.' }
-if (-not (Test-Path -LiteralPath (Join-Path $VcpkgRoot 'vcpkg.exe'))) {
-    Invoke-Checked (Join-Path $VcpkgRoot 'bootstrap-vcpkg.bat') @('-disableMetrics')
-}
+$VcpkgRoot = Resolve-ProjectPath $project $VcpkgRoot
+$BrowserBundleDirectory = Resolve-ProjectPath $project $BrowserBundleDirectory
+Enter-BuildTools
+Initialize-Vcpkg $project $VcpkgRoot
 $testing = if ($SkipTests) { 'OFF' } else { 'ON' }
 $webUiBuild = if ($WebUI) { 'ON' } else { 'OFF' }
 Invoke-Checked cmake.exe @('-S', $project, '-B', $BuildDirectory, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Configuration", "-DBUILD_TESTING=$testing", "-DCMAKE_TOOLCHAIN_FILE=$VcpkgRoot/scripts/buildsystems/vcpkg.cmake", "-DVCPKG_TARGET_TRIPLET=$Triplet", "-DCMAKE_INSTALL_PREFIX=$BuildDirectory/install", "-DAIS2API_BROWSER_BUNDLE_DIR=$BrowserBundleDirectory", "-DAIS2API_BUILD_WEBUI=$webUiBuild")
