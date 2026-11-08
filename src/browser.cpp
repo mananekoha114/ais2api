@@ -39,6 +39,57 @@ browser_detail::IdentityVerdict browser_detail::identity_verdict(const json::obj
     const auto expected = normalized(std::string(expected_email));
     return expected.empty() || expected == email ? IdentityVerdict::verified : IdentityVerdict::mismatch;
 }
+void browser_detail::check_identity(const json::object& identity, bool allow_login) {
+    if (bool_or(identity, "login") && !allow_login) throw Error(401, "session_expired", "Google redirected the account to sign-in");
+    if (bool_or(identity, "regionBlocked")) throw Error(403, "region_blocked", "AI Studio is unavailable in the browser region");
+    if (bool_or(identity, "termsRequired"))
+        throw Error(409, "terms_required", "AI Studio asks this account to accept its terms; sign in to AI Studio with this account in a normal browser and accept them");
+}
+void browser_detail::await_account_identity(const IdentityPage& page, std::string_view expected_email, bool require_editor,
+                                            std::stop_token token) {
+    using namespace std::chrono_literals;
+    const auto deadline = Clock::now() + 60s;
+    std::optional<Clock::time_point> login_since, mismatch_since;
+    auto last = IdentityVerdict::pending;
+    while (Clock::now() < deadline) {
+        check_cancel(token);
+        try {
+            auto remaining = std::chrono::duration_cast<std::chrono::seconds>(deadline - Clock::now());
+            if (remaining < 1s) break;
+            if (page.bridge_ready(std::min<std::chrono::seconds>(5s, remaining))) {
+                remaining = std::chrono::duration_cast<std::chrono::seconds>(deadline - Clock::now());
+                if (remaining < 1s) break;
+                const auto info = page.identity(std::min<std::chrono::seconds>(5s, remaining));
+                if (bool_or(info, "login")) {
+                    mismatch_since.reset();
+                    if (!login_since) login_since = Clock::now();
+                    if (Clock::now() - *login_since >= 10s)
+                        throw Error(401, "session_expired", "Google remained on sign-in after the navigation grace period");
+                } else {
+                    login_since.reset();
+                    last = identity_verdict(info, expected_email);
+                    if (last == IdentityVerdict::verified && (!require_editor || bool_or(info, "ready"))) return;
+                    if (last == IdentityVerdict::mismatch) {
+                        if (!mismatch_since) mismatch_since = Clock::now();
+                        if (Clock::now() - *mismatch_since >= 2s)
+                            throw Error(401, "identity_mismatch", "The verified Google account differs from the selected account");
+                    } else mismatch_since.reset();
+                }
+            } else { login_since.reset(); mismatch_since.reset(); last = IdentityVerdict::pending; }
+        } catch (const Error& error) {
+            // Redirects can replace the page realm while the account badge is
+            // loading. Missing identity is never a proven mismatch.
+            if (error.code != "browser_incompatible") throw;
+            login_since.reset(); mismatch_since.reset(); last = IdentityVerdict::pending;
+        }
+        page.pause();
+    }
+    if (page.timed_out) page.timed_out();
+    if (last == IdentityVerdict::verified)
+        throw Error(502, "browser_incompatible", "AI Studio page did not expose a supported ready prompt editor");
+    throw Error(409, "identity_unverified", last == IdentityVerdict::ambiguous
+        ? "AI Studio exposed multiple account identities" : "AI Studio account identity did not finish loading");
+}
 json::array browser_detail::import_cookies(const json::array& cookies, std::size_t* skipped_partition_cookies) {
     json::array result;
     if (skipped_partition_cookies) *skipped_partition_cookies = 0;
@@ -432,52 +483,18 @@ struct BrowserGateway::Impl {
         auto value = eval("globalThis.__ais2bridge.identity()", token, timeout);
         if (!value.is_object()) incompatible("Page identity probe unavailable");
         auto object = value.as_object();
-        if (bool_or(object, "login") && !allow_login) throw Error(401, "session_expired", "Google redirected the account to sign-in");
-        if (bool_or(object, "regionBlocked")) throw Error(403, "region_blocked", "AI Studio is unavailable in the browser region");
+        browser_detail::check_identity(object, allow_login);
         return object;
     }
     void await_account_identity(const Account& account, std::stop_token token, bool require_editor) {
-        const auto deadline = Clock::now() + 60s;
-        std::optional<Clock::time_point> login_since, mismatch_since;
-        auto last = browser_detail::IdentityVerdict::pending;
-        while (Clock::now() < deadline) {
-            check_cancel(token);
-            try {
-                auto remaining = std::chrono::duration_cast<std::chrono::seconds>(deadline - Clock::now());
-                if (remaining < 1s) break;
-                auto exists = eval("!!globalThis.__ais2bridge", token, std::min(5s, remaining));
-                if (exists.is_bool() && exists.as_bool()) {
-                    remaining = std::chrono::duration_cast<std::chrono::seconds>(deadline - Clock::now());
-                    if (remaining < 1s) break;
-                    const auto info = identity(token, true, std::min(5s, remaining));
-                    if (bool_or(info, "login")) {
-                        mismatch_since.reset();
-                        if (!login_since) login_since = Clock::now();
-                        if (Clock::now() - *login_since >= 10s)
-                            throw Error(401, "session_expired", "Google remained on sign-in after the navigation grace period");
-                    } else {
-                        login_since.reset();
-                        last = browser_detail::identity_verdict(info, account.email);
-                        if (last == browser_detail::IdentityVerdict::verified && (!require_editor || bool_or(info, "ready"))) return;
-                        if (last == browser_detail::IdentityVerdict::mismatch) {
-                            if (!mismatch_since) mismatch_since = Clock::now();
-                            if (Clock::now() - *mismatch_since >= 2s)
-                                throw Error(401, "identity_mismatch", "The verified Google account differs from the selected account");
-                        } else mismatch_since.reset();
-                    }
-                } else { login_since.reset(); mismatch_since.reset(); last = browser_detail::IdentityVerdict::pending; }
-            } catch (const Error& error) {
-                // Redirects can replace an execution context while the account
-                // badge is loading. Missing identity is never a proven mismatch.
-                if (error.code != "browser_incompatible") throw;
-                login_since.reset(); mismatch_since.reset(); last = browser_detail::IdentityVerdict::pending;
-            }
-            pause(token, 250ms);
-        }
-        if (last == browser_detail::IdentityVerdict::verified)
-            incompatible("AI Studio page did not expose a supported ready prompt editor");
-        throw Error(409, "identity_unverified", last == browser_detail::IdentityVerdict::ambiguous
-            ? "AI Studio exposed multiple account identities" : "AI Studio account identity did not finish loading");
+        browser_detail::await_account_identity({
+            [&](std::chrono::seconds timeout) {
+                const auto exists = eval("!!globalThis.__ais2bridge", token, timeout);
+                return exists.is_bool() && exists.as_bool();
+            },
+            [&](std::chrono::seconds timeout) { return identity(token, true, timeout); },
+            [&] { pause(token, 250ms); },
+        }, account.email, require_editor, token);
     }
     void ensure_account(const Account& account, std::stop_token token, bool bootstrap, bool identity_only = false) {
         phase = "browser_start";

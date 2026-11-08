@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { accountState } from './accounts'
+import { accountState, cooldownReason } from './accounts'
 import { formatRelative, formatTime, formatTimestamp } from './format'
 
 // The backend stores INT64_MAX as the deadline of permission cooldowns; after
@@ -29,5 +29,12 @@ describe('indefinite cooldown deadlines', () => {
       text: '1 个模型冷却',
     })
     expect(accountState({ id: 'a', failures: [{ model: '*', until: NOW - 1, count: 2 }] }, NOW).available).toBe(true)
+  })
+
+  it('tells the owner to accept pending AI Studio terms', () => {
+    const failures = [{ model: '*', until: NOW + 3600, count: 1, kind: 'terms_required' }]
+    expect(accountState({ id: 'a', failures }, NOW)).toMatchObject({ tone: 'critical', available: false, text: '需同意条款' })
+    expect(cooldownReason('terms_required')).toBe('需同意条款')
+    expect(cooldownReason('something_new')).toBe('something_new')
   })
 })

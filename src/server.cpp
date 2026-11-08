@@ -6,6 +6,8 @@
 
 #include "ais2api/browser.hpp"
 #include "ais2api/camoufox.hpp"
+#include "ais2api/diagnostics.hpp"
+#include "ais2api/runtime.hpp"
 #include "ais2api/flow.hpp"
 #include "ais2api/retry_policy.hpp"
 #include "ais2api/management.hpp"
@@ -86,7 +88,14 @@ class Service {
         : config_(std::move(config)), journal_(config_.data_dir), store_(config_.data_dir),
           prices_(store_, [this] { return this->config(); }, !backend),
           gateway_(backend ? std::move(backend) : browser_gateway(config_, store_)),
-          worker_([this](std::stop_token token) { work_loop(token); }) { store_.recover_requests(); }
+          worker_([this](std::stop_token token) { work_loop(token); }) {
+        store_.recover_requests();
+        // serve() holds the instance lock, so no other process uses them.
+        try {
+            if (const auto removed = remove_profile_leftovers(config_.data_dir))
+                log({{"event", "runtime_leftovers_removed"}, {"count", removed}});
+        } catch (...) {}
+    }
     ~Service() { shutdown(); log_writer_.join(); }
     void shutdown() {
         stop();
@@ -105,6 +114,21 @@ class Service {
     }
     Store &store() { return store_; }
     PriceService &prices() { return prices_; }
+    // Diagnostic counters per browser backend; they never fail the work.
+    void count_event(std::string_view backend, std::string_view event) {
+        try { store_.record_backend_event(backend, event); } catch (...) {}
+    }
+    // The events an error code itself proves.
+    void count_error(std::string_view backend, std::string_view code) {
+        if (code == "permission_denied") count_event(backend, "permission_denied");
+        else if (code == "session_expired") count_event(backend, "login_redirect");
+        else if (code == "terms_required") count_event(backend, "terms_required");
+    }
+    void count_cooldown(std::string_view backend, std::string_view kind) {
+        if (kind == "auth") count_event(backend, "auth_cooldown");
+        else if (kind == "permission_temporary") count_event(backend, "permission_cooldown");
+        else if (kind == "login_expired") count_event(backend, "login_expired");
+    }
     void usage_failure(std::string_view id) {
         usage_healthy_ = false;
         log({{"event", "request_history_error"}, {"request_id", id}, {"code", "request_history_write_failed"}});
@@ -315,6 +339,7 @@ class Service {
         if (action == "stats.reset") { store_.reset_stats(); return {{"ok", true}}; }
         if (action == "models.list" || action == "accounts.probe")
             return maintenance(command);
+        if (action == "diagnostics.report") return diagnostics_report();
         // HTTP may reach only the explicitly allowlisted management routes,
         // behind the separate admin credential. IPC remains owner-only.
         auto cfg = config();
@@ -322,6 +347,21 @@ class Service {
         if (action == "accounts.import")
             discover_models_after_import(result.at("accounts").as_array());
         return result;
+    }
+    json::object diagnostics_report() {
+        const auto cfg = config();
+        DiagnosticsSources sources;
+        sources.status = control({{"command", "status"}});
+        try { sources.browser = gateway_->diagnostics(); }
+        catch (...) { sources.browser = {{"status", "unavailable"}}; }
+        sources.runtime = doctor(cfg);
+        sources.config = cfg;
+        sources.accounts = store_.account_status();
+        sources.events = store_.backend_events();
+        sources.journal = recent_failure_records(journal_);
+        sources.logs = log_sources(cfg.data_dir);
+        sources.platform = runtime_platform();
+        return safe_report(sources);
     }
     // Model reads stay local, so an imported account without a saved catalog
     // gets one background discovery. Best effort: the import already succeeded.
@@ -367,8 +407,10 @@ class Service {
                 // answer before the HTTP handler's timeout discards them.
                 const auto scan_deadline = job->started_at +
                     std::chrono::seconds(job->config.cookie_import_timeout_seconds) - cookie_import_commit_margin;
+                const std::string backend(gateway_->backend_for(Account{}));
                 auto verified = probe_cookie_import(job->input, job->config.cookie_import_max_accounts,
-                                                    *gateway_, job->cancellation.get_token(), scan_deadline);
+                                                    *gateway_, job->cancellation.get_token(), scan_deadline,
+                                                    [&](std::string_view event) { count_event(backend, event); });
                 check_cancel(job->cancellation.get_token());
                 json::array accounts;
                 {
@@ -548,10 +590,19 @@ class Service {
                              } catch (const Error &e) {
                                  // Only a sign-in redirect or missing credentials
                                  // prove expiry; other auth failures cool down.
+                                 const std::string backend(gateway_->backend_for(a));
+                                 count_error(backend, e.code);
+                                 std::string_view kind;
                                  if (e.code == "session_expired" || e.code == "missing_cookies")
-                                     store_.failure(a.id, "probe", "login_expired");
+                                     kind = "login_expired";
+                                 else if (e.code == "terms_required")
+                                     kind = "terms_required";
                                  else if (e.status == 401)
-                                     store_.failure(a.id, "probe", "auth");
+                                     kind = "auth";
+                                 if (!kind.empty()) {
+                                     store_.failure(a.id, "probe", kind);
+                                     count_cooldown(backend, kind);
+                                 }
                                  if (!id.empty() || e.code == "cancelled")
                                      throw;
                                  results.push_back(
@@ -729,6 +780,7 @@ class Service {
                                 "with the CLI");
                 }
                 work->usage->begin_attempt(account->id);
+                const std::string backend(gateway_->backend_for(*account));
                 { std::lock_guard lock(queue_mutex_); active_account_id_ = account->id; }
                 log({{"event", "generation_attempt"}, {"request_id", work->usage->id()},
                     {"account_id", account->id}, {"attempt", attempt+1}});
@@ -743,6 +795,7 @@ class Service {
                         [&](GenerationEvent next) {
                             check_cancel(token);
                             if (next.kind == GenerationEvent::Kind::continuation_failed) {
+                                count_error(backend, string_or(next.data, "error"));
                                 work->usage->end_attempt(string_or(next.data, "error"));
                                 return;
                             }
@@ -827,6 +880,7 @@ class Service {
                     return;
                 } catch (const Error &e) {
                     work->usage->end_attempt(e.code);
+                    count_error(backend, e.code);
                     if (token.stop_requested() || delivered || continuing)
                         throw;
                     const bool last = attempt + 1 == cfg.limits.max_attempts;
@@ -865,6 +919,7 @@ class Service {
                     case FailureAction::restart_browser: {
                         recovered = true;
                         const bool rebuild = decision.action == FailureAction::rebuild_session;
+                        count_event(backend, rebuild ? "session_rebuild" : "browser_restart");
                         log({{"event", "session_recovery"}, {"request_id", work->usage->id()},
                              {"account_id", account->id}, {"code", e.code},
                              {"action", rebuild ? "rebuild_session" : "restart_browser"}});
@@ -875,6 +930,7 @@ class Service {
                     }
                     case FailureAction::cool_and_switch:
                         store_.failure(account->id, request.model, decision.cooldown, e.retry_after);
+                        count_cooldown(backend, decision.cooldown);
                         log({{"event", "account_failure"}, {"request_id", work->usage->id()},
                              {"account_id", account->id}, {"kind", decision.cooldown}, {"code", e.code}});
                         previous = e;
@@ -1347,13 +1403,16 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
         else throw Error(404, "route_not_found", "Unknown management route or method");
     }
     else if (get && path == "/logs/sources") { state.audit = false; result = log_sources(cfg.data_dir); }
-    else if ((get && path == "/diagnostics") || (post && path == "/diagnostics/export")) {
+    else if (get && path == "/diagnostics") {
         result = {{"version", "0.1.0"}, {"build_mode", build_mode()}, {"status", service.control({{"command", "status"}})},
             {"browser", service.control({{"command", "browser.diagnostics"}})},
             {"config", service.control({{"command", "config.show"}})},
             {"stats", service.control({{"command", "stats"}})},
+            {"events", service.control({{"command", "diagnostics.events"}})},
             {"logs", log_sources(cfg.data_dir)}, {"google_verified", false}};
     }
+    // The report users attach to bug reports holds allowlisted fields only.
+    else if (post && path == "/diagnostics/export") result = service.control({{"command", "diagnostics.report"}});
     else if (post && path == "/service/stop") {
         state.response_status = 202;
         co_await send_json(stream, 202, {{"status", "stopping"}}, state.origin);

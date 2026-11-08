@@ -62,6 +62,10 @@ inline FailureDecision classify_failure(const Error& error, unsigned attempt, bo
     // Credentials that cannot exist or a persistent sign-in redirect (after a
     // fresh session) are expiry; RPC authentication errors and identity
     // confusion are short account-wide cooldowns, never permanent expiry.
+    // AI Studio's terms dialog has been seen to stay closed after a reload; a
+    // repeated one waits for the account's owner to accept the terms.
+    if (code == "terms_required")
+        return recovered ? FailureDecision{cool_and_switch, "terms_required"} : FailureDecision{rebuild_session};
     if (code == "missing_cookies") return {cool_and_switch, "login_expired"};
     if (code == "session_expired") return recovered ? FailureDecision{cool_and_switch, "login_expired"} : FailureDecision{rebuild_session};
     if (code == "identity_mismatch") return {cool_and_switch, "auth"};

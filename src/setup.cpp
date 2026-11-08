@@ -450,6 +450,25 @@ void write_selection(const fs::path &data_dir, const CamoufoxSelection &selectio
                                               {"held", selection.held}}));
 }
 } // namespace
+std::string runtime_platform() { return host_platform(); }
+std::size_t remove_profile_leftovers(const fs::path &data_dir) {
+    std::size_t removed = 0;
+    std::error_code error;
+    for (fs::directory_iterator it(data_dir / "runtime", error), end; !error && it != end; it.increment(error)) {
+        // The gateways name each launch's profile "<browser>-" + random_hex(12).
+        const auto name = path_utf8(it->path().filename());
+        const auto dash = name.find('-');
+        if (dash == std::string::npos) continue;
+        const auto prefix = name.substr(0, dash), suffix = name.substr(dash + 1);
+        std::error_code ignored;
+        if ((prefix != "browser" && prefix != "camoufox") || suffix.size() != 24 ||
+            suffix.find_first_not_of("0123456789abcdef") != std::string::npos ||
+            it->is_symlink(ignored) || !it->is_directory(ignored))
+            continue;
+        if (fs::remove_all(it->path(), ignored) != static_cast<std::uintmax_t>(-1) && !ignored) ++removed;
+    }
+    return removed;
+}
 std::optional<CamoufoxPin> camoufox_pin(const json::object &manifest, std::string_view platform) {
     const auto *camoufox = manifest.if_contains("camoufox");
     if (!camoufox) return std::nullopt;

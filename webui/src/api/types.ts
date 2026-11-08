@@ -25,6 +25,8 @@ export interface Cooldown {
   model: string
   until: number
   count: number
+  /** Why the account cooled down: auth, permission_temporary, login_expired, terms_required, … */
+  kind?: string
 }
 
 export interface Account {
@@ -35,6 +37,8 @@ export interface Account {
   disabled?: boolean
   expired?: boolean
   failures?: Cooldown[]
+  /** A Firefox identity is saved for the current seed. */
+  firefox_identity?: boolean
   /** Stored per-account browser identity; empty timezone/locale follow the host. */
   fingerprint?: { seed: number; timezone: string; locale: string }
 }
@@ -303,6 +307,21 @@ export interface RawLogPage {
 export interface Capabilities {
   api_version?: string
   [key: string]: unknown
+}
+
+/** Per-backend counters: totals since `since`, plus the last 7 UTC days and today (`last_at` in Unix seconds). */
+export interface BackendEventCount {
+  total: number
+  last_7_days: number
+  today: number
+  last_at: number
+}
+
+/** GET /diagnostics → events. Cleared together with the usage statistics. */
+export interface BackendEvents {
+  /** Unix seconds of the last statistics reset. */
+  since?: number
+  backends?: Record<string, Record<string, BackendEventCount>>
 }
 
 /** GET /diagnostics → browser: safe adapter state, never page data or cookies. */

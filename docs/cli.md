@@ -11,7 +11,7 @@ ais2api accounts list
 ais2api accounts import (--file PATH | --stdin) [--name NAME]
 ais2api accounts select ID | remove ID | reset ID | probe (ID | all)
 ais2api keys list
-ais2api stats
+ais2api stats | diagnostics
 ais2api models list
 ais2api config show | config validate | config reload
 ais2api operations status ID
@@ -119,7 +119,7 @@ ais2api accounts probe all
 
 - **import**：输入可以是 Cookie 请求头文本、Netscape Cookie 文本、Cookie JSON、storage state 或已有凭据包。只有显式指定 `--stdin` 才会读取标准输入。不要把 Cookie 写在命令参数里，避免进入 shell 历史。导入与列表结果不包含 Cookie 值，但账号名称和邮箱对本机用户可见。
 - **select**：设为首选账号。
-- **reset**：清除账号记录的失败/禁用状态，不能修复已过期的 Google Cookie。
+- **reset**：清除账号记录的失败/禁用状态，不能修复已过期的 Google Cookie。账号因“需要同意条款”冷却时，先用该账号在普通浏览器中登录 AI Studio 并同意条款，再执行 reset。
 - **probe**：使用账号凭据实际访问上游，需要服务正在运行，可能会启动浏览器。不要把它当作离线健康检查。
 
 账号 ID 来自 `accounts list`。
@@ -139,6 +139,7 @@ ais2api config show
 ais2api config validate
 ais2api config reload
 ais2api stats
+ais2api diagnostics
 ais2api models list
 ais2api operations status OPERATION_ID
 ```
@@ -147,6 +148,7 @@ ais2api operations status OPERATION_ID
 - **config validate**：在本地校验配置。
 - **config reload**：需要服务正在运行，应用可热更新的设置（包括 `api_key`，修改后旧 Key 立即失效）；存在需要重启的差异时返回 `restart_required`。
 - **stats**：显示按客户端请求计数的累计结果、usage 和 USD 估算费用。`records` 为账号/模型分组，`totals` 为合计，`legacy_records` 单列功能启用前的原口径累计。`amount_nano` 为完整计价请求的小计，`known_amount_nano` 为含部分计价请求的已知小计，单位均为十亿分之一美元；`priced` / `unpriced` 区分完整与未完整计价请求，`partially_priced` 为后者中有已知金额的请求数。累计不随明细到期而清空，逐条请求与价格状态见 WebUI 或管理 API。
+- **diagnostics**：输出安全诊断报告（JSON），内容与 WebUI“导出报告”相同，只含白名单字段，不含 Cookie、邮箱、账号 ID、请求内容和本机路径，可直接附在问题反馈中。服务未运行时用本地数据生成，浏览器部分标为 `not_running`。
 - **models list**：服务运行时请求实时发现并保存完整结果，可能启动浏览器；失败报错并保留之前保存的结果。客户端模型列表只读取本地，不发起发现。服务未运行时本命令只能返回 `configured_models`。
 
 模型发现和账号探测以排队的异步操作执行，使状态查询和停止命令保持响应。命令行每 200 毫秒查询一次结果，最多等待 120 秒；仍未完成时以 `operation_pending` 退出，可以用返回的 ID 执行 `operations status` 继续查询。操作结果只临时保留。

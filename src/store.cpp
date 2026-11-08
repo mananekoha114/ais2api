@@ -953,11 +953,47 @@ void Store::reset_stats() {
         try {
             Statement active(usage.db, "SELECT 1 FROM request_history WHERE terminal=0 LIMIT 1");
             if (active.row()) throw Error(409, "requests_active", "Wait for active requests before resetting statistics");
-            exec(usage.db, "DELETE FROM request_history;DELETE FROM request_totals;"
+            exec(usage.db, "DELETE FROM request_history;DELETE FROM request_totals;DELETE FROM backend_events;"
                            "UPDATE meta SET v=CAST(unixepoch()*1000 AS TEXT) WHERE k IN ('usage_since','usage_detail_since');COMMIT");
         } catch (...) { exec(usage.db, "ROLLBACK"); throw; }
     });
     impl_->run([&] { exec(impl_->db, "DELETE FROM stats"); });
+}
+void Store::record_backend_event(std::string_view backend, std::string_view event) {
+    auto &usage = *impl_->usage;
+    usage.run([&] {
+        const auto now = unix_seconds();
+        Statement s(usage.db, "INSERT INTO backend_events(day,backend,event,count,last_at) VALUES(?,?,?,1,?) "
+                              "ON CONFLICT(day,backend,event) DO UPDATE SET count=count+1,last_at=excluded.last_at");
+        s.integer(1, now / 86400);
+        s.text(2, backend);
+        s.text(3, event);
+        s.integer(4, now);
+        s.row();
+    });
+}
+json::object Store::backend_events() {
+    auto &usage = *impl_->usage;
+    return usage.run([&] {
+        const auto today = unix_seconds() / 86400;
+        json::object backends;
+        Statement s(usage.db, "SELECT backend,event,SUM(count),SUM(CASE WHEN day>=? THEN count ELSE 0 END),"
+                              "SUM(CASE WHEN day=? THEN count ELSE 0 END),MAX(last_at) FROM backend_events "
+                              "GROUP BY backend,event ORDER BY backend,event");
+        s.integer(1, today - 6);
+        s.integer(2, today);
+        while (s.row()) {
+            auto &events = backends[s.str(0)];
+            if (!events.is_object()) events = json::object{};
+            events.as_object()[s.str(1)] = json::object{
+                {"total", sqlite3_column_int64(s.p, 2)}, {"last_7_days", sqlite3_column_int64(s.p, 3)},
+                {"today", sqlite3_column_int64(s.p, 4)}, {"last_at", sqlite3_column_int64(s.p, 5)}};
+        }
+        // usage_since is stored in milliseconds; report Unix seconds like last_at.
+        Statement since(usage.db, "SELECT CAST(v AS INTEGER) FROM meta WHERE k='usage_since'");
+        return json::object{{"since", since.row() ? sqlite3_column_int64(since.p, 0) / 1000 : 0},
+                            {"backends", std::move(backends)}};
+    });
 }
 void Store::failure(std::string_view id, std::string_view model, std::string_view kind,
                     unsigned retry) {
@@ -970,8 +1006,10 @@ void Store::failure(std::string_view id, std::string_view model, std::string_vie
                 s.text(1, id);
                 s.row();
             } else {
-                // Authentication trouble affects every model of the account.
-                std::string m = (kind == "429" || kind == "rate_limit" || kind == "auth") ? "*" : std::string(model);
+                // Authentication trouble and pending AI Studio terms affect
+                // every model of the account.
+                std::string m = (kind == "429" || kind == "rate_limit" || kind == "auth" || kind == "terms_required")
+                    ? "*" : std::string(model);
                 Statement prior(impl_->db,
                                 "SELECT count FROM failures WHERE account=? AND model=?");
                 prior.text(1, id);
@@ -996,6 +1034,9 @@ void Store::failure(std::string_view id, std::string_view model, std::string_vie
                     base_delay = minute || quota_count <= 2 ? 60u : quota_count <= 4 ? 300u : 600u;
                 } else {
                     if (kind == "permission_temporary" || kind == "auth") base_delay = 300;
+                    // Only the account's owner can accept the terms; retrying
+                    // sooner just reopens the dialog.
+                    if (kind == "terms_required") base_delay = 3600;
                     Statement active_quota(impl_->db, "SELECT cooldown_until FROM quota_counters WHERE account=? AND model=?");
                     active_quota.text(1, id); active_quota.text(2, m);
                     if (active_quota.row()) quota_deadline = sqlite3_column_int64(active_quota.p, 0);
@@ -1219,6 +1260,9 @@ void init_usage(sqlite3 *db) {
              "CREATE TABLE IF NOT EXISTS model_catalog(account TEXT PRIMARY KEY,models TEXT NOT NULL,"
              "saved_at INTEGER NOT NULL);"
              "CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY,v TEXT NOT NULL);"
+             // Diagnostic counters per browser backend and UTC day.
+             "CREATE TABLE IF NOT EXISTS backend_events(day INTEGER NOT NULL,backend TEXT NOT NULL,"
+             "event TEXT NOT NULL,count INTEGER NOT NULL,last_at INTEGER NOT NULL,PRIMARY KEY(day,backend,event));"
              "INSERT OR IGNORE INTO meta(k,v) VALUES('usage_since',CAST(unixepoch()*1000 AS TEXT));"
              "INSERT OR IGNORE INTO meta(k,v) SELECT 'usage_detail_since',v FROM meta WHERE k='usage_since';"
              "PRAGMA user_version=1;COMMIT;");
@@ -1658,18 +1702,26 @@ json::array Store::account_status() {
             auto o = summary(decode(s));
             o["expired"] = sqlite3_column_int(s.p, 6) != 0;
             json::array failures;
-            Statement f(impl_->db, "SELECT model,until,count FROM failures WHERE account=?");
+            Statement f(impl_->db, "SELECT model,until,count,kind FROM failures WHERE account=?");
             f.text(1, s.str(0));
             while (f.row())
                 failures.push_back(json::object{{"model", f.str(0)},
                                                 {"until", sqlite3_column_int64(f.p, 1)},
-                                                {"count", sqlite3_column_int(f.p, 2)}});
+                                                {"count", sqlite3_column_int(f.p, 2)},
+                                                {"kind", f.str(3)}});
             o["failures"] = failures;
-            Statement fp(impl_->db, "SELECT seed,timezone,locale FROM fingerprints WHERE account=?");
+            Statement fp(impl_->db, "SELECT seed,timezone,locale,firefox FROM fingerprints WHERE account=?");
             fp.text(1, s.str(0));
-            if (fp.row())
+            if (fp.row()) {
                 o["fingerprint"] = json::object{{"seed", sqlite3_column_int64(fp.p, 0)},
                                                 {"timezone", fp.str(1)}, {"locale", fp.str(2)}};
+                // As firefox_identity(): an identity drawn for an older seed is retired.
+                boost::system::error_code error;
+                const auto identity = fp.str(3).empty() ? json::value() : json::parse(fp.str(3), error);
+                const auto seed = identity.is_object() ? identity.as_object().if_contains("seed") : nullptr;
+                o["firefox_identity"] = !error && seed && (seed->is_int64() || seed->is_uint64()) &&
+                                        seed->to_number<std::int64_t>() == sqlite3_column_int64(fp.p, 0);
+            }
             rows.push_back(o);
         }
         return rows;

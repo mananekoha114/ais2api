@@ -41,7 +41,7 @@ else()
   pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
   set(AIS2API_ZSTD_TARGET PkgConfig::ZSTD)
 endif()
-add_library(ais2api_core src/common.cpp src/config.cpp src/store.cpp src/pricing.cpp src/cookie_import.cpp src/schema.cpp src/protocol.cpp src/responses.cpp src/browser.cpp src/browser_process.cpp src/camoufox.cpp src/fpgen.cpp src/firefox_identity.cpp src/runtime.cpp src/setup.cpp src/download.cpp src/bundle.cpp src/server.cpp src/control.cpp src/management.cpp src/logs.cpp src/console.cpp src/log_sources.cpp src/webui.cpp src/region.cpp)
+add_library(ais2api_core src/common.cpp src/config.cpp src/store.cpp src/pricing.cpp src/cookie_import.cpp src/schema.cpp src/protocol.cpp src/responses.cpp src/browser.cpp src/browser_process.cpp src/camoufox.cpp src/fpgen.cpp src/firefox_identity.cpp src/runtime.cpp src/setup.cpp src/download.cpp src/bundle.cpp src/server.cpp src/control.cpp src/management.cpp src/diagnostics.cpp src/logs.cpp src/console.cpp src/log_sources.cpp src/webui.cpp src/region.cpp)
 set(browser_bridge_inc "${CMAKE_CURRENT_BINARY_DIR}/generated/browser_bridge.inc")
 target_sources(ais2api_core PRIVATE src/price_service.cpp src/usage.cpp src/continuation.cpp src/browser_generation.cpp)
 add_custom_command(OUTPUT "${browser_bridge_inc}"

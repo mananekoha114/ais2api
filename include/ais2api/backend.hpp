@@ -20,6 +20,8 @@ class GenerationBackend {
     virtual json::object probe(const Account &, std::stop_token = {}) = 0;
     virtual json::object probe_import(Account &account, std::stop_token token = {}) { return probe(account, token); }
     virtual json::object diagnostics() = 0;
+    // The browser backend that serves `account`, as diagnostics count it.
+    virtual std::string_view backend_for(const Account &) { return "custom"; }
     virtual void reconfigure(const Config &) {}
     virtual void close() = 0;
     // Discard the resident account's page and BotGuard session so the next

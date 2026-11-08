@@ -57,7 +57,7 @@ export function generationSettings(settings: RequestDetail['settings']) {
 }
 const attemptErrors: Record<string, string> = { permission_denied: '权限错误', upstream_error: '上游错误', cancelled: '请求取消',
   client_disconnected: '客户端断开', browser_incompatible: '浏览器会话异常', transient_rpc_route: '上游路由异常',
-  upstream_no_content: '上游未返回内容', session_expired: '会话过期' }
+  upstream_no_content: '上游未返回内容', session_expired: '会话过期', terms_required: '需要同意条款' }
 type AttemptInfo = Pick<RequestDetail['attempts'][number], 'kind' | 'error'>
 const attemptKinds = { initial: '首轮', retry: '失败重试', continuation: '自动续接', continuation_retry: '续接重试' }
 export const attemptLabel = (attempt: Pick<AttemptInfo, 'kind'>, index: number) =>

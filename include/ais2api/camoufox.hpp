@@ -40,6 +40,10 @@ std::string firefox_user_js(const json::object &prefs);
 // fingerprint seed. Cookie import and the account's first launch draw the
 // same identity.
 std::uint64_t identity_salt(std::string_view secret, std::string_view account_id, unsigned seed);
+// Browser output that repeats on every page without meaning anything: Juggler
+// redeclaring SimpleChannel in each content process, and the WebDriver BiDi
+// module's WeakMap error when a context closes. Kept out of the browser log.
+bool camoufox_log_noise(std::string_view line);
 } // namespace browser_detail
 // The experimental Camoufox backend (browser_backend "camoufox"): the same
 // account flow as BrowserGateway over WebDriver BiDi. Each account keeps a
@@ -55,6 +59,7 @@ class CamoufoxGateway final : public GenerationBackend {
     json::object probe(const Account &account, std::stop_token cancel = {}) override;
     json::object probe_import(Account &account, std::stop_token cancel = {}) override;
     json::object diagnostics() override;
+    std::string_view backend_for(const Account &) override { return "camoufox"; }
     void reconfigure(const Config &config) override;
     // Launches the browser without an identity and checks, on a local page,
     // what generation depends on: the bridge preload, navigator.webdriver,

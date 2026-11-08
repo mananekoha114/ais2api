@@ -1851,6 +1851,35 @@ TEST_CASE("A repeated 403 after rebuilding cools the model and switches without 
     REQUIRE_FALSE(server.failed);
 }
 
+TEST_CASE("Backend counters record Code 7 denials, recoveries, cooldowns and sign-in redirects", "[generation][http][recovery][diagnostics]") {
+    const auto total = [](const json::object& events, std::string_view event) -> std::int64_t {
+        const auto& backend = events.at("backends").at("custom").as_object();
+        auto found = backend.if_contains(event);
+        return found ? found->at("total").to_number<std::int64_t>() : 0;
+    };
+    {
+        GenerationServer server;
+        REQUIRE(generate_once(server, "synthetic-permission-always").result_int() == 403);
+        Store store(server.config.data_dir);
+        const auto events = store.backend_events();
+        CHECK(total(events, "permission_denied") == static_cast<std::int64_t>(server.state->attempted_accounts.size()));
+        CHECK(total(events, "session_rebuild") == 1);
+        CHECK(total(events, "permission_cooldown") == 2);
+        CHECK(total(events, "login_redirect") == 0);
+        REQUIRE_FALSE(server.failed);
+    }
+    {
+        GenerationServer server;
+        REQUIRE(generate_once(server, "synthetic-session-expired").result_int() == 401);
+        Store store(server.config.data_dir);
+        const auto events = store.backend_events();
+        CHECK(total(events, "login_redirect") == 3);
+        CHECK(total(events, "login_expired") == 2);
+        CHECK(total(events, "permission_denied") == 0);
+        REQUIRE_FALSE(server.failed);
+    }
+}
+
 TEST_CASE("RPC authentication failures cool accounts briefly instead of expiring them", "[generation][http][recovery]") {
     for (const std::string model : {"synthetic-upstream-auth", "synthetic-identity-mismatch"}) {
         GenerationServer server;

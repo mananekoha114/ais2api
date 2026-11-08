@@ -114,8 +114,12 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 | GET、POST | `/pricing`、`/pricing/refresh` | 价格来源状态、后台更新参考价格 |
 | GET、DELETE | `/operations/{id}` | 读取异步操作结果，或处理后释放 |
 | GET | `/logs/sources`、`/logs`、`/logs/stream` | 日志来源、历史与实时流，见下文 |
-| GET | `/diagnostics` | 脱敏诊断快照 |
-| POST | `/diagnostics/export` | 导出脱敏诊断快照 |
+| GET | `/diagnostics` | 管理员查看的完整诊断（隐藏密钥，但含本机路径和账号状态） |
+| POST | `/diagnostics/export` | 安全诊断报告，只含白名单字段，可附在问题反馈中 |
+
+`GET /diagnostics` 的 `events` 是按后端统计的排查计数：`backends.<后端>.<事件>` 给出 `total`、`last_7_days`、`today`（按 UTC 日期）和 `last_at`，`since` 是上次重置统计的时间（Unix 秒）。后端为 `cloakbrowser`、`camoufox`，或自定义后端的 `custom`；事件有 `permission_denied`（403，包括随后被救回的）、`login_redirect`、`auth_cooldown`、`permission_cooldown`、`login_expired`、`terms_required`、`session_rebuild` 与 `browser_restart`。`DELETE /stats` 会一并清零。
+
+`POST /diagnostics/export` 返回 `report: "ais2api-diagnostics"` 的安全报告，它不是在完整诊断上做脱敏，而是只复制白名单内的字段：版本、平台、服务状态、运行时版本与来源、浏览器适配状态、配置开关（代理只给协议）、按后端统计、账号（按顺序编号为 `account-N`，只有后端、状态和冷却）、最近 50 条故障事件和日志大小。报告不含 Cookie、邮箱、账号 ID、请求内容、本机路径、代理地址、模型别名、User-Agent 和 GPU 字符串。
 
 `continuation_retry_enabled` 默认开启；`limits.max_continuation_retries` 默认 1、允许 1–16，整条回答共享额外补试次数。两项可通过配置 PATCH 保存并从下一次生成生效；当前回答保持开始时的设置。关闭开关仍保留次数，不关闭正常续接；其余保存和待重启规则相同。补试条件见[协议合同](protocol.md#总输出预算与自动续接)。
 

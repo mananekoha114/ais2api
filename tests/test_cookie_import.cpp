@@ -257,6 +257,32 @@ TEST_CASE("cookie import distinguishes safe browser failures without leaking exc
         }
     }
 }
+TEST_CASE("cookie import reports pending AI Studio terms and first-probe sign-in redirects") {
+    {
+        ImportBackend backend; backend.fail_at = 1; backend.failure_code = "terms_required";
+        std::vector<std::string> events;
+        try {
+            probe_cookie_import(request(), 8, backend, {}, std::nullopt, [&](std::string_view e) { events.emplace_back(e); });
+            FAIL("expected failure");
+        } catch (const Error &e) {
+            CHECK(e.code == "cookie_terms_required"); CHECK(e.status == 409);
+        }
+        CHECK(events == std::vector<std::string>{"terms_required"});
+    }
+    {
+        // Sign-in pages after the first verified login end the scan; only the
+        // first probe says something about the cookies.
+        ImportBackend backend;
+        backend.replies = {verified("zero@example.com"), sign_in(), sign_in(), sign_in()};
+        std::vector<std::string> events;
+        probe_cookie_import(request(), 8, backend, {}, std::nullopt, [&](std::string_view e) { events.emplace_back(e); });
+        CHECK(events.empty());
+        ImportBackend rejected;
+        rejected.replies = {sign_in(), sign_in(), sign_in()};
+        CHECK_THROWS(probe_cookie_import(request(), 8, rejected, {}, std::nullopt, [&](std::string_view e) { events.emplace_back(e); }));
+        CHECK(events == std::vector<std::string>{"login_redirect"});
+    }
+}
 TEST_CASE("cookie push rejects ambiguous identities infrastructure errors and cancellation atomically") {
     Temp temp; Store store(temp.path);
     ImportBackend backend;

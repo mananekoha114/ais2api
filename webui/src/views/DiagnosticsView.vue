@@ -5,11 +5,11 @@ import FInfoBar from '../components/FInfoBar.vue'
 import PageHeader from '../components/PageHeader.vue'
 import ProgressRing from '../components/ProgressRing.vue'
 import { api, describeError } from '../api/client'
-import type { BrowserDiagnostics, Capabilities, ConfigView, LogSource, Status } from '../api/types'
+import type { BackendEvents, BrowserDiagnostics, Capabilities, ConfigView, LogSource, Status } from '../api/types'
 import { refreshStatus } from '../stores/service'
 import { confirm, copyText, downloadFile, notify, notifyError } from '../stores/ui'
 import { browserPhase, browserStatus, cookieRefreshLabel, modelDiscoveryLabel, proxyModeLabel } from '../utils/browser'
-import { formatBytes, formatDuration } from '../utils/format'
+import { formatBytes, formatDuration, formatTimestamp } from '../utils/format'
 
 interface Diagnostics {
   version?: string
@@ -19,7 +19,20 @@ interface Diagnostics {
   stats?: { records?: unknown[] }
   logs?: { sources?: LogSource[] }
   browser?: BrowserDiagnostics
+  events?: BackendEvents
   google_verified?: boolean
+}
+
+const backendNames: Record<string, string> = { cloakbrowser: 'CloakBrowser', camoufox: 'Camoufox', spidermonkey: 'SpiderMonkey', custom: '其他' }
+const eventNames: Record<string, { label: string; hint: string }> = {
+  permission_denied: { label: '403（Code 7）', hint: '上游以 permission_denied 拒绝了生成，包括随后被就地重建救回的' },
+  login_redirect: { label: '跳转登录页', hint: '页面被重定向到 Google 登录，Cookie 可能已失效' },
+  auth_cooldown: { label: '认证冷却', hint: '账号因认证失败进入冷却' },
+  permission_cooldown: { label: '403 冷却', hint: '账号因重复的 403 进入冷却' },
+  login_expired: { label: '登录失效', hint: '账号被标记为需要重新登录' },
+  terms_required: { label: '需要同意条款', hint: 'AI Studio 要求账号同意条款；ais2api 不会代为同意' },
+  session_rebuild: { label: '就地重建会话', hint: '失败后在同一浏览器内重建页面会话' },
+  browser_restart: { label: '重启浏览器', hint: '失败后重启了整个浏览器进程' },
 }
 
 const data = ref<Diagnostics | null>(null)
@@ -51,13 +64,26 @@ const browser = computed(() => data.value?.browser)
 const browserState = computed(() => browserStatus(browser.value?.status))
 const yesNo = (value: boolean | undefined, yes: string, no: string) => (value === undefined ? '—' : value ? yes : no)
 const logBytes = computed(() => sources.value.reduce((sum, s) => sum + s.bytes, 0))
+const eventBackends = computed(() => Object.keys(data.value?.events?.backends ?? {}).sort())
+const eventRows = computed(() => {
+  const backends = data.value?.events?.backends ?? {}
+  const seen = new Set(Object.values(backends).flatMap(events => Object.keys(events)))
+  const known = Object.keys(eventNames).filter(event => seen.has(event))
+  const other = [...seen].filter(event => !(event in eventNames)).sort()
+  return [...known, ...other].map(event => ({
+    event,
+    label: eventNames[event]?.label ?? event,
+    hint: eventNames[event]?.hint ?? '',
+    cells: eventBackends.value.map(backend => backends[backend]?.[event]),
+  }))
+})
 
 async function exportSnapshot() {
   exporting.value = true
   try {
     const snapshot = await api.post<unknown>('/diagnostics/export')
     downloadFile(`ais2api-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, JSON.stringify(snapshot, null, 2))
-    notify('success', '诊断快照已导出', '内容已脱敏，不含密钥与 Cookie。')
+    notify('success', '诊断报告已导出', '只含安全字段：不含 Cookie、邮箱、账号 ID、请求内容和本机路径。')
   } catch (e) {
     notifyError('导出失败', e)
   } finally {
@@ -95,10 +121,10 @@ const capabilityList = computed(() =>
 
 <template>
   <div>
-    <PageHeader title="诊断" subtitle="脱敏的运行快照与日志清单。诊断与就绪检查都不代表 Google 上游生成已验证。">
+    <PageHeader title="诊断" subtitle="运行状态、按后端统计与日志清单。诊断与就绪检查都不代表 Google 上游生成已验证。">
       <button class="btn" :disabled="loading" @click="load"><FIcon name="arrow_clockwise" />刷新</button>
       <button class="btn accent" :disabled="exporting" @click="exportSnapshot">
-        <ProgressRing v-if="exporting" class="on-accent" /><FIcon v-else name="arrow_download" />导出快照
+        <ProgressRing v-if="exporting" class="on-accent" /><FIcon v-else name="arrow_download" />导出报告
       </button>
     </PageHeader>
 
@@ -195,6 +221,36 @@ const capabilityList = computed(() =>
           </div>
           <p class="t-caption t-tertiary">
             桥接脚本内嵌在可执行文件中，旁边的 browser/bridge.js 仅作参考，不会覆盖内嵌版本。状态在浏览器忙碌时可能只显示“处理中”。
+          </p>
+        </section>
+
+        <section class="settings-group">
+          <h3>按后端统计</h3>
+          <div class="card">
+            <table v-if="eventRows.length" class="table">
+              <thead>
+                <tr>
+                  <th>事件</th>
+                  <th v-for="b in eventBackends" :key="b" class="num">{{ backendNames[b] ?? b }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in eventRows" :key="row.event">
+                  <td :title="row.hint">{{ row.label }}</td>
+                  <td v-for="(cell, i) in row.cells" :key="eventBackends[i]" class="num">
+                    <template v-if="cell">
+                      <strong :title="`最近一次：${formatTimestamp(cell.last_at)}`">{{ cell.total }}</strong>
+                      <div class="t-caption t-secondary">近 7 天 {{ cell.last_7_days }} · 今天 {{ cell.today }}</div>
+                    </template>
+                    <span v-else class="t-tertiary">0</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-else class="pad t-secondary">还没有记录到任何事件。</div>
+          </div>
+          <p class="t-caption t-tertiary">
+            <template v-if="data.events?.since">自 {{ formatTimestamp(data.events.since) }} 起累计，</template>“近 7 天”与“今天”按 UTC 日期计算。重置统计时一并清零。
           </p>
         </section>
 
