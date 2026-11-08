@@ -46,6 +46,7 @@ CloakBrowser 的指纹作用于整个进程，因此切换到指纹不同的账�
 - 同一时间只有一个浏览器驻留：轮到另一个后端的账号时，先关闭当前浏览器，再启动另一个。
 - `setup` 和 `doctor` 按“需要的后端”工作：默认后端加上已保存账号用到的后端。诊断信息的 `backend` 是当前运行的后端，`default_backend` 是默认后端。
 - Linux 上的 Camoufox 在 Xvfb 虚拟显示中以有界面模式运行（`headless=true` 时），字体使用 Camoufox 自带的 Linux 字体组，见 [Camoufox 后端](platforms.md#camoufox-后端)。
+- Termux 上的 Camoufox 与 Xvfb 都运行在 proot 容器 `ais2api-browser` 中，见 [浏览器容器](platforms.md#浏览器容器)。
 
 ## Cookie 写回
 

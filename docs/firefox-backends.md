@@ -93,6 +93,10 @@
       - 启动时把 fontconfig 中相对于工作目录的字体路径换成这几组字体的绝对路径，把缓存移到数据目录，再通过 `FONTCONFIG_FILE` 交给浏览器。
   - **扩展**：不加载自带的 uBlock Origin，与现有的 `--disable-extensions` 一致，解压时就跳过 `addons/UBO`。
   - 开发版可以把 Camoufox 一起打包。
+  - **Termux**：
+    - Linux ARM64 版安装在 Termux 一侧，裁剪方式与 Linux 相同；
+    - 与 CloakBrowser 共用 proot 容器 `ais2api-browser`，`setup` 在容器内只安装缺少的包；
+    - 网关通过 `proot-distro login` 启动 Xvfb 和 Camoufox，把数据目录按原路径绑定进去。`proot-distro` 不传递宿主的环境变量，身份配置等都用 `--env` 传入，所以不需要 CloakBrowser 那样的启动脚本。
 
 ## SpiderMonkey 后端
 

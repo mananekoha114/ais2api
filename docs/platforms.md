@@ -164,7 +164,19 @@ CXXFLAGS=-fexperimental-library sh scripts/build.sh termux --install-deps --buil
 
 ### 浏览器容器
 
-C++ 服务运行在 Termux 宿主上，浏览器运行在 Ubuntu 用户空间中。`setup` 会创建项目专属的 proot Ubuntu 24.04 容器和启动器。当前官方 proot-distro 使用 OCI 镜像和命名容器，以下仅演示语法：
+C++ 服务运行在 Termux 宿主上，浏览器运行在 Ubuntu 用户空间中。两种后端共用项目专属的 proot-distro 容器 `ais2api-browser`（Ubuntu 24.04）：
+
+- 没有这个容器时，`setup --yes` 会创建它，并在 `<data_dir>/runtime/proot-owned.json` 中记下容器是自己创建的。同名但没有这个记录的容器，`setup` 不会改动，返回 `unknown_container`。
+- CloakBrowser：`setup` 在容器内安装它需要的包，并生成启动器 `run-browser.sh`。
+- Camoufox：
+  - 使用 Linux ARM64 版，裁剪方式与 Linux 相同，安装在 Termux 一侧的 `<data_dir>/runtime/camoufox/<版本>-termux-arm64/`。
+  - 系统包与 Linux 的列表相同（含 `xvfb`），装在容器内。`setup` 读取容器的 dpkg 记录，只安装缺少的包；容器和包都已就绪时，既不询问也不运行任何命令。
+  - 网关用 `proot-distro login` 在容器内启动 Xvfb 和 Camoufox，数据目录与 Camoufox 所在目录按原路径绑定进去。
+  - `proot-distro` 不传递宿主的环境变量，所以身份配置、`DISPLAY`、`FONTCONFIG_FILE` 和私有目录都用 `--env` 传入。容器内的 `HOME` 由 proot-distro 设为容器自己的 `/root`。
+  - 显示：`headless=true` 时使用容器内的 Xvfb。`headless=false` 时使用 Termux:X11 的显示：先启动 Termux:X11 并设置 `DISPLAY`，网关会加上 `--shared-x11`。
+  - Termux 上的 Camoufox 还没有在真机上验证。
+
+当前官方 proot-distro 使用 OCI 镜像和命名容器，以下仅演示语法：
 
 ```sh
 pkg install proot-distro
@@ -303,6 +315,8 @@ Camoufox 位于运行包的 `bin/camoufox-runtime/<版本>-<平台>/`。`doctor`
 3. 在 Xvfb 下运行隐藏测试 `[.camoufox-runtime]`、`[.camoufox-fonts]`（与 `camoufox-dev.py fetch` 取得的完整版比较）和 `[.fpgen-model]`；
 4. 用 camoufox Python 包的 `check-identities` 检查生成的身份；
 5. 构建容器镜像，确认第一次启动时会安装并验证 Camoufox。
+
+另有一个实验性任务在 Termux ARM64 容器内构建，用 `setup --yes` 创建 proot 容器并安装 Camoufox，再通过 proot 运行 `[.camoufox-runtime]`。proot 能否在这个容器里运行还不确定，所以这个任务失败不会让工作流失败，以真机结果为准。
 
 全程只打开本地页面，不使用账号，也不访问 Google。
 
