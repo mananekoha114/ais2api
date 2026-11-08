@@ -357,6 +357,38 @@ void install_fpgen_model(const fs::path &archive, const fs::path &directory, con
     }
 }
 namespace {
+#ifdef AIS2API_DEV_BUNDLE
+struct EmbeddedModelFile {
+    std::string_view name;
+    const unsigned char *data;
+    std::size_t size;
+    std::string_view sha256;
+};
+#include "fpgen_model.inc"
+#endif
+// The embedded model's files when they are the pin's.
+std::optional<std::map<std::string, std::string_view>> embedded_model(const FpgenModelPin &pin) {
+#ifdef AIS2API_DEV_BUNDLE
+    if (embedded_fpgen_tag != pin.tag || std::size(embedded_fpgen_files) != pin.file_sha256.size()) return std::nullopt;
+    std::map<std::string, std::string_view> files;
+    for (const auto &file : embedded_fpgen_files) {
+        const auto pinned = pin.file_sha256.find(std::string(file.name));
+        if (pinned == pin.file_sha256.end() || pinned->second != file.sha256) return std::nullopt;
+        files.emplace(file.name, std::string_view(reinterpret_cast<const char *>(file.data), file.size));
+    }
+    return files;
+#else
+    (void)pin;
+    return std::nullopt;
+#endif
+}
+} // namespace
+bool fpgen_model_embedded(const FpgenModelPin &pin) { return embedded_model(pin).has_value(); }
+fpgen::Model load_fpgen_model(const fs::path &data_dir, const FpgenModelPin &pin) {
+    if (const auto files = embedded_model(pin)) return fpgen::Model::load(*files, pin.file_sha256);
+    return fpgen::Model::load(fpgen_model_directory(data_dir, pin), pin.file_sha256);
+}
+namespace {
 // Written last into a Camoufox directory setup installed.
 constexpr std::string_view camoufox_marker = ".ais2api-runtime.json";
 #ifdef _WIN32
@@ -587,23 +619,28 @@ json::object setup_camoufox(const Config &config) {
         }
         console::emit_record(record);
     };
-    const auto state = fpgen_model_state(directory, model);
-    if (state == "foreign")
-        throw Error(409, "unknown_runtime",
-                    path_utf8(directory) + " was not created by setup; move it away and rerun setup");
-    if (state != "installed") {
-        stage("model-download", false);
-        const auto archive = root / "downloads" / "fpgen-model.zip";
-        download_verified(model.url, archive, model.sha256, config.proxy, model.size);
-        stage("model-install", false);
-        install_fpgen_model(archive, directory, model);
+    json::object model_record{{"tag", model.tag}, {"source", "embedded"}};
+    if (!fpgen_model_embedded(model)) {
+        const auto state = fpgen_model_state(directory, model);
+        if (state == "foreign")
+            throw Error(409, "unknown_runtime",
+                        path_utf8(directory) + " was not created by setup; move it away and rerun setup");
+        if (state != "installed") {
+            stage("model-download", false);
+            const auto archive = root / "downloads" / "fpgen-model.zip";
+            download_verified(model.url, archive, model.sha256, config.proxy, model.size);
+            stage("model-install", false);
+            install_fpgen_model(archive, directory, model);
+        }
+        model_record = {{"tag", model.tag},
+                        {"source", "setup"},
+                        {"directory", path_utf8(directory)},
+                        {"installed_now", state != "installed"}};
     }
     stage("model-complete", false);
     json::object result{{"status", "prepared"},
                         {"browser_backend", config.browser_backend},
-                        {"fpgen_model", json::object{{"tag", model.tag},
-                                                     {"directory", path_utf8(directory)},
-                                                     {"installed_now", state != "installed"}}},
+                        {"fpgen_model", std::move(model_record)},
                         {"note", "Run accounts probe and an actual generation to verify Google access"}};
 
     if (const auto configured = camoufox_executable(config); configured.source == "browser_executable") {
@@ -918,11 +955,12 @@ json::object doctor(const Config &config) {
             {"google_access", "not_checked"}};
     if (config.browser_backend == "camoufox") {
         const auto model = fpgen_model_pin();
+        const bool embedded = fpgen_model_embedded(model);
         const auto directory = fpgen_model_directory(config.data_dir, model);
-        const auto model_state = fpgen_model_state(directory, model);
-        result["fpgen_model"] = json::object{{"tag", model.tag},
-                                             {"directory", path_utf8(directory)},
-                                             {"state", model_state}};
+        const auto model_state = embedded ? std::string("installed") : fpgen_model_state(directory, model);
+        json::object fpgen{{"tag", model.tag}, {"source", embedded ? "embedded" : "setup"}, {"state", model_state}};
+        if (!embedded) fpgen["directory"] = path_utf8(directory);
+        result["fpgen_model"] = std::move(fpgen);
         const auto executable = camoufox_executable(config);
         const auto selection = camoufox_selection(config.data_dir);
         const auto pin = camoufox_pin();

@@ -62,6 +62,29 @@ add_custom_command(OUTPUT "${camoufox_catalog_inc}"
     "-DOUTPUT=${camoufox_catalog_inc}" -P "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-camoufox.cmake"
   DEPENDS ${camoufox_catalog_files} scripts/embed-camoufox.cmake VERBATIM)
 target_sources(ais2api_core PRIVATE "${camoufox_catalog_inc}")
+if(AIS2API_DEV_BUNDLE)
+  set(AIS2API_FPGEN_MODEL_DIR "" CACHE PATH "The fpgen model files runtime-manifest.json pins, embedded in a dev bundle")
+  if(NOT AIS2API_FPGEN_MODEL_DIR)
+    message(FATAL_ERROR "A dev bundle embeds the fpgen model: set AIS2API_FPGEN_MODEL_DIR (scripts/build-dev.ps1 does)")
+  endif()
+  get_filename_component(fpgen_model_dir "${AIS2API_FPGEN_MODEL_DIR}" ABSOLUTE)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS runtime-manifest.json)
+  file(READ runtime-manifest.json runtime_manifest)
+  string(JSON fpgen_file_count LENGTH "${runtime_manifest}" fpgen_model file_sha256)
+  math(EXPR fpgen_last "${fpgen_file_count} - 1")
+  set(fpgen_model_files "")
+  foreach(index RANGE ${fpgen_last})
+    string(JSON name MEMBER "${runtime_manifest}" fpgen_model file_sha256 ${index})
+    list(APPEND fpgen_model_files "${fpgen_model_dir}/${name}")
+  endforeach()
+  set(fpgen_model_inc "${CMAKE_CURRENT_BINARY_DIR}/generated/fpgen_model.inc")
+  add_custom_command(OUTPUT "${fpgen_model_inc}"
+    COMMAND "${CMAKE_COMMAND}" "-DMODEL_DIR=${fpgen_model_dir}"
+      "-DMANIFEST=${CMAKE_CURRENT_SOURCE_DIR}/runtime-manifest.json"
+      "-DOUTPUT=${fpgen_model_inc}" -P "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-fpgen.cmake"
+    DEPENDS ${fpgen_model_files} runtime-manifest.json scripts/embed-fpgen.cmake VERBATIM)
+  target_sources(ais2api_core PRIVATE "${fpgen_model_inc}")
+endif()
 target_include_directories(ais2api_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 include(scripts/webui.cmake)
 target_include_directories(ais2api_core PUBLIC include)

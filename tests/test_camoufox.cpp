@@ -163,9 +163,11 @@ TEST_CASE("the Camoufox gateway needs the fpgen model and Camoufox", "[camoufox]
         return std::string("no error");
     };
     // No process is started for any refusal: generating an identity needs the
-    // model setup installs.
+    // model setup installs. A dev bundle embeds it.
+#ifndef AIS2API_DEV_BUNDLE
     CHECK(failure([&] { gateway.probe(account); }).starts_with("browser_not_configured: fpgen model is not installed"));
     CHECK(failure([&] { gateway.verify_identity("account-1"); }).starts_with("browser_not_configured: fpgen model"));
+#endif
     // A stored identity needs no model: the launch stops at the missing
     // Camoufox files instead.
     account.id = "acc_stored";

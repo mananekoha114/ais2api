@@ -40,17 +40,17 @@ std::string decompress(std::string_view compressed, std::string_view name) {
     if (ZSTD_isError(written) || written != output.size()) invalid(std::string(name) + " does not decompress");
     return output;
 }
-std::string checked(const fs::path &directory, const std::map<std::string, std::string> &file_sha256,
-                    const std::string &name) {
+constexpr std::array<std::string_view, 3> model_files{"fingerprint-network.json.zst", "values.json.zst",
+                                                     "values.dat.zst"};
+std::string_view checked(const std::map<std::string, std::string_view> &files,
+                         const std::map<std::string, std::string> &file_sha256, const std::string &name) {
     const auto pin = file_sha256.find(name);
     if (pin == file_sha256.end()) invalid("no sha256 is pinned for " + name);
-    const auto path = directory / name;
-    std::error_code error;
-    if (!fs::is_regular_file(path, error))
+    const auto file = files.find(name);
+    if (file == files.end())
         throw Error(503, "browser_not_configured", "fpgen model is not installed: run ais2api setup");
-    auto data = read_file(path, json_limit);
-    if (sha256(data) != pin->second) invalid(name + " does not match its pinned sha256");
-    return data;
+    if (sha256(file->second) != pin->second) invalid(name + " does not match its pinned sha256");
+    return file->second;
 }
 } // namespace
 
@@ -258,10 +258,20 @@ Model &Model::operator=(Model &&) noexcept = default;
 Model::~Model() = default;
 
 Model Model::load(const fs::path &directory, const std::map<std::string, std::string> &file_sha256) {
+    std::map<std::string, std::string> contents;
+    for (const auto name : model_files) {
+        const auto path = directory / name;
+        std::error_code error;
+        if (fs::is_regular_file(path, error)) contents.emplace(name, read_file(path, json_limit));
+    }
+    return load(std::map<std::string, std::string_view>(contents.begin(), contents.end()), file_sha256);
+}
+Model Model::load(const std::map<std::string, std::string_view> &files,
+                  const std::map<std::string, std::string> &file_sha256) {
     auto impl = std::make_unique<Impl>();
-    const auto network_text = decompress(checked(directory, file_sha256, "fingerprint-network.json.zst"), "fingerprint-network.json.zst");
-    const auto values_text = decompress(checked(directory, file_sha256, "values.json.zst"), "values.json.zst");
-    impl->values_dat = checked(directory, file_sha256, "values.dat.zst");
+    const auto network_text = decompress(checked(files, file_sha256, "fingerprint-network.json.zst"), "fingerprint-network.json.zst");
+    const auto values_text = decompress(checked(files, file_sha256, "values.json.zst"), "values.json.zst");
+    impl->values_dat = std::string(checked(files, file_sha256, "values.dat.zst"));
 
     // values.json maps each value's hexadecimal offset in values.dat to its
     // length, in value index order.

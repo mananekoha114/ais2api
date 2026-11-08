@@ -75,6 +75,33 @@ TEST_CASE("the runtime manifest pins the fpgen model", "[setup]") {
           model("a", url, std::string(64, 'A'), "a"), model("a", url, digest, "a/b"), json::object{}})
         CHECK_THROWS_AS(fpgen_model_pin(manifest), Error);
 }
+TEST_CASE("only a dev bundle embeds the pinned fpgen model", "[setup]") {
+    Directory d;
+    Config config;
+    config.data_dir = d.root;
+    config.browser_backend = "camoufox";
+    const auto pin = fpgen_model_pin();
+    const auto model = doctor(config).at("fpgen_model").as_object();
+#ifdef AIS2API_DEV_BUNDLE
+    CHECK(fpgen_model_embedded(pin));
+    REQUIRE_NOTHROW(load_fpgen_model(d.root, pin));
+    CHECK(string_or(model, "source") == "embedded");
+    CHECK(string_or(model, "state") == "installed");
+    CHECK_FALSE(model.contains("directory"));
+#else
+    CHECK_FALSE(fpgen_model_embedded(pin));
+    CHECK_THROWS_AS(load_fpgen_model(d.root, pin), Error);
+    CHECK(string_or(model, "source") == "setup");
+    CHECK(string_or(model, "state") == "missing");
+#endif
+    // Another model than the embedded one is setup's to install.
+    auto other = pin;
+    other.tag = "model-9/2030";
+    CHECK_FALSE(fpgen_model_embedded(other));
+    other = pin;
+    other.file_sha256.begin()->second = std::string(64, 'a');
+    CHECK_FALSE(fpgen_model_embedded(other));
+}
 TEST_CASE("setup installs the pinned fpgen model and leaves other directories alone", "[setup]") {
     Directory d;
     // A model fpgen loads, archived as a release is.
@@ -96,6 +123,7 @@ TEST_CASE("setup installs the pinned fpgen model and leaves other directories al
     CHECK(entries(directory) == 4);  // the three files and the marker
     CHECK(entries(directory.parent_path()) == 1);
     REQUIRE_NOTHROW(fpgen::Model::load(directory, pin.file_sha256));
+    REQUIRE_NOTHROW(load_fpgen_model(d.root, pin));
 
     // A damaged model, or another release under the same tag, is replaced.
     std::ofstream(directory / "values.dat.zst", std::ios::binary) << "x";

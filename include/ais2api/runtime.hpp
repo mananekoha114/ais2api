@@ -10,6 +10,9 @@
 #include <memory>
 #include <optional>
 namespace ais2api {
+namespace fpgen {
+class Model;
+}
 fs::path executable_path();
 int run_process(const std::vector<std::string> &args);
 void spawn_service(const Config &config);
@@ -62,6 +65,10 @@ fs::path fpgen_model_directory(const fs::path &data_dir, const FpgenModelPin &pi
 std::string fpgen_model_state(const fs::path &directory, const FpgenModelPin &pin);
 // Installs the model from its downloaded archive, replacing a damaged one.
 void install_fpgen_model(const fs::path &archive, const fs::path &directory, const FpgenModelPin &pin);
+// Whether a dev bundle embeds this pin's model. setup then installs none.
+bool fpgen_model_embedded(const FpgenModelPin &pin);
+// The pin's model: the embedded one, else setup's install under `data_dir`.
+fpgen::Model load_fpgen_model(const fs::path &data_dir, const FpgenModelPin &pin);
 // The Camoufox build the Camoufox backend runs, pinned per platform by
 // runtime-manifest.json and installed by setup.
 struct CamoufoxPin {

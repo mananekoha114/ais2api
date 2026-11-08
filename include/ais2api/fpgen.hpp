@@ -53,6 +53,9 @@ class Model {
     // Reads the three files from `directory`, each checked against its sha256
     // in `file_sha256` first.
     static Model load(const fs::path &directory, const std::map<std::string, std::string> &file_sha256);
+    // The same from the files' bytes, by name.
+    static Model load(const std::map<std::string, std::string_view> &files,
+                      const std::map<std::string, std::string> &file_sha256);
     Model(Model &&) noexcept;
     Model &operator=(Model &&) noexcept;
     ~Model();
