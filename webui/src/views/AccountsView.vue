@@ -13,7 +13,7 @@ import { api, describeError, enc, runOperation } from '../api/client'
 import type { Account, ProbeResult, Rotation } from '../api/types'
 import { refreshStatus, service } from '../stores/service'
 import { confirm, notify, notifyError } from '../stores/ui'
-import { accountLabel, accountState, now } from '../utils/accounts'
+import { accountLabel, accountState, cooldownReason, now } from '../utils/accounts'
 import { formatRelative, formatTimestamp, isIndefinite } from '../utils/format'
 import { usePolling } from '../utils/media'
 
@@ -291,6 +291,7 @@ function menuFor(a: Account): MenuItem[] {
               <thead>
                 <tr>
                   <th>模型</th>
+                  <th>原因</th>
                   <th>计数</th>
                   <th>冷却至</th>
                   <th />
@@ -299,6 +300,7 @@ function menuFor(a: Account): MenuItem[] {
               <tbody>
                 <tr v-for="f in account.failures" :key="f.model">
                   <td class="mono break">{{ f.model === '*' ? '全局（所有模型）' : f.model }}</td>
+                  <td>{{ cooldownReason(f.kind) }}</td>
                   <td class="num">{{ f.count }}</td>
                   <td>
                     <span v-if="isIndefinite(f.until)" class="badge critical" title="权限类失败不会自动解除">
@@ -315,7 +317,7 @@ function menuFor(a: Account): MenuItem[] {
               </tbody>
             </table>
             <p class="cooldown-hint t-caption t-secondary">
-              额度类限制（每分钟、每日、按模型）会持久记录：同一太平洋时间日内重复触发时冷却逐级延长，按上游重试提示最长可达一天，凭据刷新后仍然保留；清除冷却会同时清除额度计数。权限类失败不会自动解除。
+              额度类限制（每分钟、每日、按模型）会持久记录：同一太平洋时间日内重复触发时冷却逐级延长，按上游重试提示最长可达一天，凭据刷新后仍然保留；清除冷却会同时清除额度计数。权限类失败不会自动解除。“需同意条款”表示 AI Studio 要求账号同意条款，ais2api 不会代为同意：请用此账号在普通浏览器中登录 AI Studio 并同意，再清除冷却。
             </p>
           </div>
         </li>

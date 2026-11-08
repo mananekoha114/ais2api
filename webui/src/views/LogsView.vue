@@ -84,6 +84,7 @@ const EVENT_LABELS: Record<string, string> = {
   cookie_import_failed: 'Cookie 导入失败',
   setup_stage: '安装阶段',
   setup_download: '安装下载',
+  runtime_leftovers_removed: '已清理残留的临时目录',
 }
 
 function journalTone(record: Record<string, unknown>): Line['tone'] {

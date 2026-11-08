@@ -31,6 +31,8 @@ const REASONS: Record<string, string> = {
   identity_unverified: '无法确认 Cookie 对应的账号身份。',
   cookie_not_authenticated: 'Cookie 未登录或已失效。',
   cookie_region_blocked: '当前地区无法使用 AI Studio。',
+  cookie_terms_required: 'AI Studio 要求该账号同意条款，ais2api 不会代为同意：请先用此账号在普通浏览器中登录 AI Studio 并同意，再重新导入。',
+  terms_required: 'AI Studio 要求该账号同意条款，ais2api 不会代为同意：请用此账号在普通浏览器中登录 AI Studio 并同意，然后清除该账号的冷却。',
   cookie_browser_not_configured: '导入需要已配置的浏览器，请运行 ais2api doctor 检查。',
   cookie_browser_launch: '导入用浏览器启动失败，请运行 ais2api doctor 检查。',
   cookie_browser_timeout: '与浏览器通信超时，请检查浏览器及网络。',
