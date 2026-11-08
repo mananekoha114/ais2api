@@ -9,6 +9,7 @@ export interface ApiErrorBody {
 export interface Status {
   running?: boolean
   version?: string
+  build_mode?: 'release' | 'dev'
   logging_healthy?: boolean
   pending_logs?: number
   uptime_seconds?: number
