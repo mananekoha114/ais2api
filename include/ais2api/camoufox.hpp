@@ -44,6 +44,19 @@ std::uint64_t identity_salt(std::string_view secret, std::string_view account_id
 // redeclaring SimpleChannel in each content process, and the WebDriver BiDi
 // module's WeakMap error when a context closes. Kept out of the browser log.
 bool camoufox_log_noise(std::string_view line);
+// Camoufox's Linux fonts.conf for a launch: the bundled fonts it names
+// relative to the working directory become `font_directories`, and its cache
+// moves out of the launch's private XDG_CACHE_HOME to `cache_directory`, so
+// the fonts are scanned once rather than at every launch. Both paths are
+// absolute. 502 camoufox_layout_changed when the file names its fonts or its
+// cache otherwise.
+std::string camoufox_fontconfig(std::string_view conf, const std::vector<fs::path> &font_directories,
+                                const fs::path &cache_directory);
+// Xvfb's arguments, as Camoufox's launcher runs it; it reports the display it
+// picked on standard output.
+std::vector<std::string> xvfb_arguments();
+// The display an Xvfb "-displayfd" line reports: digits only.
+std::optional<unsigned> xvfb_display(std::string_view line);
 } // namespace browser_detail
 // The experimental Camoufox backend (browser_backend "camoufox"): the same
 // account flow as BrowserGateway over WebDriver BiDi. Each account keeps a
