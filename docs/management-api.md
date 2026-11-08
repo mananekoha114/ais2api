@@ -65,8 +65,8 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 | POST | `/accounts/{id}/activate` | 设为首选账号 |
 | POST | `/accounts/{id}/reset` | 重置失败/禁用状态 |
 | POST | `/accounts/probe`、`/accounts/{id}/probe`、`/accounts/{id}/detect-email` | 探测全部或单个账号；检测邮箱使用同一个浏览器探测 |
-| GET | `/accounts/{id}/fingerprint` | 永久指纹：`seed`、`platform`、保存的 `timezone`/`locale`（为空表示跟随本机）、`effective_*` 与 `host_*` |
-| PATCH | `/accounts/{id}/fingerprint` | 覆盖 `timezone`（IANA）和/或 `locale`（BCP 47）；`null` 或 `""` 恢复为本机默认；下次使用该账号时生效 |
+| GET | `/accounts/{id}/fingerprint` | 永久指纹：`seed`、`platform`、保存的 `timezone`/`locale`（为空表示跟随本机）、`effective_*` 与 `host_*`；浏览器后端 `backend`、实际使用的 `effective_backend`、身份类型 `identity`（`chrome` 或 `firefox`）与 `firefox_identity_saved` |
+| PATCH | `/accounts/{id}/fingerprint` | 覆盖 `timezone`（IANA）和/或 `locale`（BCP 47），`null` 或 `""` 恢复为本机默认；或修改 `backend`（见下文）；下次使用该账号时生效 |
 | POST | `/accounts/{id}/fingerprint/regenerate` | 分配新种子，Google 会把该账号视为新设备 |
 
 ### 轮换与模型
@@ -99,6 +99,8 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 托管密钥有独立的持久化记录，旧版本数据库中的密钥不会自动成为托管密钥。
 
 `/keys/config` 的两个接口实际是一次配置修改，返回 `ConfigSaved`（`saved`、`applied`、`restart_required`）。存在待重启的配置时，新值只会写入待重启配置：`applied: false` 表示当前进程仍在使用旧密钥，重启后才切换。HTTP 200 本身不能说明已经生效。
+
+`backend` 可取 `cloakbrowser`、`auto`、`camoufox`；`spidermonkey` 尚未提供，返回 400 `backend_unavailable`。在 CloakBrowser 与 Firefox 后端之间切换会换成另一种身份，Google 会把它看作新设备，因此必须同时传 `confirm_identity_change: true`，否则返回 409 `identity_change_unconfirmed`；Firefox 后端之间可以直接切换。种子不变。账号列表中的 `backend` 是账号保存的后端。
 
 ### 配置、统计与诊断
 
@@ -152,7 +154,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 - `GET /config` 返回当前运行的脱敏配置 `config`、文件路径和 `restart_required`。有待重启的修改时，`saved_config` 包含脱敏后的待生效配置。
 - PATCH 会在原子保存前校验修改后的完整配置。未知字段、类型错误、无效限额以及把脱敏占位符 `***` 当作密钥提交都会被拒绝。提交表单时请省略未修改的脱敏密钥字段。
 - 只有 `limits` 按子项合并；`model_aliases`、`model_defaults`、`configured_models` 与 `admin_origins` 整体替换。要删除某个别名，提交不含它的完整对象。
-- 需要重启的字段：监听地址、端口、数据目录、浏览器路径、浏览器后端（`browser_backend`）、代理、`browser_proxy_relay`、`browser_remote_allow_origins`、`browser_site_isolation`、无界面模式、生成时限、流式空闲时限、`object_bytes` 与 `relay_bytes`。其余字段热更新。
+- 需要重启的字段：监听地址、端口、数据目录、浏览器路径、代理、`browser_proxy_relay`、`browser_remote_allow_origins`、`browser_site_isolation`、无界面模式、生成时限、流式空闲时限、`object_bytes` 与 `relay_bytes`。其余字段热更新。
 - 响应包含 `saved`、`applied` 与 `restart_required`。只要包含任一需重启的差异，整份配置就作为待重启配置保存，不会部分应用；之后的 PATCH 以待重启配置为基础，保留之前保存的修改。把所有需重启的字段改回运行值后，完整结果会立即应用。重启时加载保存的配置，环境变量覆盖在启动和重新加载时依然生效。
 
 部分字段的补充说明：

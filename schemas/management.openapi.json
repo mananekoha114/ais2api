@@ -858,7 +858,7 @@
       },
       "patch": {
         "operationId": "patch_accounts_id_fingerprint",
-        "summary": "Override or reset fingerprint timezone/locale (null restores host default)",
+        "summary": "Override or reset fingerprint timezone/locale (null restores host default), or change the browser backend; moving between CloakBrowser and Firefox needs confirm_identity_change",
         "responses": {
           "200": {
             "description": "Fingerprint",
@@ -890,7 +890,7 @@
             "description": "Resource or route does not exist"
           },
           "409": {
-            "description": "Restart needed, invalid state or truncated log"
+            "description": "identity_change_unconfirmed: the backend change swaps the account identity"
           },
           "429": {
             "description": "Queue, operation or memory admission limit"
@@ -926,6 +926,19 @@
                       "string",
                       "null"
                     ]
+                  },
+                  "backend": {
+                    "type": "string",
+                    "enum": [
+                      "cloakbrowser",
+                      "auto",
+                      "camoufox",
+                      "spidermonkey"
+                    ],
+                    "description": "spidermonkey is rejected with backend_unavailable until it exists"
+                  },
+                  "confirm_identity_change": {
+                    "type": "boolean"
                   }
                 }
               }
@@ -2907,6 +2920,20 @@
                 "type": "string"
               }
             }
+          },
+          "backend": {
+            "type": "string",
+            "enum": [
+              "",
+              "cloakbrowser",
+              "auto",
+              "camoufox",
+              "spidermonkey"
+            ],
+            "description": "Stored browser backend; empty only before the account settles"
+          },
+          "firefox_identity": {
+            "type": "boolean"
           }
         },
         "additionalProperties": true
@@ -3498,13 +3525,14 @@
             "type": "integer",
             "minimum": 10000,
             "maximum": 99999,
-            "description": "Permanent CloakBrowser seed"
+            "description": "Permanent seed of the CloakBrowser fingerprint and the Firefox identity"
           },
           "platform": {
             "type": "string",
             "enum": [
               "windows",
-              "macos"
+              "macos",
+              "linux"
             ]
           },
           "timezone": {
@@ -3526,6 +3554,35 @@
           },
           "host_locale": {
             "type": "string"
+          },
+          "backend": {
+            "type": "string",
+            "enum": [
+              "cloakbrowser",
+              "auto",
+              "camoufox",
+              "spidermonkey"
+            ],
+            "description": "Stored browser backend of the account"
+          },
+          "effective_backend": {
+            "type": "string",
+            "enum": [
+              "cloakbrowser",
+              "camoufox"
+            ],
+            "description": "Gateway that serves the account now; auto runs on Camoufox"
+          },
+          "identity": {
+            "type": "string",
+            "enum": [
+              "chrome",
+              "firefox"
+            ]
+          },
+          "firefox_identity_saved": {
+            "type": "boolean",
+            "description": "A Firefox identity is saved for the current seed"
           }
         },
         "required": [
@@ -3536,7 +3593,11 @@
           "effective_timezone",
           "effective_locale",
           "host_timezone",
-          "host_locale"
+          "host_locale",
+          "backend",
+          "effective_backend",
+          "identity",
+          "firefox_identity_saved"
         ]
       },
       "UsageTotal": {
@@ -3994,7 +4055,12 @@
         "type": "object",
         "properties": {
           "kind": {
-            "enum": ["initial", "retry", "continuation", "continuation_retry"],
+            "enum": [
+              "initial",
+              "retry",
+              "continuation",
+              "continuation_retry"
+            ],
             "description": "Execution type. Optional for history recorded before native continuation support."
           },
           "account": {

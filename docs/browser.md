@@ -30,6 +30,22 @@ C++ 进程直接启动配置的 Chromium / CloakBrowser 可执行文件；在 Te
 
 CloakBrowser 的指纹作用于整个进程，因此切换到指纹不同的账号时会重启浏览器；指纹相同的账号复用同一进程。管理 API 与 WebUI 可以查看指纹、覆盖时区和语言，或重新生成种子（Google 会把它视为新设备）；修改在该账号下次使用时生效。诊断信息中的 `fingerprint` 字段显示当前运行的身份。
 
+### 按账号选择后端
+
+每个账号记住自己的浏览器后端：
+
+| 取值 | 身份 | 使用的浏览器 |
+|---|---|---|
+| `cloakbrowser` | Chrome | CloakBrowser |
+| `auto` | Firefox | 由 ais2api 选择 Firefox 后端，目前即 Camoufox |
+| `camoufox` | Firefox | Camoufox |
+| `spidermonkey` | Firefox | 尚未提供 |
+
+- 新账号保存时取配置项 `browser_backend` 对应的值：`cloakbrowser` 保存为 `cloakbrowser`，`camoufox` 保存为 `auto`。升级前已有的账号在第一次启动时保存为当时实际使用的后端。之后修改 `browser_backend` 只影响新账号和 Cookie 导入的验证，不会把已有账号换成另一种身份。
+- 在 CloakBrowser 与 Firefox 之间切换必须显式操作并确认（命令行 `accounts backend`、管理 API 或 WebUI 的指纹对话框），因为 Google 会把新身份看作一台新设备。Firefox 后端之间可以直接切换，身份不变。两种身份都由同一个种子确定，切回时得到原来的身份。
+- 同一时间只有一个浏览器驻留：轮到另一个后端的账号时，先关闭当前浏览器，再启动另一个。
+- `setup` 和 `doctor` 按“需要的后端”工作：默认后端加上已保存账号用到的后端。诊断信息的 `backend` 是当前运行的后端，`default_backend` 是默认后端。
+
 ## Cookie 写回
 
 Google 会在页面使用过程中轮换会话 Cookie（例如 `__Secure-1PSIDTS`）。新账号上下文通过身份核对后写回一次，之后每次生成成功最多每 5 分钟写回一次：
