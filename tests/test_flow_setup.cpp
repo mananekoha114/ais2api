@@ -173,19 +173,35 @@ TEST_CASE("setup installs the pinned fpgen model and leaves other directories al
     CHECK(entries(foreign) == 1);
 }
 namespace {
-#ifdef _WIN32
-const std::string camoufox_program = "camoufox.exe";
-#else
-const std::string camoufox_program = "camoufox";
-#endif
+// The fake installs below are Windows ones on every host.
+const std::string windows_program = "camoufox.exe";
 std::string application_ini(const std::string &version) {
     return "; This file is not used.\n[App]\nVendor=Camoufox\nVersion=" + version + "\n\n[Gecko]\nMinVersion=158.0.1\n";
+}
+// The two placeholders setup and the launch rewrite in Camoufox's Linux fonts.conf.
+const std::string linux_fonts_conf = "<fontconfig>\n\t<dir prefix=\"cwd\">fonts</dir>\n"
+                                     "\t<cachedir prefix=\"xdg\">fontconfig</cachedir>\n</fontconfig>\n";
+const std::string linux_groups = R"({"groups":["L","LM","LMW","LW","M","MW","W"],"readBy":{"lin":["L","LM","LMW","LW"],)"
+                                 R"("mac":["LM","LMW","M","MW"],"win":["LMW","LW","MW","W"]}})";
+// An archive's files as a Camoufox release for `platform` lays them out.
+std::vector<std::pair<std::string, std::string>> camoufox_files(const std::string &platform, const std::string &version) {
+    std::vector<std::pair<std::string, std::string>> files{{std::string(camoufox_program(platform)), "exe"},
+                                                           {"application.ini", application_ini(version)},
+                                                           {"properties.json", "[]"},
+                                                           {"fonts/TwemojiMozilla.ttf", "font"}};
+    if (platform == "windows-x64") return files;
+    files.insert(files.end(), {{"fonts/groups.json", linux_groups},
+                               {"fontconfig/linux/fonts.conf", linux_fonts_conf},
+                               {"fontconfig/windows/fonts.conf", linux_fonts_conf}});
+    for (const auto *group : {"L", "LM", "LMW", "LW", "M", "MW", "W"})
+        files.emplace_back("fonts/" + std::string(group) + "/" + group + ".ttf", group);
+    return files;
 }
 // An install as setup leaves it, without the archive it came from.
 fs::path fake_camoufox(const fs::path &data_dir, const std::string &version) {
     const auto directory = camoufox_root(data_dir) / (version + "-windows-x64");
     fs::create_directories(directory);
-    atomic_write(directory / camoufox_program, "exe");
+    atomic_write(directory / windows_program, "exe");
     atomic_write(directory / "properties.json", "[]");
     atomic_write(directory / "application.ini", application_ini(version));
     atomic_write(directory / ".ais2api-runtime.json",
@@ -194,7 +210,7 @@ fs::path fake_camoufox(const fs::path &data_dir, const std::string &version) {
     return directory;
 }
 } // namespace
-TEST_CASE("the runtime manifest pins Camoufox for Windows x64", "[setup]") {
+TEST_CASE("the runtime manifest pins Camoufox for Windows and Linux", "[setup]") {
     const auto source = json::parse(read_file(fs::path(AIS2API_SOURCE_DIR) / "runtime-manifest.json")).as_object();
     const auto pin = camoufox_pin(source, "windows-x64");
     REQUIRE(pin);
@@ -203,8 +219,16 @@ TEST_CASE("the runtime manifest pins Camoufox for Windows x64", "[setup]") {
                       "camoufox-158.0.1-beta.41-win.x86_64.zip");
     CHECK(pin->size == 1320075455);
     CHECK(camoufox_directory("data", *pin) == fs::path("data") / "runtime" / "camoufox" / "158.0.1-beta.41-windows-x64");
-    // Other platforms come with their own stages.
-    CHECK_FALSE(camoufox_pin(source, "linux-x64"));
+    for (const auto &[platform, archive] : {std::pair<std::string, std::string>{"linux-x64", "lin.x86_64"},
+                                            {"linux-arm64", "lin.arm64"}}) {
+        const auto linux_pin = camoufox_pin(source, platform);
+        REQUIRE(linux_pin);
+        CHECK(linux_pin->version == pin->version);
+        CHECK(linux_pin->url == "https://github.com/daijro/camoufox/releases/download/v158.0.1-beta.41/"
+                                "camoufox-158.0.1-beta.41-" + archive + ".zip");
+    }
+    // Termux comes with its own stage.
+    CHECK_FALSE(camoufox_pin(source, "termux-arm64"));
     CHECK_FALSE(camoufox_pin(json::object{}, "windows-x64"));
 
     const auto manifest = [](std::string version, std::string url, std::string digest, std::uint64_t size) {
@@ -238,19 +262,22 @@ TEST_CASE("archive extraction skips the entries the caller leaves out", "[setup]
                     Error);
 }
 TEST_CASE("Camoufox installs without its bundled fonts and uBlock Origin", "[setup]") {
-    CHECK_FALSE(camoufox_keeps("fonts"));
-    CHECK_FALSE(camoufox_keeps("fonts/001__Arial.ttf"));
-    CHECK(camoufox_keeps("fonts/TwemojiMozilla.ttf"));
-    CHECK_FALSE(camoufox_keeps("addons/UBO/manifest.json"));
-    CHECK(camoufox_keeps("addons"));
-    CHECK(camoufox_keeps("fontsmore"));
-    CHECK(camoufox_keeps("browser/omni.ja"));
-    CHECK(camoufox_keeps("distribution/policies.json"));
+    const std::string windows = "windows-x64";
+    CHECK(camoufox_program(windows) == "camoufox.exe");
+    CHECK_FALSE(camoufox_keeps(windows, "fonts"));
+    CHECK_FALSE(camoufox_keeps(windows, "fonts/001__Arial.ttf"));
+    CHECK(camoufox_keeps(windows, "fonts/TwemojiMozilla.ttf"));
+    CHECK_FALSE(camoufox_keeps(windows, "addons/UBO/manifest.json"));
+    CHECK(camoufox_keeps(windows, "addons"));
+    CHECK(camoufox_keeps(windows, "fontsmore"));
+    CHECK(camoufox_keeps(windows, "browser/omni.ja"));
+    CHECK(camoufox_keeps(windows, "distribution/policies.json"));
+    CHECK(camoufox_keeps(windows, "fontconfig/windows/fonts.conf"));
 
     Directory d;
     const std::string version = "158.0.1-beta.41";
     std::vector<std::pair<std::string, std::string>> files{
-        {camoufox_program, "exe"},           {"application.ini", application_ini(version)},
+        {windows_program, "exe"},           {"application.ini", application_ini(version)},
         {"properties.json", "[]"},           {"browser/omni.ja", "omni"},
         {"distribution/policies.json", "{}"}, {"fonts/TwemojiMozilla.ttf", "font"},
         {"fonts/001__Arial.ttf", "font"},    {"addons/UBO/manifest.json", "{}"}};
@@ -304,10 +331,75 @@ TEST_CASE("Camoufox installs without its bundled fonts and uBlock Origin", "[set
     // A directory setup did not create is left alone.
     const auto foreign = camoufox_root(d.root) / "mine";
     fs::create_directories(foreign);
-    atomic_write(foreign / camoufox_program, "mine");
+    atomic_write(foreign / windows_program, "mine");
     CHECK(camoufox_state(foreign, pin) == "foreign");
     CHECK_THROWS_AS(install_camoufox(archive, foreign, pin), Error);
-    CHECK(read_file(foreign / camoufox_program) == "mine");
+    CHECK(read_file(foreign / windows_program) == "mine");
+}
+TEST_CASE("Camoufox for Linux keeps the font groups a Linux identity reads", "[setup]") {
+    for (const std::string platform : {"linux-x64", "linux-arm64"}) {
+        CHECK(camoufox_program(platform) == "camoufox-bin");
+        for (const auto *kept : {"fonts/groups.json", "fonts/TwemojiMozilla.ttf", "fonts/L/a.ttf", "fonts/LM/a.ttf",
+                                 "fonts/LMW/a.ttf", "fonts/LW/a.ttf", "fonts/L", "fontconfig/linux/fonts.conf",
+                                 "camoufox-bin", "browser/omni.ja", "addons"})
+            CHECK(camoufox_keeps(platform, kept));
+        for (const auto *skipped : {"fonts", "fonts/M/a.ttf", "fonts/MW/a.ttf", "fonts/W/a.ttf", "fonts/Lx/a.ttf",
+                                    "fontconfig/windows/fonts.conf", "fontconfig/macos/fonts.conf", "addons/UBO/a"})
+            CHECK_FALSE(camoufox_keeps(platform, skipped));
+    }
+
+    Directory d;
+    const std::string version = "158.0.1-beta.41";
+    const auto files = camoufox_files("linux-x64", version);
+    const auto archive = d.root / "camoufox.zip";
+    make_archive(archive, files, true);
+    const CamoufoxPin pin{version, "linux-x64", "https://example.com/camoufox.zip", sha256(read_file(archive)),
+                          fs::file_size(archive)};
+    const auto directory = camoufox_directory(d.root, pin);
+    install_camoufox(archive, directory, pin);
+    CHECK(camoufox_state(directory, pin) == "installed");
+    CHECK(entries(directory / "fonts") == 6);
+    CHECK(read_file(directory / "fonts/LMW/LMW.ttf") == "LMW");
+    CHECK_FALSE(fs::exists(directory / "fonts/W"));
+    CHECK(entries(directory / "fontconfig") == 1);
+    const auto marker = json::parse(read_file(directory / ".ais2api-runtime.json")).as_object();
+    CHECK(marker.at("skipped").as_array().size() == 3);
+    // The rules are the platform's: a Windows install of it is not this one.
+    auto windows = pin;
+    windows.platform = "windows-x64";
+    CHECK(camoufox_state(directory, windows) != "installed");
+
+    // A release that groups its fonts otherwise is not installed.
+    const auto rejected = [&](std::vector<std::pair<std::string, std::string>> contents) {
+        const auto bad = d.root / ("bad-" + random_hex(4) + ".zip");
+        make_archive(bad, contents, true);
+        try {
+            install_camoufox(bad, directory, pin);
+            FAIL("installed an archive laid out otherwise");
+        } catch (const Error &error) {
+            CHECK(error.code == "camoufox_layout_changed");
+        }
+        CHECK(camoufox_state(directory, pin) == "installed");
+        CHECK(entries(directory.parent_path()) == 1);
+    };
+    const auto replaced = [&](const std::string &name, std::string contents) {
+        auto changed = files;
+        for (auto &file : changed)
+            if (file.first == name) file.second = std::move(contents);
+        return changed;
+    };
+    const auto without = [&](const std::string &name) {
+        auto changed = files;
+        std::erase_if(changed, [&](const auto &file) { return file.first == name; });
+        return changed;
+    };
+    rejected(replaced("fonts/groups.json", R"({"readBy":{"lin":["L","LM","LMW","LW","N"]}})"));
+    rejected(replaced("fonts/groups.json", R"({"readBy":{"lin":["L","LM","LMW"]}})"));
+    rejected(replaced("fonts/groups.json", "not json"));
+    rejected(without("fonts/groups.json"));
+    rejected(without("fonts/LW/LW.ttf"));
+    rejected(without("fontconfig/linux/fonts.conf"));
+    rejected(replaced("fontconfig/linux/fonts.conf", "<fontconfig><dir>fonts</dir></fontconfig>"));
 }
 TEST_CASE("setup keeps two Camoufox installs and a rollback holds the earlier one", "[setup]") {
     Directory d;
@@ -359,10 +451,12 @@ TEST_CASE("the Camoufox backend runs browser_executable only when it names Camou
     CHECK(camoufox_executable(config).path.empty());
     const auto installed = fake_camoufox(d.root, "1.0");
     select_camoufox(d.root, "1.0-windows-x64");
-    CHECK(camoufox_executable(config).path == installed / camoufox_program);
+    CHECK(camoufox_executable(config).path == installed / windows_program);
     CHECK(camoufox_executable(config).source == "setup");
     config.browser_executable = d.root / "build" / "Camoufox.exe";
     CHECK(camoufox_executable(config).path == config.browser_executable);
+    CHECK(camoufox_executable(config).source == "browser_executable");
+    config.browser_executable = d.root / "build" / "camoufox-bin";
     CHECK(camoufox_executable(config).source == "browser_executable");
     // A damaged install is not run.
     config.browser_executable.clear();
@@ -410,14 +504,11 @@ TEST_CASE("the Camoufox bundled beside the program comes before setup's", "[setu
 
     // A dev bundle carries the pinned build as setup installs it.
     const auto archive = d.root / "camoufox.zip";
-    make_archive(archive,
-                 {{camoufox_program, "exe"}, {"application.ini", application_ini(pin->version)},
-                  {"properties.json", "[]"}, {"fonts/001__Arial.ttf", "font"}},
-                 true);
+    make_archive(archive, camoufox_files(pin->platform, pin->version), true);
     install_camoufox(archive, bundle, *pin);
     const auto found = camoufox_executable(config, program);
     CHECK(found.source == "bundle");
-    CHECK(found.path == bundle / camoufox_program);
+    CHECK(found.path == bundle / camoufox_program(pin->platform));
     auto result = doctor(config, program);
     CHECK(string_or(result, "program_directory") == path_utf8(program));
     auto camoufox = result.at("camoufox").as_object();
@@ -456,6 +547,12 @@ TEST_CASE("Linux setup accepts exact supported os-release identities", "[setup]"
     for (auto package : {"libasound2t64", "libcups2t64", "libgtk-3-0t64",
                          "libatk1.0-0t64", "libatk-bridge2.0-0t64"})
         REQUIRE(std::find(debian.begin(), debian.end(), package) != debian.end());
+    // Camoufox runs on Xvfb with Mesa, and brings its own fonts.
+    const auto camoufox = camoufox_linux_packages("ID=debian\nVERSION_ID=13\n");
+    REQUIRE(camoufox == camoufox_linux_packages("ID=ubuntu\nVERSION_ID=\"24.04\"\n"));
+    for (auto package : {"xvfb", "libgtk-3-0t64", "libasound2t64", "libgl1-mesa-dri"})
+        REQUIRE(std::find(camoufox.begin(), camoufox.end(), package) != camoufox.end());
+    for (const auto &package : camoufox) REQUIRE_FALSE(package.starts_with("fonts-"));
 }
 TEST_CASE("Linux setup rejects unsupported distributions and substring lookalikes", "[setup]") {
     for (auto release : {"ID=debian\nVERSION_ID=12\n", "ID=debian\nVERSION_ID=130\n",
@@ -463,8 +560,10 @@ TEST_CASE("Linux setup rejects unsupported distributions and substring lookalike
                          "ID=mint\nID_LIKE=ubuntu\nVERSION_ID=24.04\n",
                          "NAME=ubuntu 24.04\n", "# ID=ubuntu\nVERSION_ID=24.04\n",
                          "ID=ubuntu-derivative\nVERSION_ID=24.04\n",
-                         "ID=ubuntu\nVERSION_ID=\"24.04\n", "ID=debian\n"})
+                         "ID=ubuntu\nVERSION_ID=\"24.04\n", "ID=debian\n"}) {
         REQUIRE_THROWS_AS(linux_runtime_packages(release), Error);
+        REQUIRE_THROWS_AS(camoufox_linux_packages(release), Error);
+    }
 }
 TEST_CASE("relay producer cannot advance before downstream acknowledgement", "[flow]") {
     EventPipe pipe(4096);

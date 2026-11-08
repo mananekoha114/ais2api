@@ -8,6 +8,7 @@
 |---|---|
 | Windows 10/11 x64 | MSVC（Visual Studio C++ 工具与 Windows SDK） |
 | Ubuntu 24.04 / Debian 13 x86_64 | GCC 或 Clang |
+| Ubuntu 24.04 / Debian 13 ARM64（只能用 Camoufox 后端） | GCC 或 Clang |
 | Android ARM64（Termux 宿主） | Termux Clang |
 
 通用要求：CMake 3.25 及以上、C++20、Ninja、Git。桌面依赖由 `vcpkg.json` 中固定的 baseline（`664933b8d385dfc01f4e0cdff4c7c74e71f6a740`）锁定，源码下载由 vcpkg 校验；首次构建可能较慢。桌面构建或 GitHub Actions 任务的成功不代表 Android 上的行为已经验证。
@@ -60,7 +61,7 @@ sudo apt-get install -y build-essential clang cmake ninja-build git curl zip unz
 sh scripts/build.sh linux --package       # 加 --webui 嵌入网页控制台
 ```
 
-脚本会获取 `vcpkg.json` 中指定提交的 vcpkg，完成配置、构建和 CTest，安装到 `build/linux/install`，并在 `build/linux/packages` 生成 TGZ。新的依赖工具放在 `build/deps`；脚本不会把已有的 checkout 更新到其他提交。要复用已准备好的工具，把 `VCPKG_ROOT` 设为处于固定版本的 checkout。依赖下载仍需要网络或已填充的 vcpkg 缓存。
+脚本会获取 `vcpkg.json` 中指定提交的 vcpkg，完成配置、构建和 CTest，安装到 `build/linux/install`，并在 `build/linux/packages` 生成 TGZ。在 ARM64（aarch64）上脚本使用 `arm64-linux` 三元组；ais2api 没有为 Linux ARM64 锁定 CloakBrowser，这里只能使用 Camoufox 后端（见下文），也不能打包本地浏览器。新的依赖工具放在 `build/deps`；脚本不会把已有的 checkout 更新到其他提交。要复用已准备好的工具，把 `VCPKG_ROOT` 设为处于固定版本的 checkout。依赖下载仍需要网络或已填充的 vcpkg 缓存。
 
 `scripts/build.sh` 的选项：
 
@@ -68,7 +69,7 @@ sh scripts/build.sh linux --package       # 加 --webui 嵌入网页控制台
 |---|---|
 | `--package` | 测试后生成 CPack TGZ |
 | `--webui` | 构建并嵌入 WebUI（需要 Node.js 20.19+ 或 22.12+） |
-| `--browser-bundle PATH` | 打包已校验的本地浏览器（仅桌面） |
+| `--browser-bundle PATH` | 打包已校验的本地浏览器（仅桌面 x86_64） |
 | `--sanitizers` | 启用 ASan/UBSan（仅桌面 Linux） |
 | `--fuzzer` | 构建 Clang libFuzzer 目标（同时启用 sanitizer） |
 | `--skip-tests` | 不构建测试目标 |
@@ -90,6 +91,26 @@ build/linux/install/bin/ais2api doctor
 - Debian 13 与 Ubuntu 24.04 使用 `t64` 版本的浏览器依赖包名；其他发行版或版本会被拒绝，而不是猜测包名。
 - 无界面浏览器准备不需要 WSLg、桌面会话或 Windows Chrome。`setup` 只验证本地 CDP 与隔离上下文的创建，不登录 Google。
 - Debian 构建的可执行文件面向 Debian 的 glibc ABI，不能替代 Ubuntu 运行包。
+
+### Camoufox 后端
+
+默认后端为 `camoufox`，或者有账号使用 Firefox 后端时，`setup` 会安装 Camoufox：
+
+```sh
+build/linux/install/bin/ais2api setup --yes
+```
+
+- 系统包：`setup` 先检查下列包，只安装缺少的。缺包时需要 `--yes`，通过 `sudo apt-get` 安装；都已安装时既不询问也不运行 apt，结果中的 `system_packages.status` 为 `ready`。
+  - 包列表：`xvfb`、`libgtk-3-0t64`、`libx11-xcb1`、`libasound2t64`、`libdbus-1-3`、`libgl1-mesa-dri`、`libegl1`、`fontconfig`、`ca-certificates`。
+  - 在其他发行版上跳过这一步（`status` 为 `not_checked`），需要自己安装对应的包。缺什么，验证 Camoufox 时会报出来。
+- 显示：Linux 上的 Camoufox 总是以有界面模式运行。
+  - `headless=true`（默认）：每次启动浏览器时开一个 Xvfb 虚拟显示（1×1 像素，Mesa 软件 OpenGL），浏览器关闭时一起停止。所以在 Linux 上，`headless` 表示“用 Xvfb 虚拟显示”。
+  - `headless=false`：使用桌面会话的显示（`DISPLAY` 或 `WAYLAND_DISPLAY`），都没有时返回 503 `display_unavailable`。
+- 身份与字体：
+  - 身份与 Windows 上一样呈现本机 OS，即 Linux。
+  - 字体只用 Camoufox 自带的、Linux 身份会读取的四组字体（约 0.9 GB），通过 Camoufox 的 Linux fontconfig 读取，不使用系统字体。`setup` 只解压这几组字体和 Linux 的 fontconfig，安装后约 1.3 GB。
+  - 字体缓存放在 `<data_dir>/runtime/camoufox-fontconfig/`，第一次启动时扫描一次。
+- ARM64：`runtime-manifest.json` 没有为这个平台锁定 CloakBrowser，准备 CloakBrowser 时返回 `unsupported_platform`。要先把 `browser_backend` 设为 `camoufox`（或让账号使用 Firefox 后端），再运行 `setup`。
 
 ### WSL 2 中的 Debian 13
 
@@ -238,10 +259,14 @@ python scripts/check-package.py --with-browser build/windows/packages/*Browser-L
 
 ### 构建开发版
 
-开发版（CMake 选项 `AIS2API_DEV_BUNDLE`）嵌入 fpgen 模型，并附带锁定版本的 Camoufox，解压后不用再运行 `setup` 下载，新建的配置默认使用 `camoufox` 后端。开发版只在本机构建，供本人或内部使用，**不要作为公开发行附件上传**。目前只有 Windows x64：
+开发版（CMake 选项 `AIS2API_DEV_BUNDLE`）嵌入 fpgen 模型，并附带锁定版本的 Camoufox，解压后不用再运行 `setup` 下载，新建的配置默认使用 `camoufox` 后端。开发版只在本机构建，供本人或内部使用，**不要作为公开发行附件上传**。支持 Windows x64 和 Linux x64：
 
 ```powershell
 ./scripts/build-dev.ps1 -Proxy http://127.0.0.1:7890   # 不需要代理时省略 -Proxy
+```
+
+```sh
+sh scripts/build-dev.sh --yes --proxy http://127.0.0.1:7890   # 不需要代理时省略 --proxy
 ```
 
 脚本依次完成：
@@ -254,6 +279,8 @@ python scripts/check-package.py --with-browser build/windows/packages/*Browser-L
 6. 生成 `build/windows-dev/packages/ais2api-<版本>-Windows-AMD64-Dev.zip`，并用 `check-package.py --dev` 检查。
 
 其余参数与 `build.ps1` 相同（`-BuildDirectory`、`-VcpkgRoot`、`-Configuration`、`-Triplet`、`-Jobs`）。开发版必须使用单独的构建目录：脚本拒绝已配置为正式版的目录，`build.ps1` 也拒绝开发版的目录。
+
+`build-dev.sh` 的步骤相同：构建目录默认为 `build/linux-dev`，生成 `ais2api-<版本>-Linux-x86_64-Dev.tar.gz`。`--yes` 允许 `setup` 安装 Camoufox 需要的系统包（见 [Camoufox 后端](#camoufox-后端)）。其他选项有 `--build-dir`、`--jobs`、`--skip-tests`、`--skip-webui`。
 
 Camoufox 位于运行包的 `bin/camoufox-runtime/<版本>-<平台>/`。`doctor` 的 `build_mode` 为 `dev`，`camoufox.source` 为 `bundle`，`fpgen_model.source` 为 `embedded`。
 
@@ -268,6 +295,16 @@ Camoufox 位于运行包的 `bin/camoufox-runtime/<版本>-<平台>/`。`doctor`
 | Ubuntu 24.04 / clang + sanitizer | ASan/UBSan 构建与测试、短时线路解析器模糊测试 |
 | Debian 13 / GCC | 容器内构建（含 WebUI）、测试、冒烟与运行包上传 |
 | Windows / MSVC x64 | `x64-windows-static-release` 构建（含 WebUI）、测试、冒烟与运行包上传 |
+
+`.github/workflows/camoufox-runtime.yml` 只在 Camoufox 相关文件改动的 PR 中运行，也可以手动运行。每次运行要多次下载约 1.3 GB 的 Camoufox。它在 Ubuntu 24.04 x64 与 ARM64 上依次：
+
+1. 构建并运行 CTest；
+2. 用 `setup` 安装 Camoufox 及其系统包：先确认缺包时没有 `--yes` 会拒绝，装好后再运行一次，确认不再安装任何东西；
+3. 在 Xvfb 下运行隐藏测试 `[.camoufox-runtime]`、`[.camoufox-fonts]`（与 `camoufox-dev.py fetch` 取得的完整版比较）和 `[.fpgen-model]`；
+4. 用 camoufox Python 包的 `check-identities` 检查生成的身份；
+5. 构建容器镜像，确认第一次启动时会安装并验证 Camoufox。
+
+全程只打开本地页面，不使用账号，也不访问 Google。
 
 非 sanitizer 任务上传的运行包为 `ubuntu24-gcc-runtime`、`debian13-gcc-runtime` 与 `windows-msvc-x64-runtime`，保留 28 天。vcpkg 二进制缓存按运行器镜像（或 Debian 工具链包）划分，因为 vcpkg 的 ABI 哈希包含编译器；有新构建的包时才保存缓存。工作流没有路径过滤，脚本或文档的改动也会触发完整检查。
 

@@ -42,7 +42,10 @@ int serve_with_backend(Config config, std::unique_ptr<GenerationBackend> backend
 // Prepares `backend` ("cloakbrowser" or "camoufox"), or by default every
 // backend the default and the stored accounts need.
 json::object setup_runtime(Config &config, bool approve_system_changes = false, std::string_view backend = {});
+// The Ubuntu 24.04 or Debian 13 packages each backend runs with; another
+// os-release is rejected.
 std::vector<std::string> linux_runtime_packages(std::string_view os_release);
+std::vector<std::string> camoufox_linux_packages(std::string_view os_release);
 // Checks every backend the default and the stored accounts need; `stored`
 // defaults to the stored_backends() of the data directory.
 json::object doctor(const Config &config, const fs::path &program_directory = Config::default_directory(),
@@ -52,7 +55,7 @@ json::object doctor(const Config &config, const fs::path &program_directory = Co
 // other runtime directories are never touched. Call it only while holding
 // the instance lock. Returns how many were removed.
 std::size_t remove_profile_leftovers(const fs::path &data_dir);
-// This host's runtime platform key, such as "windows-x64", "linux-x64" or
+// This host's runtime platform key: "windows-x64", "linux-x64", "linux-arm64" or
 // "termux-arm64"; empty on a platform setup does not support.
 std::string runtime_platform();
 // Rolls `backend` back, by default the default backend.
@@ -93,11 +96,16 @@ struct CamoufoxPin {
 // Empty when the manifest pins no Camoufox for the platform.
 std::optional<CamoufoxPin> camoufox_pin(const json::object &manifest, std::string_view platform);
 std::optional<CamoufoxPin> camoufox_pin();  // this host's, from the runtime manifest
-// Whether setup extracts an archive entry. The bundled fonts are left out but
-// for the emoji font Firefox bundles: an identity always presents the host's
-// own OS, and Camoufox then renders with the system's fonts. So is uBlock
-// Origin, which ais2api never loads.
-bool camoufox_keeps(std::string_view relative);
+// The browser executable in a Camoufox install for `platform`: camoufox.exe
+// on Windows, camoufox-bin elsewhere.
+std::string_view camoufox_program(std::string_view platform);
+// Whether setup extracts an archive entry for `platform`. An identity always
+// presents the host's own OS. On Windows the bundled fonts are left out but
+// for the emoji font Firefox bundles, and Camoufox renders with the system's
+// fonts; on Linux the font groups a Linux identity reads are kept, with the
+// Linux fontconfig, and the other OSes' left out. So is uBlock Origin, which
+// ais2api never loads.
+bool camoufox_keeps(std::string_view platform, std::string_view relative);
 fs::path camoufox_root(const fs::path &data_dir);  // <data_dir>/runtime/camoufox
 // <data_dir>/runtime/camoufox/<version>-<platform>
 fs::path camoufox_directory(const fs::path &data_dir, const CamoufoxPin &pin);

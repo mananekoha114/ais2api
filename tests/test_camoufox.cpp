@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
+#include <set>
 
 using namespace ais2api;
 using namespace ais2api::browser_detail;
@@ -100,6 +101,55 @@ TEST_CASE("repeated meaningless browser output stays out of the Camoufox log", "
     CHECK_FALSE(camoufox_log_noise("WebDriver BiDi listening on ws://127.0.0.1:49152"));
     CHECK_FALSE(camoufox_log_noise("JavaScript error: resource://gre/modules/juggler/SimpleChannel.js, line 9: TypeError: other"));
     CHECK_FALSE(camoufox_log_noise("JavaScript error: chrome://remote/content/webdriver-bidi/modules/root/browsingContext.sys.mjs, line 1: Error: real failure"));
+}
+
+TEST_CASE("Camoufox's Linux fontconfig scans the kept font groups and keeps its cache", "[camoufox]") {
+    const std::string conf = "<fontconfig>\n\t<dir prefix=\"cwd\">fonts</dir>\n\t<match/>\n"
+                             "\t<cachedir prefix=\"xdg\">fontconfig</cachedir>\n</fontconfig>\n";
+    const std::vector<fs::path> groups{fs::u8path("/opt/a&b/fonts/L"), fs::u8path("/opt/a&b/fonts/LM")};
+    const auto cache = fs::u8path("/data/runtime/camoufox-fontconfig/cache");
+    CHECK(camoufox_fontconfig(conf, groups, cache) ==
+          "<fontconfig>\n\t<dir>/opt/a&amp;b/fonts/L</dir>\n\t<dir>/opt/a&amp;b/fonts/LM</dir>\n\t<match/>\n"
+          "\t<cachedir>/data/runtime/camoufox-fontconfig/cache</cachedir>\n</fontconfig>\n");
+    // In either order.
+    const std::string reversed = "<cachedir prefix=\"xdg\">fontconfig</cachedir><dir prefix=\"cwd\">fonts</dir>";
+    CHECK(camoufox_fontconfig(reversed, {groups[0]}, cache) ==
+          "<cachedir>/data/runtime/camoufox-fontconfig/cache</cachedir><dir>/opt/a&amp;b/fonts/L</dir>");
+    const auto changed = [&](const std::string& text, std::vector<fs::path> directories) {
+        try {
+            camoufox_fontconfig(text, directories, cache);
+            return false;
+        } catch (const Error& error) {
+            return error.code == "camoufox_layout_changed";
+        }
+    };
+    CHECK(changed("<dir prefix=\"cwd\">fonts</dir>", groups));
+    CHECK(changed("<cachedir prefix=\"xdg\">fontconfig</cachedir>", groups));
+    CHECK(changed(conf + "<dir prefix=\"cwd\">fonts</dir>", groups));
+    CHECK(changed(conf, {}));
+}
+
+TEST_CASE("Xvfb runs as Camoufox's launcher runs it and reports its display", "[camoufox]") {
+    const auto args = xvfb_arguments();
+    const auto pair = [&](std::string_view option, std::string_view value) {
+        for (std::size_t i = 0; i + 1 < args.size(); ++i)
+            if (args[i] == option && args[i + 1] == value) return true;
+        return false;
+    };
+    CHECK(pair("-displayfd", "1"));
+    CHECK(pair("-screen", "0"));
+    CHECK(pair("0", "1x1x24"));
+    CHECK(pair("-nolisten", "tcp"));
+    CHECK(pair("+extension", "GLX"));
+    CHECK(pair("-extension", "COMPOSITE"));
+    CHECK(pair("-extension", "RENDER"));
+    CHECK(std::find(args.begin(), args.end(), "-ac") != args.end());
+    CHECK(xvfb_display("99") == 99u);
+    CHECK(xvfb_display("0") == 0u);
+    CHECK_FALSE(xvfb_display(""));
+    CHECK_FALSE(xvfb_display(" 1"));
+    CHECK_FALSE(xvfb_display("123456"));
+    CHECK_FALSE(xvfb_display("_XSERVTransmkdir: Owner of /tmp/.X11-unix should be set to root"));
 }
 
 TEST_CASE("Camoufox configuration pieces never split a UTF-8 character", "[camoufox]") {
@@ -239,8 +289,11 @@ TEST_CASE("Camoufox runs the bridge with BYOB reads and trusted keys", "[.camouf
     CHECK(bool_or(page, "byobReader"));
     CHECK(bool_or(page, "trustedKey"));
     CHECK_FALSE(bool_or(gateway.diagnostics(), "running"));
-    for (const auto& entry : fs::directory_iterator(config.data_dir / "runtime"))
-        CHECK_FALSE(entry.path().filename().string().starts_with("camoufox-"));
+    // The launch's profile is gone; the Linux fontconfig it wrote stays.
+    for (const auto& entry : fs::directory_iterator(config.data_dir / "runtime")) {
+        const auto name = entry.path().filename().string();
+        CHECK((!name.starts_with("camoufox-") || name == "camoufox-fontconfig"));
+    }
     bool retained_log = false;
     for (const auto& entry : fs::directory_iterator(config.data_dir / "logs"))
         retained_log = retained_log || (entry.is_regular_file() && entry.path().filename().string().starts_with("camoufox-"));
@@ -266,8 +319,26 @@ Account runtime_account(const Config& config, Store& store, const std::string& t
     store.set_fingerprint_region(account.id, timezone, locale);
     return account;
 }
-// Families no Windows identity has. The Camoufox build bundles each of them.
+#ifndef _WIN32
+// The families a Linux identity renders with a face from the Linux font
+// groups: those of the Ubuntu bases and of the bundles a draw adds.
+std::set<std::string> linux_font_faces() {
+    std::set<std::string> families;
+    const auto catalog = fs::path(AIS2API_SOURCE_DIR) / "browser" / "camoufox";
+    for (const auto* file : {"font-bases.json", "font-groups.json"}) {
+        const auto document = json::parse(read_file(catalog / file, 1 << 22));
+        for (const auto& entry : document.at("lin").as_array())
+            for (const auto& family : entry.at("fonts").as_array()) families.emplace(family.as_string());
+    }
+    return families;
+}
+#endif
+// Families no identity of this OS has. The Camoufox build bundles each of them.
+#ifdef _WIN32
 const std::vector<std::string> foreign_fonts{"PingFang SC", "Helvetica Neue", "Apple Color Emoji", "Noto Sans", "DejaVu Sans", "Ubuntu"};
+#else
+const std::vector<std::string> foreign_fonts{"PingFang SC", "Helvetica Neue", "Apple Color Emoji", "Segoe UI", "Microsoft YaHei", "Segoe UI Emoji"};
+#endif
 } // namespace
 
 // Hidden by default: select it with a prepared Camoufox executable and the
@@ -306,12 +377,23 @@ TEST_CASE("a generated identity is what the page reads", "[.camoufox-runtime]") 
         INFO(json::serialize(font));
         CHECK(std::find(claimed.begin(), claimed.end(), font) != claimed.end());
     }
+    // Canvas and WebGL read a drawing back alike each time and launch after
+    // launch: none of the random readback that keeps a Linux host from
+    // presenting another OS.
+    const auto& readback = page.at("readback").as_object();
+    for (const auto* kind : {"canvas", "webgl"}) {
+        INFO(kind);
+        const auto& reads = readback.at(kind).as_array();
+        CHECK_FALSE(reads.at(0).is_null());
+        CHECK(reads.at(0) == reads.at(1));
+    }
 
     // Stored with the seed, and launched again as it was.
     const auto stored = store.firefox_identity(account.id);
     REQUIRE(stored);
     const auto again = gateway.verify_identity(account.id);
     CHECK(again.at("expected") == result.at("expected"));
+    CHECK(again.at("page").at("readback") == page.at("readback"));
     CHECK(store.firefox_identity(account.id) == stored);
 }
 
@@ -325,8 +407,16 @@ TEST_CASE("Camoufox without its bundled fonts renders text as the full build doe
     REQUIRE(trimmed != nullptr);
     REQUIRE(full != nullptr);
     REQUIRE(fs::is_directory(fs::u8path(full).parent_path() / "fonts"));
+    std::set<std::string> kept;
+    for (const auto& entry : fs::directory_iterator(fs::u8path(trimmed).parent_path() / "fonts"))
+        kept.insert(path_utf8(entry.path().filename()));
+#ifdef _WIN32
     // setup keeps only the emoji font.
-    REQUIRE(std::distance(fs::directory_iterator(fs::u8path(trimmed).parent_path() / "fonts"), fs::directory_iterator()) == 1);
+    REQUIRE(kept == std::set<std::string>{"TwemojiMozilla.ttf"});
+#else
+    // setup keeps the font groups a Linux identity reads.
+    REQUIRE(kept == std::set<std::string>{"L", "LM", "LMW", "LW", "TwemojiMozilla.ttf", "groups.json"});
+#endif
     Directory directory;
     Config config;
     config.data_dir = directory.path;
@@ -359,10 +449,32 @@ TEST_CASE("Camoufox without its bundled fonts renders text as the full build doe
     };
     INFO("found only in the full build: " << missing(fonts.at("detected"), reference_fonts.at("detected")));
     INFO("found only without the bundled fonts: " << missing(reference_fonts.at("detected"), fonts.at("detected")));
+#ifdef _WIN32
+    const auto leaked = [](std::string_view) { return false; };
     CHECK(fonts.at("detected") == reference_fonts.at("detected"));
+#else
+    // On Linux the full build is no exact reference. Firefox activates the
+    // bundled fonts directory recursively, so there the other OSes' groups
+    // reach a Linux identity too: Camoufox's FONTS.md describes this leak
+    // (Windows' Calibri and Cambria). Trimmed, only the Linux groups remain.
+    // A family with a Linux face renders as in the full build; one without
+    // may lose the leaked face.
+    const auto faces = linux_font_faces();
+    const auto leaked = [&](std::string_view family) {
+        return family != "Twemoji Mozilla" && !faces.contains(std::string(family));
+    };
+    const auto& detected = fonts.at("detected").as_array();
+    const auto& reference_detected = reference_fonts.at("detected").as_array();
+    CHECK(missing(reference_fonts.at("detected"), fonts.at("detected")) == "[]");
+    for (const auto& font : reference_detected) {
+        INFO("found only in the full build: " << json::serialize(font));
+        if (std::find(detected.begin(), detected.end(), font) == detected.end()) CHECK(leaked(font.as_string()));
+    }
+#endif
     for (const auto* key : {"widths", "families"})
         for (const auto& width : reference_fonts.at(key).as_object()) {
             INFO(key << ": " << std::string(width.key()));
+            if (std::string_view(key) == "families" && leaked(width.key())) continue;
             CHECK(fonts.at(key).as_object().at(width.key()) == width.value());
         }
 }

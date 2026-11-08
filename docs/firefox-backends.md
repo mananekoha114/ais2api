@@ -88,7 +88,10 @@
     - 身份呈现宿主 OS 时，Camoufox 只用系统字体；自带字体中只有 Firefox 本身也带的 emoji 字体 `Twemoji Mozilla` 仍会启用，页面能检测到它，emoji 也用它绘制；
     - 所以 Windows 上解压时跳过 `fonts/` 中 `TwemojiMozilla.ttf` 以外的文件；
     - 隐藏测试 `[.camoufox-fonts]` 确认裁剪版与完整版渲染相同：检测到的字体、每个字体族和通用字体族的文字宽度逐项一致；
-    - Linux 按 `fonts/groups.json` 保留宿主 OS 的字体组，在 Linux 阶段实现。
+    - Linux 上 Camoufox 不用系统字体，而是通过它自带的 Linux fontconfig 读取自带字体。
+      - 解压时按 `fonts/groups.json` 只保留 Linux 身份读取的四组字体（约 0.9 GB）和 Linux 的 fontconfig，并核对分组没有变化。
+      - 启动时把 fontconfig 中相对于工作目录的字体路径换成这几组字体的绝对路径，把缓存移到数据目录，再通过 `FONTCONFIG_FILE` 交给浏览器。
+      - 裁剪还去掉了完整版的一处泄漏：Firefox 递归启用自带的字体目录，完整版里其他 OS 的字体组也能被 Linux 身份读到（Camoufox 的 `FONTS.md` 记述了这一点，例如 Windows 的 Calibri 与 Cambria）。所以 Linux 上的 `[.camoufox-fonts]` 只要求有 Linux 字体的字体族、通用字体族与完整版一致，并且裁剪后不多出字体。CI 实测，差异只出现在没有 Linux 字体的名称上（Calibri、Cambria、Helvetica、Times、Palatino 等）。
   - **扩展**：不加载自带的 uBlock Origin，与现有的 `--disable-extensions` 一致，解压时就跳过 `addons/UBO`。
   - 开发版可以把 Camoufox 一起打包。
 
@@ -105,13 +108,13 @@ CMake 选项 `AIS2API_DEV_BUNDLE` 区分开发版与正式分发版，默认关�
 
 | | 开发版（开启） | 正式分发版（关闭） |
 |---|---|---|
-| 构建方式 | `scripts/build-dev.ps1` 在本机构建 | `scripts/build.ps1`、`scripts/build.sh` 与 CI |
+| 构建方式 | `scripts/build-dev.ps1` 或 `build-dev.sh` 在本机构建 | `scripts/build.ps1`、`scripts/build.sh` 与 CI |
 | 身份 | 本机生成（与正式版相同） | 本机生成 |
 | fpgen 模型 | 嵌入 | `setup` 下载 |
 | Camoufox | 一起打包，放在 `bin/camoufox-runtime/<版本>-<平台>/` | `setup` 下载 |
 | 新建配置的后端 | `camoufox` | `cloakbrowser` |
 
-- 开发版目前只有 Windows x64；Linux 版脚本在 Linux 阶段加入。构建方法见 [构建与打包](platforms.md#构建开发版)。
+- 开发版支持 Windows x64（`build-dev.ps1`）和 Linux x64（`build-dev.sh`）。构建方法见 [构建与打包](platforms.md#构建开发版)。
 - 打包的 Camoufox 是刚构建的程序用 `setup` 安装后原样复制的，裁剪方式和归属标记都与 `setup` 的安装相同。只有它是锁定版本、且按本程序的规则裁剪时才使用。使用顺序：指向 Camoufox 的 `browser_executable`、打包版、`setup` 的安装。使用打包版时 `browser rollback` 不可用，要退回就换回上一个开发版包。
 - 已有的配置保持原来的后端：账号换成 Firefox 身份始终要显式操作。
 - 防止误发：`build.ps1` 和 `build.sh` 拒绝开启了该选项的构建目录；`check-package.py` 要求正式分发包里是正式版构建、且不含 Camoufox，开发版包用 `--dev` 检查。

@@ -127,6 +127,27 @@ class RuntimeArchiveTests(unittest.TestCase):
         self.files['bin/ais2api'] = executable(mode=b'dev')
         return self.archive(metadata=False, windows=True)
 
+    def linux_camoufox(self, version='158.0.1-beta.41'):
+        """A Linux dev bundle's Camoufox, with the font groups a Linux identity reads."""
+        self.files['bin/runtime-manifest.json'] = json.dumps({'camoufox': {'version': version, 'artifacts': {
+            'linux-x64': {'sha256': 'a' * 64}}}}).encode()
+        prefix = f'bin/camoufox-runtime/{version}-linux-x64/'
+        self.files[prefix + 'camoufox-bin'] = b'exe'
+        self.executables.add(prefix + 'camoufox-bin')
+        for name in ('fonts/groups.json', 'fonts/TwemojiMozilla.ttf', 'fonts/L/a.ttf', 'fonts/LMW/b.ttf',
+                     'fontconfig/linux/fonts.conf'):
+            self.files[prefix + name] = b'fixture'
+        self.files[prefix + '.ais2api-runtime.json'] = json.dumps({
+            'browser': 'camoufox', 'browser_version': version, 'platform': 'linux-x64', 'sha256': 'a' * 64,
+            'skipped': ['fonts', 'fontconfig', 'addons/UBO'],
+            'kept': ['fonts/groups.json', 'fonts/TwemojiMozilla.ttf', 'fontconfig/linux',
+                     'fonts/L', 'fonts/LM', 'fonts/LMW', 'fonts/LW']}).encode()
+        return prefix
+
+    def linux_dev_archive(self):
+        self.files['bin/ais2api'] = executable(mode=b'dev')
+        return self.archive(metadata=False)
+
     def test_release_archives_hold_only_release_builds(self):
         self.files['bin/ais2api'] = executable(mode=b'dev')
         with self.assertRaisesRegex(ValueError, 'dev_build_in_release_archive'):
@@ -154,6 +175,18 @@ class RuntimeArchiveTests(unittest.TestCase):
             self.verify(self.dev_archive(), target='desktop', dev=True, with_browser=True)
         with self.assertRaisesRegex(ValueError, 'termux_requires_backend_tar_gz'):
             self.verify(dev=True)
+
+    def test_linux_dev_bundle_carries_the_linux_font_groups(self):
+        prefix = self.linux_camoufox()
+        self.assertEqual(self.verify(self.linux_dev_archive(), target='desktop', dev=True), 0)
+        for name in ('fonts/W/c.ttf', 'fonts/M/c.ttf', 'fontconfig/windows/fonts.conf'):
+            self.files[prefix + name] = b'fixture'
+            with self.assertRaisesRegex(ValueError, 'camoufox_bundle_untrimmed'):
+                self.verify(self.linux_dev_archive(), target='desktop', dev=True)
+            self.files.pop(prefix + name)
+        self.executables.discard(prefix + 'camoufox-bin')
+        with self.assertRaisesRegex(ValueError, 'camoufox_is_not_executable'):
+            self.verify(self.linux_dev_archive(), target='desktop', dev=True)
 
     def test_dev_bundle_camoufox_must_be_the_pinned_trimmed_build(self):
         prefix = self.camoufox()

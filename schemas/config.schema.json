@@ -81,7 +81,8 @@
     },
     "headless": {
       "type": "boolean",
-      "default": true
+      "default": true,
+      "description": "Run the browser without a window. Camoufox on Linux always runs with a display: an Xvfb virtual display when true, the desktop session's when false."
     },
     "ignore_unsupported_parameters": {
       "type": "boolean",

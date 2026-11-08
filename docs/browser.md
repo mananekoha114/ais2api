@@ -45,6 +45,7 @@ CloakBrowser 的指纹作用于整个进程，因此切换到指纹不同的账�
 - 在 CloakBrowser 与 Firefox 之间切换必须显式操作并确认（命令行 `accounts backend`、管理 API 或 WebUI 的指纹对话框），因为 Google 会把新身份看作一台新设备。Firefox 后端之间可以直接切换，身份不变。两种身份都由同一个种子确定，切回时得到原来的身份。
 - 同一时间只有一个浏览器驻留：轮到另一个后端的账号时，先关闭当前浏览器，再启动另一个。
 - `setup` 和 `doctor` 按“需要的后端”工作：默认后端加上已保存账号用到的后端。诊断信息的 `backend` 是当前运行的后端，`default_backend` 是默认后端。
+- Linux 上的 Camoufox 在 Xvfb 虚拟显示中以有界面模式运行（`headless=true` 时），字体使用 Camoufox 自带的 Linux 字体组，见 [Camoufox 后端](platforms.md#camoufox-后端)。
 
 ## Cookie 写回
 
