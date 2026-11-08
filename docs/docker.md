@@ -138,6 +138,29 @@ docker run -d --name ais2api \
 
 浏览器必须从 CloakHQ 官方渠道获取。不要把自己构建的含 CloakBrowser 镜像上传到公共仓库。
 
+### Camoufox
+
+实验性的 Firefox 后端使用 Camoufox（见 [按账号选择后端](browser.md#按账号选择后端)）。
+
+- 镜像不含 Camoufox 本身（约 1.3 GB），只带运行它所需的系统包，包括 Xvfb。
+- 默认后端为 `camoufox`，或者有账号使用 Firefox 后端时，入口脚本会在启动服务前把 Camoufox 安装到 `/data/runtime/camoufox/`，并用本地页面验证一次。
+  - 第一次启动要下载约 1.3 GB，之后复用。
+  - 安装失败时服务照常启动，但不就绪；在容器里运行 `ais2api browser update camoufox --yes` 可以重试。
+- Firefox 需要较大的共享内存，请加上 `--shm-size=1g`。
+
+用 Camoufox 作为新账号的默认后端：
+
+```sh
+docker run -d --name ais2api \
+  -p 18451:18451 \
+  -v "$PWD/data:/data" \
+  --shm-size=1g \
+  -e AIS2API_BROWSER_BACKEND=camoufox \
+  ais2api:local
+```
+
+新配置的默认后端仍是 Debian Chromium。不设置环境变量也可以：在 Web 控制台把账号切换到 Firefox 后端，然后重启容器，入口脚本会在那时安装 Camoufox。Camoufox 同时支持 amd64 和 arm64 镜像。
+
 ## 发布镜像
 
 `.github/workflows/docker.yml` 在 amd64 与 arm64 原生 runner 上分别构建并运行冒烟测试，PR 只构建不推送。推送到 `main`、标签或手动触发时，先把各架构镜像推送到 `ghcr.io/mananekoha114/ais2api`，再合并为 multi-arch manifest。
@@ -168,8 +191,8 @@ docker run -d --name ais2api \
 
 ## 限制
 
-- 提供 `linux/amd64` 与 `linux/arm64` 镜像；原生 `scripts/build.sh linux` 仍只支持 x86_64。
+- 提供 `linux/amd64` 与 `linux/arm64` 镜像。
 - 容器内以 root 运行，浏览器以 `--no-sandbox` 启动；容器内无法提供 Chromium 沙箱。
 - 容器没有系统 D-Bus，浏览器日志会出现 `Failed to connect to the bus`；它不影响 CDP 和生成。
 - 生成请求串行处理，超过队列上限返回 `429 queue_full`。
-- 构建和冒烟测试只验证程序启动、配置生成、随机管理密码、嵌入式 Web 控制台和 `/health`，不验证 Google 登录、账号探测或真实生成。
+- 构建和冒烟测试只验证程序启动、配置生成、随机管理密码、嵌入式 Web 控制台和 `/health`，不验证 Google 登录、账号探测或真实生成。Camoufox 的首次安装由 `camoufox-runtime.yml` 单独验证（见 [持续集成](platforms.md#持续集成)）。
