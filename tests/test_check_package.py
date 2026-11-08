@@ -21,7 +21,8 @@ checker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checker)
 
 
-def executable(*, machine=183, interpreter='/system/bin/linker64', needed=('libc.so', 'libc++_shared.so')):
+def executable(*, machine=183, interpreter='/system/bin/linker64', needed=('libc.so', 'libc++_shared.so'),
+               mode=b'release'):
     """A small ELF fixture with real program/dynamic headers, never executed."""
     data = bytearray(1024)
     data[:16] = b'\x7fELF\x02\x01\x01' + bytes(9)
@@ -41,7 +42,8 @@ def executable(*, machine=183, interpreter='/system/bin/linker64', needed=('libc
     data[strings:strings + len(table)] = table
     for index, entry in enumerate(entries):
         struct.pack_into('<qQ', data, dynamic + 16 * index, *entry)
-    return bytes(data)
+    # The build mode tag, as src/common.cpp leaves it in the executable.
+    return bytes(data) + (checker.BUILD_TAG + mode if mode else b'')
 
 
 class RuntimeArchiveTests(unittest.TestCase):
@@ -105,9 +107,83 @@ class RuntimeArchiveTests(unittest.TestCase):
         Path(str(path) + '.sha256').write_text(hashlib.sha256(path.read_bytes()).hexdigest() + '\n')
         return path
 
-    def verify(self, path=None, target='termux-aarch64'):
+    def verify(self, path=None, target='termux-aarch64', dev=False, with_browser=False):
         with contextlib.redirect_stdout(io.StringIO()):
-            return checker.check(path or self.archive(), target=target)
+            return checker.check(path or self.archive(), with_browser, target, dev)
+
+    def camoufox(self, version='158.0.1-beta.41', **marker):
+        """A dev bundle's Camoufox for a manifest pinning `version`."""
+        self.files['bin/runtime-manifest.json'] = json.dumps({'camoufox': {'version': '158.0.1-beta.41', 'artifacts': {
+            'windows-x64': {'sha256': 'a' * 64}}}}).encode()
+        prefix = f'bin/camoufox-runtime/{version}-windows-x64/'
+        self.files[prefix + 'camoufox.exe'] = b'exe'
+        self.files[prefix + 'fonts/TwemojiMozilla.ttf'] = b'font'
+        self.files[prefix + '.ais2api-runtime.json'] = json.dumps({
+            'browser': 'camoufox', 'browser_version': version, 'platform': 'windows-x64', 'sha256': 'a' * 64,
+            'skipped': ['fonts', 'addons/UBO'], 'kept': ['fonts/TwemojiMozilla.ttf'], **marker}).encode()
+        return prefix
+
+    def dev_archive(self):
+        self.files['bin/ais2api'] = executable(mode=b'dev')
+        return self.archive(metadata=False, windows=True)
+
+    def test_release_archives_hold_only_release_builds(self):
+        self.files['bin/ais2api'] = executable(mode=b'dev')
+        with self.assertRaisesRegex(ValueError, 'dev_build_in_release_archive'):
+            self.verify(self.archive(metadata=False, windows=True), target='desktop')
+        self.files['bin/ais2api'] = executable(mode=None)
+        with self.assertRaisesRegex(ValueError, 'unknown_build_mode'):
+            self.verify(self.archive(metadata=False), target='desktop')
+        self.files['bin/ais2api'] = executable(mode=None) + checker.BUILD_TAG + b'release' + checker.BUILD_TAG + b'dev'
+        with self.assertRaisesRegex(ValueError, 'unknown_build_mode'):
+            self.verify(self.archive(metadata=False), target='desktop')
+
+    def test_release_archives_carry_no_camoufox(self):
+        self.camoufox()
+        with self.assertRaisesRegex(ValueError, 'camoufox_bundle_in_release_archive'):
+            self.verify(self.archive(metadata=False, windows=True), target='desktop')
+
+    def test_dev_bundle_with_and_without_camoufox(self):
+        self.assertEqual(self.verify(self.dev_archive(), target='desktop', dev=True), 0)
+        self.camoufox()
+        self.assertEqual(self.verify(self.dev_archive(), target='desktop', dev=True), 0)
+        self.files['bin/ais2api'] = executable()
+        with self.assertRaisesRegex(ValueError, 'not_a_dev_build'):
+            self.verify(self.archive(metadata=False, windows=True), target='desktop', dev=True)
+        with self.assertRaisesRegex(ValueError, 'dev_bundle_cannot_carry_cloakbrowser'):
+            self.verify(self.dev_archive(), target='desktop', dev=True, with_browser=True)
+        with self.assertRaisesRegex(ValueError, 'termux_requires_backend_tar_gz'):
+            self.verify(dev=True)
+
+    def test_dev_bundle_camoufox_must_be_the_pinned_trimmed_build(self):
+        prefix = self.camoufox()
+        self.files[prefix + 'fonts/001__Arial.ttf'] = b'font'
+        with self.assertRaisesRegex(ValueError, 'camoufox_bundle_untrimmed'):
+            self.verify(self.dev_archive(), target='desktop', dev=True)
+        self.files.pop(prefix + 'fonts/001__Arial.ttf')
+        self.files[prefix + 'addons/UBO/manifest.json'] = b'{}'
+        with self.assertRaisesRegex(ValueError, 'camoufox_bundle_untrimmed'):
+            self.verify(self.dev_archive(), target='desktop', dev=True)
+        self.files.pop(prefix + 'addons/UBO/manifest.json')
+        self.files.pop(prefix + 'camoufox.exe')
+        with self.assertRaisesRegex(ValueError, 'missing_camoufox_executable'):
+            self.verify(self.dev_archive(), target='desktop', dev=True)
+
+        self.setUp()
+        self.camoufox(sha256='b' * 64)
+        with self.assertRaisesRegex(ValueError, 'camoufox_bundle_manifest_mismatch'):
+            self.verify(self.dev_archive(), target='desktop', dev=True)
+        self.setUp()
+        self.camoufox(version='157.0')
+        with self.assertRaisesRegex(ValueError, 'unexpected_camoufox_bundle'):
+            self.verify(self.dev_archive(), target='desktop', dev=True)
+        self.setUp()
+        prefix = self.camoufox()
+        self.files[prefix + '.ais2api-runtime.json'] = json.dumps({
+            'browser': 'camoufox', 'browser_version': '158.0.1-beta.41', 'platform': 'windows-x64',
+            'sha256': 'a' * 64}).encode()
+        with self.assertRaisesRegex(ValueError, 'camoufox_bundle_marker_without_trim_rules'):
+            self.verify(self.dev_archive(), target='desktop', dev=True)
 
     def test_termux_runtime_with_system_dependencies(self):
         self.assertEqual(self.verify(), 0)
