@@ -446,6 +446,9 @@ TEST_CASE("management HTTP exposes and edits per-account browser fingerprints", 
     CHECK(string_or(view, "effective_locale") == host_locale());
     auto listed = object(server.get("/accounts")).at("accounts").as_array()[0].as_object();
     CHECK(listed.at("fingerprint").as_object().at("seed").to_number<unsigned>() == seed);
+    CHECK(string_or(listed, "backend") == "cloakbrowser");
+    CHECK(string_or(view, "backend") == "cloakbrowser");
+    CHECK(string_or(view, "identity") == "chrome");
 
     auto updated = server.send(http::verb::patch, route, {{"timezone", "America/New_York"}, {"locale", "en-US"}});
     REQUIRE(updated.result_int() == 200);
@@ -457,6 +460,14 @@ TEST_CASE("management HTTP exposes and edits per-account browser fingerprints", 
     for (const auto& body : std::vector<json::object>{{{"timezone", "Bad Zone"}}, {{"locale", "en_US"}},
                                                      {{"seed", 12345}}, {{"timezone", 7}}, {}})
         CHECK(server.send(http::verb::patch, route, body).result_int() == 400);
+
+    // A Firefox identity is a new device to Google: the move needs confirming.
+    CHECK(server.send(http::verb::patch, route, {{"backend", "camoufox"}}).result_int() == 409);
+    CHECK(server.send(http::verb::patch, route, {{"backend", "spidermonkey"}}).result_int() == 400);
+    auto moved = server.send(http::verb::patch, route, {{"backend", "camoufox"}, {"confirm_identity_change", true}});
+    REQUIRE(moved.result_int() == 200);
+    CHECK(string_or(object(moved), "identity") == "firefox");
+    CHECK(object(moved).at("seed").to_number<unsigned>() == seed);
 
     auto regenerated = server.send(http::verb::post, route + "/regenerate");
     REQUIRE(regenerated.result_int() == 200);
