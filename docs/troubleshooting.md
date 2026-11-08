@@ -43,6 +43,15 @@
 - `setup --yes` 需要可用的 sudo（交互终端或已认证会话）。
 - 只支持 Ubuntu 24.04 与 Debian 13；其他发行版或版本会被拒绝（`unsupported_distribution`），而不是猜测包名。
 - WSL 2 中请把源码、程序和数据放在 Linux 文件系统内（如 `~/ais2api`），不要放在 `/mnt/c`。
+- 安装 Camoufox 时返回 `system_confirmation_required`：错误信息列出了缺少的系统包，确认后加 `--yes` 重新运行。
+- `camoufox_layout_changed`：锁定的 Camoufox 版本的字体或 fontconfig 布局与本程序的解压规则不符，需要升级 ais2api。
+
+### Linux 上 Camoufox 无法启动
+
+- `display_unavailable`：
+  - `headless=true` 时，表示找不到 Xvfb，或 Xvfb 没能启动。运行 `setup --yes` 安装 `xvfb`，Xvfb 的输出会记在 `logs/camoufox-*.log` 中。
+  - `headless=false` 时，表示没有可用的桌面显示（`DISPLAY` 或 `WAYLAND_DISPLAY`）。在无桌面的机器上改回 `headless=true`。
+- 容器里浏览器启动后很快崩溃：多半是共享内存不足，给容器加上 `--shm-size=1g`。
 
 ### Windows 中文显示乱码
 

@@ -41,9 +41,9 @@
 | 字段 | 类型与默认值 | 生效方式 | 说明 |
 |---|---|---|---|
 | `data_dir` | 字符串，程序旁 `data/` | 重启 | 数据库、日志、下载与浏览器临时资料所在目录。 |
-| `browser_executable` | 字符串，`""` | 重启 | 浏览器路径。留空时自动使用程序旁 `browser-runtime/` 中的锁定浏览器，或 `setup` 安装的浏览器。`camoufox` 后端只在它指向 Camoufox（`camoufox[.exe]`）时使用它，否则使用开发版打包的 Camoufox，再其次是 `setup` 安装的 Camoufox。 |
+| `browser_executable` | 字符串，`""` | 重启 | 浏览器路径。留空时自动使用程序旁 `browser-runtime/` 中的锁定浏览器，或 `setup` 安装的浏览器。`camoufox` 后端只在它指向 Camoufox（`camoufox[.exe]` 或 Linux 的 `camoufox-bin`）时使用它，否则使用开发版打包的 Camoufox，再其次是 `setup` 安装的 Camoufox。 |
 | `browser_backend` | 字符串，`"cloakbrowser"`（[开发版](platforms.md#构建开发版)新建的配置为 `"camoufox"`） | 热更新 | **新账号**的默认浏览器后端，Cookie 导入也用它验证。已保存的账号各自记住自己的后端，修改此项不会改变它们，见 [按账号选择后端](browser.md#按账号选择后端)。`camoufox` 为实验性的 Firefox 后端（通过 WebDriver BiDi 驱动 Camoufox，见 [Firefox 后端迁移计划](firefox-backends.md)），新账号保存为“自动”；需要的运行时由 `ais2api setup` 安装，每个账号的 Firefox 身份在本机生成并随指纹保存。 |
-| `headless` | 布尔，`true` | 重启 | 是否以无界面模式运行浏览器。 |
+| `headless` | 布尔，`true` | 重启 | 是否以无界面模式运行浏览器。Linux 上的 Camoufox 总是有界面运行：为 `true` 时使用 Xvfb 虚拟显示，为 `false` 时使用桌面会话的显示，见 [Camoufox 后端](platforms.md#camoufox-后端)。 |
 | `proxy` | 字符串，`""` | 重启 | 上游代理，同时用于浏览器和服务端下载。 |
 | `browser_proxy_relay` | 布尔，`false` | 重启 | 开启本机转发代理，让浏览器能使用带用户名密码的 HTTP 或 SOCKS5 代理，详见下文。 |
 | `browser_remote_allow_origins` | 布尔，`false` | 重启 | 以 `--remote-allow-origins=*` 启动浏览器，允许任意来源的网页连接本机 DevTools WebSocket。ais2api 自身不需要；仅供外部 CDP 工具使用，开启后本机浏览器中打开的网页也能尝试连接该端口。 |
