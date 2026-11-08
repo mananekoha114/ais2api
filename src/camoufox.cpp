@@ -171,6 +171,11 @@ std::string browser_detail::firefox_user_js(const json::object& prefs) {
     return result;
 }
 
+bool browser_detail::camoufox_log_noise(std::string_view line) {
+    const auto has = [&](std::string_view text) { return line.find(text) != std::string_view::npos; };
+    return (has("juggler/SimpleChannel.js") && has("redeclaration of let SimpleChannel")) ||
+           (has("webdriver-bidi/modules/root/browsingContext.sys.mjs") && has("WeakMap key null must be an object"));
+}
 std::uint64_t browser_detail::identity_salt(std::string_view secret, std::string_view account_id, unsigned seed) {
     std::string input(secret);
     input += '\0';
@@ -627,6 +632,7 @@ struct CamoufoxGateway::Impl {
                 endpoint_port = 0;
             }
             options.on_output = [this](std::string_view line) {
+                if (browser_detail::camoufox_log_noise(line)) return;
                 std::lock_guard lock(output_mutex);
                 if (output_log.is_open()) { output_log << line << '\n'; output_log.flush(); }
                 if (!endpoint_port && line.find("WebDriver BiDi listening on") != std::string_view::npos)

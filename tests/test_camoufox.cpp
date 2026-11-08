@@ -94,6 +94,14 @@ TEST_CASE("the BiDi endpoint is read from the browser's own announcement", "[cam
     CHECK(bidi_endpoint_port("console.log: nothing here") == std::nullopt);
 }
 
+TEST_CASE("repeated meaningless browser output stays out of the Camoufox log", "[camoufox]") {
+    CHECK(camoufox_log_noise("JavaScript error: resource://gre/modules/juggler/SimpleChannel.js, line 1: SyntaxError: redeclaration of let SimpleChannel"));
+    CHECK(camoufox_log_noise("JavaScript error: chrome://remote/content/webdriver-bidi/modules/root/browsingContext.sys.mjs, line 3042: TypeError: WeakMap key null must be an object or an unregistered symbol"));
+    CHECK_FALSE(camoufox_log_noise("WebDriver BiDi listening on ws://127.0.0.1:49152"));
+    CHECK_FALSE(camoufox_log_noise("JavaScript error: resource://gre/modules/juggler/SimpleChannel.js, line 9: TypeError: other"));
+    CHECK_FALSE(camoufox_log_noise("JavaScript error: chrome://remote/content/webdriver-bidi/modules/root/browsingContext.sys.mjs, line 1: Error: real failure"));
+}
+
 TEST_CASE("Camoufox configuration pieces never split a UTF-8 character", "[camoufox]") {
     CHECK(camoufox_environment("").empty());
     const auto small = camoufox_environment(R"({"a":1})");
