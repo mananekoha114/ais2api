@@ -62,8 +62,8 @@ std::string platform() {
     if (std::getenv("PREFIX") &&
         std::string(std::getenv("PREFIX")).find("com.termux") != std::string::npos)
         return "termux-arm64";
-    throw Error(400, "unsupported_platform",
-                "Automatic setup supports ARM64 Termux, Windows x64, Ubuntu x64 and Debian x64");
+    // Ubuntu or Debian on ARM64, such as the arm64 Docker image.
+    return "linux-arm64";
 #elif defined(__x86_64__)
     return "linux-x64";
 #else
@@ -392,23 +392,62 @@ fpgen::Model load_fpgen_model(const fs::path &data_dir, const FpgenModelPin &pin
 namespace {
 // Written last into a Camoufox directory setup installed.
 constexpr std::string_view camoufox_marker = ".ais2api-runtime.json";
-#ifdef _WIN32
-constexpr std::string_view camoufox_program = "camoufox.exe";
-#else
-constexpr std::string_view camoufox_program = "camoufox";
-#endif
-// What camoufox_keeps leaves out, as recorded in the marker.
-constexpr std::array<std::string_view, 2> camoufox_skipped{"fonts", "addons/UBO"};
-// Kept from a skipped directory. Camoufox still activates the emoji font
-// Firefox bundles on Windows, and so a page finds it.
-constexpr std::array<std::string_view, 1> camoufox_kept{"fonts/TwemojiMozilla.ttf"};
-// The marker's record of the rules above. An install made under other rules
-// is installed again.
-json::object camoufox_trim() {
+// The font groups a Linux identity reads: fonts/groups.json names them for
+// "lin", and the launch's fontconfig scans their directories.
+constexpr std::array<std::string_view, 4> linux_font_groups{"L", "LM", "LMW", "LW"};
+// What camoufox_keeps leaves out of an install for a platform, and keeps from
+// what it leaves out, as recorded in the marker.
+struct CamoufoxRules {
+    std::vector<std::string> skipped, kept;
+};
+CamoufoxRules camoufox_rules(std::string_view platform) {
+    // Windows renders with the system's fonts. Camoufox still activates the
+    // emoji font Firefox bundles on Windows, and so a page finds it.
+    if (platform == "windows-x64") return {{"fonts", "addons/UBO"}, {"fonts/TwemojiMozilla.ttf"}};
+    // Linux renders with the bundled fonts a Linux identity reads, through
+    // Camoufox's Linux fontconfig.
+    CamoufoxRules rules{{"fonts", "fontconfig", "addons/UBO"},
+                        {"fonts/groups.json", "fonts/TwemojiMozilla.ttf", "fontconfig/linux"}};
+    for (const auto group : linux_font_groups) rules.kept.push_back("fonts/" + std::string(group));
+    return rules;
+}
+// The marker's record of the rules. An install made under other rules is
+// installed again.
+json::object camoufox_trim(std::string_view platform) {
+    const auto rules = camoufox_rules(platform);
     json::array skipped, kept;
-    for (const auto entry : camoufox_skipped) skipped.emplace_back(entry);
-    for (const auto entry : camoufox_kept) kept.emplace_back(entry);
+    for (const auto &entry : rules.skipped) skipped.emplace_back(entry);
+    for (const auto &entry : rules.kept) kept.emplace_back(entry);
     return {{"skipped", std::move(skipped)}, {"kept", std::move(kept)}};
+}
+// `relative` is `entry` or below it.
+bool within(std::string_view relative, std::string_view entry) {
+    return relative.starts_with(entry) && (relative.size() == entry.size() || relative[entry.size()] == '/');
+}
+// Camoufox's Linux fontconfig scans the font groups setup keeps: an archive
+// that groups its fonts otherwise would render with a part of them, or with
+// another OS's.
+void check_font_groups(const fs::path &directory) {
+    std::vector<std::string> read;
+    try {
+        const auto groups = json::parse(read_file(directory / "fonts" / "groups.json", 1 << 20)).as_object();
+        for (const auto &group : groups.at("readBy").as_object().at("lin").as_array())
+            read.emplace_back(group.as_string());
+    } catch (const std::exception &) {
+        throw Error(502, "camoufox_layout_changed", "Camoufox archive holds no readable fonts/groups.json");
+    }
+    std::sort(read.begin(), read.end());
+    if (!std::equal(read.begin(), read.end(), linux_font_groups.begin(), linux_font_groups.end()))
+        throw Error(502, "camoufox_layout_changed",
+                    "Camoufox groups its Linux fonts differently from what setup extracts; update setup's rules");
+    for (const auto group : linux_font_groups)
+        if (!fs::is_directory(fs::symlink_status(directory / "fonts" / fs::u8path(std::string(group)))))
+            throw Error(502, "camoufox_layout_changed", "Camoufox archive holds no fonts/" + std::string(group));
+    const auto conf = directory / "fontconfig" / "linux" / "fonts.conf";
+    if (!fs::is_regular_file(fs::symlink_status(conf)))
+        throw Error(502, "camoufox_layout_changed", "Camoufox archive holds no fontconfig/linux/fonts.conf");
+    // Throws when the file no longer reads as the launch rewrites it.
+    browser_detail::camoufox_fontconfig(read_file(conf, 16 << 20), {directory / "fonts" / "L"}, directory / "cache");
 }
 std::string host_platform() {
     try {
@@ -433,7 +472,8 @@ std::string camoufox_install_state(const fs::path &directory, json::object &owne
     const auto file = [&](std::string_view name) {
         return fs::is_regular_file(fs::symlink_status(directory / name, error));
     };
-    if (!file(camoufox_program) || !file("properties.json") || !file("application.ini")) return "damaged";
+    if (!file(camoufox_program(string_or(owner, "platform"))) || !file("properties.json") || !file("application.ini"))
+        return "damaged";
     try {
         if (firefox_identity::browser_version(directory) != string_or(owner, "browser_version")) return "damaged";
     } catch (const std::exception &) {
@@ -497,12 +537,14 @@ std::optional<CamoufoxPin> camoufox_pin() {
     if (host.empty()) return std::nullopt;
     return camoufox_pin(manifest(), host);
 }
-bool camoufox_keeps(std::string_view relative) {
-    if (std::find(camoufox_kept.begin(), camoufox_kept.end(), relative) != camoufox_kept.end()) return true;
-    return std::none_of(camoufox_skipped.begin(), camoufox_skipped.end(), [&](std::string_view skipped) {
-        return relative.starts_with(skipped) &&
-               (relative.size() == skipped.size() || relative[skipped.size()] == '/');
-    });
+std::string_view camoufox_program(std::string_view platform) {
+    return platform == "windows-x64" ? "camoufox.exe" : "camoufox-bin";
+}
+bool camoufox_keeps(std::string_view platform, std::string_view relative) {
+    const auto rules = camoufox_rules(platform);
+    const auto under = [&](const std::string &entry) { return within(relative, entry); };
+    return std::any_of(rules.kept.begin(), rules.kept.end(), under) ||
+           std::none_of(rules.skipped.begin(), rules.skipped.end(), under);
 }
 fs::path camoufox_root(const fs::path &data_dir) { return data_dir / "runtime" / "camoufox"; }
 fs::path camoufox_directory(const fs::path &data_dir, const CamoufoxPin &pin) {
@@ -511,7 +553,7 @@ fs::path camoufox_directory(const fs::path &data_dir, const CamoufoxPin &pin) {
 std::string camoufox_state(const fs::path &directory, const CamoufoxPin &pin) {
     json::object owner;
     const auto state = camoufox_install_state(directory, owner);
-    const auto trim = camoufox_trim();
+    const auto trim = camoufox_trim(pin.platform);
     if (state == "installed" &&
         (string_or(owner, "browser_version") != pin.version || string_or(owner, "platform") != pin.platform ||
          string_or(owner, "sha256") != pin.sha256 || owner.if_contains("skipped") == nullptr ||
@@ -529,13 +571,16 @@ void install_camoufox(const fs::path &archive, const fs::path &directory, const 
     secure_directory(parent);
     const auto staging = parent / ("staging-" + random_hex(8));
     try {
-        extract_archive(archive, staging, camoufox_keeps);
-        for (const auto name : {camoufox_program, std::string_view("properties.json"), std::string_view("application.ini")})
+        extract_archive(archive, staging,
+                        [&](std::string_view relative) { return camoufox_keeps(pin.platform, relative); });
+        for (const auto name : {camoufox_program(pin.platform), std::string_view("properties.json"),
+                                std::string_view("application.ini")})
             if (!fs::is_regular_file(fs::symlink_status(staging / name)))
                 throw Error(502, "archive_layout", "Camoufox archive holds no " + std::string(name) + " at its root");
         if (firefox_identity::browser_version(staging) != pin.version)
             throw Error(502, "archive_layout", "Camoufox archive is not version " + pin.version);
-        auto marker = camoufox_trim();
+        if (pin.platform != "windows-x64") check_font_groups(staging);
+        auto marker = camoufox_trim(pin.platform);
         marker.insert({{"version", 1},
                        {"browser", "camoufox"},
                        {"browser_version", pin.version},
@@ -604,7 +649,7 @@ CamoufoxExecutable camoufox_executable(const Config &config, const fs::path &pro
     auto stem = path_utf8(config.browser_executable.stem());
     std::transform(stem.begin(), stem.end(), stem.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (stem == "camoufox") return {config.browser_executable, "browser_executable"};
+    if (stem == "camoufox" || stem == "camoufox-bin") return {config.browser_executable, "browser_executable"};
     // A bundle ships with the program, so it is the pinned build; one that is
     // not, or is damaged, is passed over.
     std::optional<CamoufoxPin> pin;
@@ -614,14 +659,14 @@ CamoufoxExecutable camoufox_executable(const Config &config, const fs::path &pro
     }
     if (pin) {
         const auto bundle = camoufox_bundle_directory(program_directory, *pin);
-        if (camoufox_state(bundle, *pin) == "installed") return {bundle / camoufox_program, "bundle"};
+        if (camoufox_state(bundle, *pin) == "installed") return {bundle / camoufox_program(pin->platform), "bundle"};
     }
     const auto selection = camoufox_selection(config.data_dir);
     if (selection.current.empty()) return {};
     const auto directory = camoufox_root(config.data_dir) / fs::u8path(selection.current);
     json::object owner;
     if (camoufox_install_state(directory, owner) != "installed") return {};
-    return {directory / camoufox_program, "setup"};
+    return {directory / camoufox_program(string_or(owner, "platform")), "setup"};
 }
 namespace {
 json::object verify_camoufox(const Config &config, const fs::path &executable) {
@@ -632,10 +677,55 @@ json::object verify_camoufox(const Config &config, const fs::path &executable) {
     CamoufoxGateway gateway(verification, store);
     return gateway.verify_runtime();
 }
+// Whether dpkg records `package` as installed; it also knows removed ones.
+bool package_installed(const std::string &package) {
+    return run_process({"sh", "-c", "dpkg-query -W -f='${db:Status-Abbrev}' \"$1\" 2>/dev/null | grep -q '^ii'",
+                        "sh", package}) == 0;
+}
+// Installs the packages Camoufox needs that this Ubuntu or Debian lacks.
+// Nothing is asked or run when none is missing, as in the Docker image.
+json::object prepare_camoufox_system(bool approved) {
+    const auto system = platform();
+    if (system != "linux-x64" && system != "linux-arm64") return {};
+    std::vector<std::string> packages;
+    try {
+        packages = camoufox_linux_packages(read_file("/etc/os-release", 65536));
+    } catch (const std::exception &) {
+        // Elsewhere the packages are the user's to install; verification
+        // tells what is missing.
+        return {{"status", "not_checked"}, {"reason", "unsupported_distribution"}};
+    }
+    std::vector<std::string> missing;
+    for (const auto &package : packages)
+        if (!package_installed(package)) missing.push_back(package);
+    if (missing.empty()) return {{"status", "ready"}};
+    std::string names;
+    for (const auto &package : missing) names += (names.empty() ? "" : " ") + package;
+    if (!approved)
+        throw Error(409, "system_confirmation_required",
+                    "Camoufox needs these system packages: " + names +
+                        ". Review the setup documentation and run setup --yes to approve package-manager changes");
+    console::emit_record({{"event", "setup_stage"}, {"stage", "system-packages"}, {"packages", names}});
+    std::vector<std::string> prefix;
+#ifndef _WIN32
+    if (geteuid() != 0) prefix = {"sudo", "--"};
+#endif
+    auto command = prefix;
+    command.insert(command.end(), {"apt-get", "update"});
+    checked_process(command);
+    command = prefix;
+    command.insert(command.end(), {"apt-get", "install", "-y"});
+    command.insert(command.end(), missing.begin(), missing.end());
+    checked_process(command);
+    json::array installed;
+    for (const auto &package : missing) installed.emplace_back(package);
+    return {{"status", "installed"}, {"installed", std::move(installed)}};
+}
 // The Camoufox backend needs the fpgen model and Camoufox: the pinned build
-// for this platform, unless browser_executable names one. setup changes
-// neither browser_executable nor anything CloakBrowser uses.
-json::object setup_camoufox(const Config &config) {
+// for this platform, unless browser_executable names one, and on Linux the
+// system packages it runs with. setup changes neither browser_executable nor
+// anything CloakBrowser uses.
+json::object setup_camoufox(const Config &config, bool approved) {
     const auto model = fpgen_model_pin();
     const auto camoufox = camoufox_pin();
     const auto root = config.data_dir / "runtime";
@@ -676,6 +766,8 @@ json::object setup_camoufox(const Config &config) {
                         {"browser_backend", config.browser_backend},
                         {"fpgen_model", std::move(model_record)},
                         {"note", "Run accounts probe and an actual generation to verify Google access"}};
+    if (auto system = prepare_camoufox_system(approved); !system.empty())
+        result["system_packages"] = std::move(system);
 
     // Neither browser_executable nor a bundle is installed; both are verified.
     if (const auto configured = camoufox_executable(config);
@@ -714,7 +806,7 @@ json::object setup_camoufox(const Config &config) {
         fs::remove(archive, error);
     }
     stage("verify", true);
-    const auto executable = install / camoufox_program;
+    const auto executable = install / camoufox_program(camoufox->platform);
     auto verification = verify_camoufox(config, executable);
     select_camoufox(config.data_dir, path_utf8(install.filename()));
     stage("complete", true);
@@ -727,7 +819,9 @@ json::object setup_camoufox(const Config &config) {
     return result;
 }
 } // namespace
-std::vector<std::string> linux_runtime_packages(std::string_view os_release) {
+namespace {
+// Ubuntu 24.04 or Debian 13, whose package names setup knows.
+void check_distribution(std::string_view os_release) {
     // Read os-release as data: never source distribution metadata in a shell.
     std::istringstream input{std::string(os_release)};
     std::string id, version, line;
@@ -751,18 +845,32 @@ std::vector<std::string> linux_runtime_packages(std::string_view os_release) {
     }
     if (!((id == "ubuntu" && version == "24.04") || (id == "debian" && version == "13")))
         throw Error(400, "unsupported_distribution",
-                    "Automatic Linux setup supports Ubuntu 24.04 x64 and Debian 13 x64; "
+                    "Automatic Linux setup supports Ubuntu 24.04 and Debian 13; "
                     "manually configure browser_executable on other distributions");
+}
+} // namespace
+std::vector<std::string> linux_runtime_packages(std::string_view os_release) {
+    check_distribution(os_release);
     // Ubuntu 24.04 and Debian 13 both use the t64 library package names.
     return {"libnss3", "libnspr4", "libatk1.0-0t64", "libatk-bridge2.0-0t64",
             "libcups2t64", "libdrm2", "libxkbcommon0", "libxcomposite1", "libxdamage1",
             "libxfixes3", "libxrandr2", "libgbm1", "libasound2t64", "libgtk-3-0t64",
             "fonts-noto-cjk", "fonts-noto-color-emoji", "ca-certificates"};
 }
+std::vector<std::string> camoufox_linux_packages(std::string_view os_release) {
+    check_distribution(os_release);
+    // Xvfb is the display a headless launch runs on, with Mesa's software
+    // OpenGL for WebGL; Camoufox brings its fonts.
+    return {"xvfb",           "libgtk-3-0t64", "libx11-xcb1", "libasound2t64", "libdbus-1-3",
+            "libgl1-mesa-dri", "libegl1",       "fontconfig",  "ca-certificates"};
+}
 namespace {
 json::object setup_cloakbrowser(Config &config, bool approved) {
     auto m = manifest();
     auto system = platform();
+    if (!m.at("artifacts").as_object().contains(system))
+        throw Error(400, "unsupported_platform",
+                    "CloakBrowser has no build for " + system + "; use the camoufox backend");
     auto version = string_or(m, "browser_version");
     auto artifact = m.at("artifacts").as_object().at(system).as_object();
     auto root = config.data_dir / "runtime";
@@ -934,7 +1042,7 @@ json::object setup_runtime(Config &config, bool approved, std::string_view backe
     json::object result;
     json::array prepared;
     for (const auto &name : backends) {
-        auto next = name == "camoufox" ? setup_camoufox(config) : setup_cloakbrowser(config, approved);
+        auto next = name == "camoufox" ? setup_camoufox(config, approved) : setup_cloakbrowser(config, approved);
         if (result.empty()) result = std::move(next);
         else result[name] = std::move(next);
         prepared.emplace_back(name);
@@ -955,7 +1063,7 @@ json::object rollback_camoufox(const Config &config, const fs::path &program_dir
     json::object owner;
     if (camoufox_install_state(directory, owner) != "installed")
         throw Error(409, "rollback_missing", "The earlier Camoufox install no longer exists");
-    const auto executable = directory / camoufox_program;
+    const auto executable = directory / camoufox_program(string_or(owner, "platform"));
     auto verification = verify_camoufox(config, executable);
     hold_previous_camoufox(config.data_dir);
     json::object result{{"status", "rolled_back"},
