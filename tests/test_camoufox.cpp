@@ -129,6 +129,41 @@ TEST_CASE("Camoufox's Linux fontconfig scans the kept font groups and keeps its 
     CHECK(changed(conf, {}));
 }
 
+TEST_CASE("Termux runs a program in its container with only the environment given", "[camoufox]") {
+    const fs::path data = "/data/data/com.termux/files/home/ais2api/data";
+    const auto program = data / "runtime" / "camoufox" / "158.0.1-beta.41-termux-arm64" / "camoufox-bin";
+    const std::string config = R"json({"navigator.userAgent":"Mozilla/5.0 (X11; Linux aarch64)","a b":"'\"$x"})json";
+    const auto args = proot_arguments(program, {"--remote-debugging-port", "0", "about:blank"},
+                                      {data, program.parent_path(), "/opt/camoufox/"},
+                                      {{"CAMOU_CONFIG_1", config}, {"DISPLAY", ":1"}});
+    CHECK(args == std::vector<std::string>{
+                      "login",
+                      "--bind=/data/data/com.termux/files/home/ais2api/data:/data/data/com.termux/files/home/ais2api/data",
+                      "--bind=/opt/camoufox:/opt/camoufox",
+                      "--env=CAMOU_CONFIG_1=" + config,
+                      "--env=DISPLAY=:1",
+                      "ais2api-browser",
+                      "--",
+                      "/data/data/com.termux/files/home/ais2api/data/runtime/camoufox/158.0.1-beta.41-termux-arm64/camoufox-bin",
+                      "--remote-debugging-port",
+                      "0",
+                      "about:blank"});
+    // A path given twice is bound once; Termux:X11's sockets on request.
+    const auto shared = proot_arguments("/usr/bin/Xvfb", {}, {"/a/b", "/a/b", "/a/bc"}, {}, true);
+    CHECK(shared == std::vector<std::string>{"login", "--bind=/a/b:/a/b", "--bind=/a/bc:/a/bc", "--shared-x11",
+                                             "ais2api-browser", "--", "/usr/bin/Xvfb"});
+    // proot-distro splits a bind at its colon, and binds absolute paths only.
+    for (const auto bind : {"/data/a:b", "relative/data", "/"}) {
+        try {
+            proot_arguments(program, {}, {fs::path(bind)}, {});
+            FAIL("bound " << bind);
+        } catch (const Error& error) {
+            CHECK(error.code == "invalid_config");
+        }
+    }
+    CHECK_THROWS_AS(proot_arguments(program, {}, {data}, {{"A=B", "c"}}), Error);
+}
+
 TEST_CASE("Xvfb runs as Camoufox's launcher runs it and reports its display", "[camoufox]") {
     const auto args = xvfb_arguments();
     const auto pair = [&](std::string_view option, std::string_view value) {

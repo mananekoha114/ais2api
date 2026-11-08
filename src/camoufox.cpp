@@ -226,6 +226,47 @@ std::optional<unsigned> browser_detail::xvfb_display(std::string_view line) {
         return std::nullopt;
     return static_cast<unsigned>(std::stoul(std::string(line)));
 }
+std::vector<std::string> browser_detail::proot_arguments(const fs::path& program, const std::vector<std::string>& args,
+                                                         const std::vector<fs::path>& binds,
+                                                         const std::vector<std::pair<std::string, std::string>>& environment,
+                                                         bool shared_x11) {
+    // Container paths are POSIX ones.
+    const auto generic = [](const fs::path& path) {
+        const auto text = path.generic_u8string();
+        return std::string(reinterpret_cast<const char*>(text.data()), text.size());
+    };
+    std::vector<std::string> paths;
+    for (const auto& bind : binds) {
+        auto path = generic(bind.lexically_normal());
+        if (path.size() > 1 && path.back() == '/') path.pop_back();
+        // proot-distro splits SRC:DST at a colon.
+        if (path.size() < 2 || path.front() != '/' || path.find(':') != std::string::npos)
+            throw Error(400, "invalid_config", "\"" + path + "\" cannot be bound into the " + std::string(termux_container) + " container");
+        paths.push_back(std::move(path));
+    }
+    std::vector<std::string> result{"login"};
+    // A directory within another is bound with it; proot-distro warns of an overlap.
+    const auto within = [](const std::string& path, const std::string& parent) {
+        return path.size() > parent.size() && path.starts_with(parent) && path[parent.size()] == '/';
+    };
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        bool covered = false;
+        for (std::size_t j = 0; j < paths.size() && !covered; ++j)
+            covered = j != i && (paths[j] == paths[i] ? j < i : within(paths[i], paths[j]));
+        if (!covered) result.push_back("--bind=" + paths[i] + ":" + paths[i]);
+    }
+    if (shared_x11) result.emplace_back("--shared-x11");
+    for (const auto& [name, value] : environment) {
+        if (name.empty() || name.find('=') != std::string::npos)
+            throw Error(500, "browser_launch", "Invalid environment variable name for the container");
+        result.push_back("--env=" + name + "=" + value);
+    }
+    result.emplace_back(termux_container);
+    result.emplace_back("--");
+    result.push_back(generic(program));
+    result.insert(result.end(), args.begin(), args.end());
+    return result;
+}
 std::uint64_t browser_detail::identity_salt(std::string_view secret, std::string_view account_id, unsigned seed) {
     std::string input(secret);
     input += '\0';
@@ -258,11 +299,11 @@ fs::path program_on_path(std::string_view name) {
     }
     return {};
 }
-// Xvfb removes its lock and socket when it stops. One killed leaves them,
-// and each stale socket pushes the displays after it higher.
-void remove_stale_display(unsigned display) {
+// Xvfb removes its lock and socket below `tmp` when it stops. One killed
+// leaves them, and each stale socket pushes the displays after it higher.
+void remove_stale_display(const fs::path& tmp, unsigned display) {
     const auto number = std::to_string(display);
-    const fs::path lock = "/tmp/.X" + number + "-lock";
+    const auto lock = tmp / (".X" + number + "-lock");
     long pid = 0;
     try {
         pid = std::stol(read_file(lock, 64));
@@ -272,7 +313,7 @@ void remove_stale_display(unsigned display) {
     if (pid <= 0 || ::kill(static_cast<pid_t>(pid), 0) == 0 || errno != ESRCH) return;
     std::error_code error;
     fs::remove(lock, error);
-    fs::remove(fs::path("/tmp/.X11-unix") / ("X" + number), error);
+    fs::remove(tmp / ".X11-unix" / ("X" + number), error);
 }
 #endif
 std::string quote_js(std::string_view text) {
@@ -450,6 +491,8 @@ struct CamoufoxGateway::Impl {
     // arrives on the reader thread, under output_mutex.
     OwnedProcess display_process;
     std::optional<unsigned> display_number;
+    // Termux runs Camoufox and Xvfb in its proot-distro container.
+    const bool termux = runtime_platform() == "termux-arm64";
 #endif
     // Credentials the current context was built from, for write-back CAS.
     json::object session_state;
@@ -503,7 +546,14 @@ struct CamoufoxGateway::Impl {
 #ifndef _WIN32
     // Starts Xvfb below the launch's directory and returns its DISPLAY.
     std::string start_display(std::stop_token token) {
-        const auto xvfb = program_on_path("Xvfb");
+        fs::path xvfb;
+        if (!termux)
+            xvfb = program_on_path("Xvfb");
+        else if (const auto rootfs = termux_container_rootfs(); !rootfs.empty()) {
+            std::error_code error;
+            // A path in the container.
+            if (fs::is_regular_file(rootfs / "usr" / "bin" / "Xvfb", error)) xvfb = "/usr/bin/Xvfb";
+        }
         if (xvfb.empty())
             throw Error(503, "display_unavailable", "Xvfb is not installed: run ais2api setup --yes, or turn headless off on a desktop");
         browser_detail::ProcessOptions options;
@@ -518,7 +568,7 @@ struct CamoufoxGateway::Impl {
             output_tail.push_back(text);
             if (output_tail.size() > 20) output_tail.pop_front();
         };
-        display_process.start(xvfb, browser_detail::xvfb_arguments(), root / "display", options);
+        start_program(display_process, xvfb, browser_detail::xvfb_arguments(), root / "display", std::move(options));
         // A cold first Xvfb on a fresh host took seconds to report.
         const auto deadline = Clock::now() + 30s;
         for (;;) {
@@ -531,6 +581,27 @@ struct CamoufoxGateway::Impl {
             if (Clock::now() >= deadline) throw Error(504, "browser_timeout", "Xvfb did not report a display" + output_hint());
             pause(token, 50ms);
         }
+    }
+    // Starts `program` in `owned`. On Termux it runs in the container, where
+    // the data directory, which holds the launch's directories and setup's
+    // installs, and the browser's directory are bound at their own paths.
+    void start_program(OwnedProcess& owned, const fs::path& program, const std::vector<std::string>& args,
+                       const fs::path& private_root, browser_detail::ProcessOptions options, bool shared_x11 = false) {
+        if (!termux) return owned.start(program, args, private_root, options);
+        const auto proot = program_on_path("proot-distro");
+        if (proot.empty() || termux_container_rootfs().empty())
+            throw Error(503, "browser_not_configured",
+                        "The " + std::string(termux_container) + " container is missing: run ais2api setup --yes");
+        // The program's private directories, there too. HOME is the
+        // container's own: proot-distro sets it after --env.
+        auto environment = browser_detail::private_environment(private_root);
+        std::erase_if(environment, [](const auto& item) { return item.first == "HOME"; });
+        environment.insert(environment.end(), options.environment.begin(), options.environment.end());
+        options.environment.clear();
+        owned.start(proot,
+                    browser_detail::proot_arguments(program, args, {fs::absolute(config.data_dir), fs::absolute(browser_directory())},
+                                                    environment, shared_x11),
+                    private_root, options);
     }
     // FONTCONFIG_FILE for the install: its Linux fonts.conf, scanning the
     // font groups a Linux identity reads, written once for each content below
@@ -571,7 +642,11 @@ struct CamoufoxGateway::Impl {
             display = display_number;
             display_number.reset();
         }
-        if (display) remove_stale_display(*display);
+        if (!display) return;
+        if (!termux)
+            remove_stale_display("/tmp", *display);
+        else if (const auto rootfs = termux_container_rootfs(); !rootfs.empty())
+            remove_stale_display(rootfs / "tmp", *display);
 #endif
     }
     // Opens a page in a new user context on a local document.
@@ -812,18 +887,30 @@ struct CamoufoxGateway::Impl {
 #else
             // Linux runs Camoufox with a display, as a desktop does: Xvfb's
             // when headless, else the session's.
+            bool shared_x11 = false;
             if (config.headless) {
                 options.environment.emplace_back("DISPLAY", start_display(token));
                 // GTK would otherwise prefer a Wayland session's display.
                 options.unset_prefixes.emplace_back("WAYLAND_DISPLAY");
                 options.environment.emplace_back("MOZ_ENABLE_WAYLAND", "0");
+            } else if (termux) {
+                // Termux:X11's display, whose sockets the container shares.
+                const char* display = std::getenv("DISPLAY");
+                if (!display || !*display)
+                    throw Error(503, "display_unavailable", "headless is off and there is no display: start Termux:X11 and set DISPLAY, or turn headless on to use Xvfb");
+                options.environment.emplace_back("DISPLAY", display);
+                shared_x11 = true;
             } else if (!std::getenv("DISPLAY") && !std::getenv("WAYLAND_DISPLAY"))
                 throw Error(503, "display_unavailable", "headless is off and there is no display: set DISPLAY, or turn headless on to use Xvfb");
             if (const auto fontconfig = fontconfig_file(); !fontconfig.empty())
                 options.environment.emplace_back("FONTCONFIG_FILE", path_utf8(fontconfig));
 #endif
             args.emplace_back("about:blank");
+#ifdef _WIN32
             process.start(executable.path, args, root, options);
+#else
+            start_program(process, executable.path, args, root, std::move(options), shared_x11);
+#endif
             const auto deadline = Clock::now() + 45s;
             unsigned short port = 0;
             while (!port) {

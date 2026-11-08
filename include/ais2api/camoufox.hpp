@@ -57,6 +57,16 @@ std::string camoufox_fontconfig(std::string_view conf, const std::vector<fs::pat
 std::vector<std::string> xvfb_arguments();
 // The display an Xvfb "-displayfd" line reports: digits only.
 std::optional<unsigned> xvfb_display(std::string_view line);
+// The proot-distro arguments that run `program` with `args` in the Termux
+// container. Each of `binds` is bound at its own path. proot-distro builds the
+// program's environment afresh, so `environment` is all it is given, but for
+// the HOME and Android variables proot-distro sets itself. `shared_x11` binds
+// Termux's X11 sockets, a Termux:X11 display's. 400 invalid_config for a path
+// proot-distro cannot bind.
+std::vector<std::string> proot_arguments(const fs::path &program, const std::vector<std::string> &args,
+                                         const std::vector<fs::path> &binds,
+                                         const std::vector<std::pair<std::string, std::string>> &environment,
+                                         bool shared_x11 = false);
 } // namespace browser_detail
 // The experimental Camoufox backend (browser_backend "camoufox"): the same
 // account flow as BrowserGateway over WebDriver BiDi. Each account keeps a
