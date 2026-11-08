@@ -577,11 +577,25 @@ void hold_previous_camoufox(const fs::path &data_dir) {
     selection.held = true;
     write_selection(data_dir, selection);
 }
-CamoufoxExecutable camoufox_executable(const Config &config) {
+fs::path camoufox_bundle_directory(const fs::path &program_directory, const CamoufoxPin &pin) {
+    return program_directory / "camoufox-runtime" / fs::u8path(pin.version + "-" + pin.platform);
+}
+CamoufoxExecutable camoufox_executable(const Config &config, const fs::path &program_directory) {
     auto stem = path_utf8(config.browser_executable.stem());
     std::transform(stem.begin(), stem.end(), stem.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (stem == "camoufox") return {config.browser_executable, "browser_executable"};
+    // A bundle ships with the program, so it is the pinned build; one that is
+    // not, or is damaged, is passed over.
+    std::optional<CamoufoxPin> pin;
+    try {
+        pin = camoufox_pin();
+    } catch (const std::exception &) {
+    }
+    if (pin) {
+        const auto bundle = camoufox_bundle_directory(program_directory, *pin);
+        if (camoufox_state(bundle, *pin) == "installed") return {bundle / camoufox_program, "bundle"};
+    }
     const auto selection = camoufox_selection(config.data_dir);
     if (selection.current.empty()) return {};
     const auto directory = camoufox_root(config.data_dir) / fs::u8path(selection.current);
@@ -643,7 +657,9 @@ json::object setup_camoufox(const Config &config) {
                         {"fpgen_model", std::move(model_record)},
                         {"note", "Run accounts probe and an actual generation to verify Google access"}};
 
-    if (const auto configured = camoufox_executable(config); configured.source == "browser_executable") {
+    // Neither browser_executable nor a bundle is installed; both are verified.
+    if (const auto configured = camoufox_executable(config);
+        configured.source == "browser_executable" || configured.source == "bundle") {
         stage("verify", true);
         auto verification = verify_camoufox(config, configured.path);
         stage("complete", true);
@@ -892,7 +908,11 @@ json::object setup_runtime(Config &config, bool approved) {
     return prepared(launcher, false);
 }
 namespace {
-json::object rollback_camoufox(const Config &config) {
+json::object rollback_camoufox(const Config &config, const fs::path &program_directory) {
+    if (camoufox_executable(config, program_directory).source == "bundle")
+        throw Error(409, "bundled_runtime",
+                    "This build runs the Camoufox bundled with it: use the previous package, or set "
+                    "browser_executable to another Camoufox");
     const auto selection = camoufox_selection(config.data_dir);
     if (selection.previous.empty())
         throw Error(409, "rollback_missing", "There is no earlier Camoufox install to roll back to");
@@ -909,14 +929,14 @@ json::object rollback_camoufox(const Config &config) {
                         {"browser_executable", path_utf8(executable)},
                         {"browser_verification", std::move(verification)},
                         {"note", "Kept until browser update installs the pinned Camoufox again"}};
-    if (camoufox_executable(config).source == "browser_executable")
+    if (camoufox_executable(config, program_directory).source == "browser_executable")
         result["note"] = "browser_executable names Camoufox and stays in use";
     return result;
 }
 } // namespace
-json::object rollback_runtime(Config &config) {
+json::object rollback_runtime(Config &config, const fs::path &program_directory) {
     if (config.browser_backend == "camoufox")
-        return rollback_camoufox(config);
+        return rollback_camoufox(config, program_directory);
     auto file = config.data_dir / "runtime/previous.json";
     auto previous = json::parse(read_file(file, 65536)).as_object();
     auto path = fs::u8path(string_or(previous, "browser_executable"));
@@ -940,10 +960,10 @@ json::object rollback_runtime(Config &config) {
             {"browser_executable", path_utf8(path)},
             {"browser_verification", browser_verification}};
 }
-json::object doctor(const Config &config) {
+json::object doctor(const Config &config, const fs::path &program_directory) {
     json::object result{{"config_version", config.version},
             {"build_mode", build_mode()},
-            {"program_directory", path_utf8(Config::default_directory())},
+            {"program_directory", path_utf8(program_directory)},
             {"config_file", path_utf8(config.config_file)},
             {"download_directory", path_utf8(config.data_dir / "runtime/downloads")},
             {"service_log", path_utf8(config.data_dir / "service.log")},
@@ -961,7 +981,7 @@ json::object doctor(const Config &config) {
         json::object fpgen{{"tag", model.tag}, {"source", embedded ? "embedded" : "setup"}, {"state", model_state}};
         if (!embedded) fpgen["directory"] = path_utf8(directory);
         result["fpgen_model"] = std::move(fpgen);
-        const auto executable = camoufox_executable(config);
+        const auto executable = camoufox_executable(config, program_directory);
         const auto selection = camoufox_selection(config.data_dir);
         const auto pin = camoufox_pin();
         json::object camoufox{{"source", executable.source},
@@ -974,15 +994,19 @@ json::object doctor(const Config &config) {
         // differently, makes the launcher run setup again, unless a rollback
         // holds the current install.
         bool outdated = false;
+        std::error_code error;
         if (pin) {
             const auto pinned = camoufox_directory(config.data_dir, *pin);
             const auto state = camoufox_state(pinned, *pin);
             camoufox["state"] = state;
             outdated = executable.source == "setup" &&
                        (selection.current != path_utf8(pinned.filename()) || state != "installed");
+            if (const auto bundle = camoufox_bundle_directory(program_directory, *pin);
+                fs::exists(fs::symlink_status(bundle, error)))
+                camoufox["bundle"] = json::object{{"directory", path_utf8(bundle)},
+                                                  {"state", camoufox_state(bundle, *pin)}};
         }
         camoufox["setup_needed"] = outdated;
-        std::error_code error;
         result["browser_configured"] = !executable.path.empty();
         result["browser_exists"] = !executable.path.empty() && fs::is_regular_file(executable.path, error) &&
                                    model_state == "installed" && (!outdated || selection.held);
