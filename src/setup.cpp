@@ -870,7 +870,7 @@ json::object setup_cloakbrowser(Config &config, bool approved) {
     auto system = platform();
     if (!m.at("artifacts").as_object().contains(system))
         throw Error(400, "unsupported_platform",
-                    "CloakBrowser has no build for " + system + "; use the camoufox backend");
+                    "No CloakBrowser is pinned for " + system + "; use the camoufox backend");
     auto version = string_or(m, "browser_version");
     auto artifact = m.at("artifacts").as_object().at(system).as_object();
     auto root = config.data_dir / "runtime";
