@@ -6,10 +6,11 @@
 
 ```text
 ais2api init | serve | start | stop | status | setup | doctor
-ais2api browser update | browser rollback
+ais2api browser update [BACKEND] | browser rollback [BACKEND]
 ais2api accounts list
 ais2api accounts import (--file PATH | --stdin) [--name NAME]
 ais2api accounts select ID | remove ID | reset ID | probe (ID | all)
+ais2api accounts backend (ID | --all) (cloakbrowser | auto | camoufox) [--yes]
 ais2api keys list
 ais2api stats | diagnostics
 ais2api models list
@@ -59,12 +60,12 @@ ais2api stop      停止服务
 
 ### setup、doctor 与浏览器版本
 
-- `setup` 准备当前平台的浏览器和依赖，需要联网；`--yes` 授权本次列出的系统包变更。
-- `doctor` 检查本地前提，并列出实际使用的程序、配置、下载、数据与日志路径。浏览器文件存在不代表 Google 调用成功。
-- `browser update` 与 `browser rollback` 管理浏览器版本。
+- `setup` 准备当前平台的浏览器和依赖，需要联网；`--yes` 授权本次列出的系统包变更。它准备“需要的后端”：默认后端（`browser_backend`），加上已保存账号用到的后端，所以 CloakBrowser 账号和 Firefox 账号并存时两者都会安装。返回的 `backends` 列出准备了哪些，第一个之外的结果放在以后端命名的字段中。
+- `doctor` 检查本地前提，并列出实际使用的程序、配置、下载、数据与日志路径。`backends_needed` 列出需要的后端，全部就绪时 `browser_exists` 才为 true。浏览器文件存在不代表 Google 调用成功。
+- `browser update` 与 `browser rollback` 管理浏览器版本，可以用 `cloakbrowser` 或 `camoufox` 指定后端：`update` 默认准备所有需要的后端，`rollback` 默认退回默认后端。
 - 执行 `setup`、`browser update`、`browser rollback` 前需先停止服务，它们与服务使用同一把数据目录独占锁。
 - 程序旁存在 `browser-runtime/PLATFORM/chrome[.exe]`（Browser-Local 包）时会自动使用，无需下载；`setup` 仍会校验其完整文件清单并准备系统依赖。
-- 实验性的 `camoufox` 后端下，`setup` 安装以下两项，都按 `runtime-manifest.json` 锁定的版本下载并核对 SHA-256；不下载 CloakBrowser，也不改写 `browser_executable`：
+- 需要实验性的 `camoufox` 后端时，`setup` 安装以下两项，都按 `runtime-manifest.json` 锁定的版本下载并核对 SHA-256；不下载 CloakBrowser，也不改写 `browser_executable`：
   - 生成 Firefox 身份所需的 fpgen 模型，逐个文件核对；
   - Camoufox，目前只有 Windows x64：
     - 压缩包约 1.3 GB，下载时需要约 3 GiB 空闲空间；
@@ -113,12 +114,15 @@ ais2api accounts list
 ais2api accounts select ACCOUNT_ID
 ais2api accounts remove ACCOUNT_ID
 ais2api accounts reset ACCOUNT_ID
+ais2api accounts backend ACCOUNT_ID camoufox --yes
+ais2api accounts backend --all auto --yes
 ais2api accounts probe ACCOUNT_ID
 ais2api accounts probe all
 ```
 
 - **import**：输入可以是 Cookie 请求头文本、Netscape Cookie 文本、Cookie JSON、storage state 或已有凭据包。只有显式指定 `--stdin` 才会读取标准输入。不要把 Cookie 写在命令参数里，避免进入 shell 历史。导入与列表结果不包含 Cookie 值，但账号名称和邮箱对本机用户可见。
 - **select**：设为首选账号。
+- **backend**：修改账号的浏览器后端；`--all` 一次修改所有账号，用于把账号整体迁移到 Firefox 身份或迁回。在 CloakBrowser 与 Firefox 后端之间切换会换成另一种身份（Google 会把它看作新设备），必须加 `--yes`，否则返回 `identity_change_unconfirmed`；Firefox 后端之间可以直接切换。见 [按账号选择后端](browser.md#按账号选择后端)。
 - **reset**：清除账号记录的失败/禁用状态，不能修复已过期的 Google Cookie。账号因“需要同意条款”冷却时，先用该账号在普通浏览器中登录 AI Studio 并同意条款，再执行 reset。
 - **probe**：使用账号凭据实际访问上游，需要服务正在运行，可能会启动浏览器。不要把它当作离线健康检查。
 
