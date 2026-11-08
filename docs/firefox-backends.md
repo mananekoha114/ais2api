@@ -51,7 +51,7 @@
 - **生命周期**：
   - Firefox 升级时身份抽到的值保持不变，只更新浏览器标识中的版本号等字段。
   - 只有用户明确操作时才重新生成身份：重新生成指纹（命令行、管理 API、WebUI）会一并清除身份，下次启动按新种子生成。
-  - 已有账号从 CloakBrowser 指纹迁移到 Firefox 身份必须显式操作，不在后台自动迁移；迁移在 Google 看来等同于换了一台新设备。
+  - 已有账号从 CloakBrowser 指纹迁移到 Firefox 身份必须显式操作，不在后台自动迁移；迁移在 Google 看来等同于换了一台新设备。每个账号记住自己的后端（`cloakbrowser`、`auto`、`camoufox`、`spidermonkey`），配置项 `browser_backend` 只决定新账号的后端；在 CloakBrowser 与 Firefox 之间切换要确认（`accounts backend [--all] ... --yes`、管理 API 或 WebUI），见 [浏览器网关](browser.md#按账号选择后端)。
 - **已知限制**：参考项目的 SpiderMonkey 宿主中 WebGL 返回 null，canvas 只有 2d 的空壳实现，图形表现无法与 Camoufox 完全一致。共用身份实际覆盖 navigator、屏幕、语言和时区。
 
 ## 版本策略
@@ -128,7 +128,7 @@ CMake 选项 `AIS2API_DEV_BUNDLE` 区分开发版与正式分发版，默认关�
 ## CloakBrowser 退役
 
 1. 在 Camoufox 后端覆盖所有平台（包括 Termux）之前，CloakBrowser 保持 `146.0.7680.177.4` 不变。
-2. 覆盖之后的下一个版本把 CloakBrowser 标为弃用，并提供一条把账号显式迁移到 Firefox 身份的命令。
+2. 覆盖之后的下一个版本把 CloakBrowser 标为弃用，并提供一条把账号显式迁移到 Firefox 身份的命令（`accounts backend --all auto --yes`，P2 已实现）。
 3. 再下一个版本删除 CloakBrowser 的全部代码与资料：`runtime-manifest.json` 中的浏览器条目、`Browser-Local` 打包、许可文件和相关文档。
 
 ## 分阶段计划

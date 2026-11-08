@@ -494,6 +494,11 @@ void init_state(sqlite3 *db) {
     { Statement columns(db, "PRAGMA table_info(fingerprints)");
       while (columns.row()) firefox_identity |= columns.str(1) == "firefox"; }
     if (!firefox_identity) exec(db, "ALTER TABLE fingerprints ADD COLUMN firefox TEXT NOT NULL DEFAULT ''");
+    // The account's browser backend; empty until adopt_backends() settles it.
+    bool account_backend = false;
+    { Statement columns(db, "PRAGMA table_info(fingerprints)");
+      while (columns.row()) account_backend |= columns.str(1) == "backend"; }
+    if (!account_backend) exec(db, "ALTER TABLE fingerprints ADD COLUMN backend TEXT NOT NULL DEFAULT ''");
     if (version <= 1)
         exec(db, "PRAGMA user_version=1");
 }
@@ -1616,11 +1621,14 @@ BrowserFingerprint read_fingerprint(sqlite3 *db, std::string_view id) {
     create.text(1, id);
     create.integer(2, default_fingerprint_seed(id));
     create.row();
-    Statement s(db, "SELECT seed,timezone,locale FROM fingerprints WHERE account=?");
+    Statement s(db, "SELECT seed,timezone,locale,backend FROM fingerprints WHERE account=?");
     s.text(1, id);
     s.row();
-    return {static_cast<unsigned>(sqlite3_column_int64(s.p, 0)), s.str(1), s.str(2)};
+    return {static_cast<unsigned>(sqlite3_column_int64(s.p, 0)), s.str(1), s.str(2), s.str(3)};
 }
+// An account without a fingerprint row (written by an older build) is unsettled.
+constexpr auto stored_backends_query =
+    "SELECT DISTINCT COALESCE(f.backend,'') FROM accounts a LEFT JOIN fingerprints f ON f.account=a.id";
 } // namespace
 BrowserFingerprint Store::fingerprint(std::string_view id) {
     return impl_->run([&] { return read_fingerprint(impl_->db, id); });
@@ -1683,6 +1691,59 @@ void Store::save_firefox_identity(std::string_view id, const json::object &ident
         s.row();
     });
 }
+std::optional<std::string> Store::account_backend(std::string_view id) {
+    return impl_->run([&]() -> std::optional<std::string> {
+        Statement s(impl_->db, "SELECT COALESCE(f.backend,'') FROM accounts a LEFT JOIN fingerprints f "
+                               "ON f.account=a.id WHERE a.id=?");
+        s.text(1, id);
+        if (!s.row()) return std::nullopt;
+        return s.str(0);
+    });
+}
+void Store::set_backend(std::string_view id, std::string_view backend) {
+    impl_->run([&] {
+        read_fingerprint(impl_->db, id);
+        Statement s(impl_->db, "UPDATE fingerprints SET backend=? WHERE account=?");
+        s.text(1, backend);
+        s.text(2, id);
+        s.row();
+    });
+}
+std::size_t Store::adopt_backends(std::string_view backend) {
+    return impl_->run([&] {
+        Statement s(impl_->db, "UPDATE fingerprints SET backend=? WHERE backend=''");
+        s.text(1, backend);
+        s.row();
+        return static_cast<std::size_t>(sqlite3_changes(impl_->db));
+    });
+}
+std::vector<std::string> Store::stored_backends() {
+    return impl_->run([&] {
+        std::vector<std::string> result;
+        Statement s(impl_->db, stored_backends_query);
+        while (s.row()) result.push_back(s.str(0));
+        return result;
+    });
+}
+std::vector<std::string> stored_backends(const fs::path &directory) {
+    const auto path = directory / "state.sqlite3";
+    std::error_code error;
+    if (!fs::is_regular_file(path, error)) return {};
+    sqlite3 *db = nullptr;
+    std::vector<std::string> result;
+    if (sqlite3_open_v2(sqlite_path(path).c_str(), &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nullptr) == SQLITE_OK) {
+        sqlite3_busy_timeout(db, 5000);
+        try {
+            Statement s(db, stored_backends_query);
+            while (s.row()) result.push_back(s.str(0));
+        } catch (const Error &) {
+            // A database from before per-account backends: every account is unsettled.
+            result = {""};
+        }
+    }
+    sqlite3_close(db);
+    return result;
+}
 std::string Store::identity_secret() {
     return impl_->run([&] {
         Statement create(impl_->db, "INSERT OR IGNORE INTO settings(k,v) VALUES('identity_secret',?)");
@@ -1710,7 +1771,7 @@ json::array Store::account_status() {
                                                 {"count", sqlite3_column_int(f.p, 2)},
                                                 {"kind", f.str(3)}});
             o["failures"] = failures;
-            Statement fp(impl_->db, "SELECT seed,timezone,locale,firefox FROM fingerprints WHERE account=?");
+            Statement fp(impl_->db, "SELECT seed,timezone,locale,firefox,backend FROM fingerprints WHERE account=?");
             fp.text(1, s.str(0));
             if (fp.row()) {
                 o["fingerprint"] = json::object{{"seed", sqlite3_column_int64(fp.p, 0)},
@@ -1721,6 +1782,7 @@ json::array Store::account_status() {
                 const auto seed = identity.is_object() ? identity.as_object().if_contains("seed") : nullptr;
                 o["firefox_identity"] = !error && seed && (seed->is_int64() || seed->is_uint64()) &&
                                         seed->to_number<std::int64_t>() == sqlite3_column_int64(fp.p, 0);
+                o["backend"] = fp.str(4);
             }
             rows.push_back(o);
         }

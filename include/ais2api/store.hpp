@@ -16,13 +16,19 @@ struct Account {
     json::object storage_state;
     bool disabled = false;
 };
-// Permanent per-account CloakBrowser identity. The seed is assigned when the
-// account is first stored and only changes on explicit regeneration. Empty
-// timezone or locale follow the host's region settings.
+// Permanent per-account browser identity. The seed is assigned when the
+// account is first stored and only changes on explicit regeneration; the
+// CloakBrowser fingerprint and the Firefox identity both derive from it. Empty
+// timezone or locale follow the host's region settings. `backend` is the
+// account's browser backend (see backend_router.hpp); empty until settled.
 struct BrowserFingerprint {
     unsigned seed = 0;
-    std::string timezone, locale;
+    std::string timezone, locale, backend;
 };
+// Store::stored_backends() of the state database in `directory`, read
+// without opening a Store, so it works while the service runs. Empty when
+// there is no database or it cannot be read.
+std::vector<std::string> stored_backends(const fs::path& directory);
 // Initial seed for an account id (10000..99999). Deterministic so an account
 // verified before it is stored (Cookie import) keeps the identity it was
 // verified with.
@@ -87,6 +93,15 @@ public:
     std::optional<json::object> firefox_identity(std::string_view id);
     // Stores `identity` unless the account's seed changed since its "seed".
     void save_firefox_identity(std::string_view id, const json::object &identity);
+    // The account's stored backend ("" while unsettled); nothing for an
+    // account the store does not know.
+    std::optional<std::string> account_backend(std::string_view id);
+    void set_backend(std::string_view id, std::string_view backend);
+    // Stores `backend` for every account whose backend is not settled yet.
+    // Returns how many changed.
+    std::size_t adopt_backends(std::string_view backend);
+    // The distinct backends the stored accounts name, "" for unsettled ones.
+    std::vector<std::string> stored_backends();
     // A random secret of this installation, created on first use, that keeps
     // identities drawn from the same seed apart between installations.
     std::string identity_secret();

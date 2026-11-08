@@ -4,8 +4,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-#include "ais2api/browser.hpp"
-#include "ais2api/camoufox.hpp"
+#include "ais2api/backend_router.hpp"
 #include "ais2api/diagnostics.hpp"
 #include "ais2api/runtime.hpp"
 #include "ais2api/flow.hpp"
@@ -78,18 +77,16 @@ struct CookieImportJob {
         if (!finished.exchange(true)) completion.set_exception(std::make_exception_ptr(error));
     }
 };
-std::unique_ptr<GenerationBackend> browser_gateway(const Config &config, Store &store) {
-    if (config.browser_backend == "camoufox") return std::make_unique<CamoufoxGateway>(config, store);
-    return std::make_unique<BrowserGateway>(config, store);
-}
 class Service {
   public:
     explicit Service(Config config, std::unique_ptr<GenerationBackend> backend)
         : config_(std::move(config)), journal_(config_.data_dir), store_(config_.data_dir),
           prices_(store_, [this] { return this->config(); }, !backend),
-          gateway_(backend ? std::move(backend) : browser_gateway(config_, store_)),
+          gateway_(backend ? std::move(backend) : std::make_unique<BackendRouter>(config_, store_)),
           worker_([this](std::stop_token token) { work_loop(token); }) {
         store_.recover_requests();
+        // Accounts from before per-account backends keep the one they used.
+        adopt_backends(store_, config_);
         // serve() holds the instance lock, so no other process uses them.
         try {
             if (const auto removed = remove_profile_leftovers(config_.data_dir))
@@ -226,6 +223,10 @@ class Service {
     json::object control(const json::object &command) {
         auto action = string_or(command, "command");
         if (action == "status") {
+            // Every backend the accounts need must be installed.
+            const auto cfg = config();
+            const bool ready = (!cfg.api_key.empty() || !store_.managed_keys().empty()) && store_.choose("readiness").has_value() &&
+                               bool_or(doctor(cfg, Config::default_directory(), store_.stored_backends()), "browser_exists");
             std::lock_guard lock(queue_mutex_);
             return {{"running", true},
                     {"version", "0.1.0"},
@@ -238,8 +239,7 @@ class Service {
                     {"active_generation_account_id", active_account_id_.empty() ? json::value(nullptr) : json::value(active_account_id_)},
                     {"queued", queue_.size()},
                     {"connections", live_connections.load()},
-                    {"ready", (!config().api_key.empty() || !store_.managed_keys().empty()) && store_.choose("readiness").has_value() &&
-                                  fs::is_regular_file(config().browser_executable)},
+                    {"ready", ready},
                     {"verification", "not_a_generation_check"}};
         }
         if (action == "stop") {
@@ -354,7 +354,7 @@ class Service {
         sources.status = control({{"command", "status"}});
         try { sources.browser = gateway_->diagnostics(); }
         catch (...) { sources.browser = {{"status", "unavailable"}}; }
-        sources.runtime = doctor(cfg);
+        sources.runtime = doctor(cfg, Config::default_directory(), store_.stored_backends());
         sources.config = cfg;
         sources.accounts = store_.account_status();
         sources.events = store_.backend_events();
@@ -424,6 +424,8 @@ class Service {
                         throw Error(401, "cookie_import_authentication", "Cookie import key changed; submit again");
                     check_cancel(job->cancellation.get_token());
                     accounts = store_.merge_verified_accounts(verified.accounts);
+                    // New accounts keep the backend they were verified with.
+                    adopt_backends(store_, job->config);
                 }
                 try { gateway_->close(); } catch (...) {}
                 log(json::object{{"event", "cookie_import"},

@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/diagnostics.hpp"
+#include "ais2api/backend_router.hpp"
 #include <algorithm>
 #include <cctype>
 #include <deque>
@@ -60,6 +61,12 @@ json::object service_part(const json::object &status) {
 json::object runtime_part(const json::object &doctor) {
     json::object out;
     copy(out, doctor, {"config_version", "browser_backend", "browser_configured", "browser_exists", "manifest_available"});
+    if (auto needed = doctor.if_contains("backends_needed"); needed && needed->is_array()) {
+        json::array backends;
+        for (const auto &backend : needed->as_array())
+            if (backend == "cloakbrowser" || backend == "camoufox") backends.push_back(backend);
+        out["backends_needed"] = std::move(backends);
+    }
     if (auto model = object_at(doctor, "fpgen_model")) {
         json::object fpgen;
         copy(fpgen, *model, {"tag", "source", "state"});
@@ -77,7 +84,7 @@ json::object runtime_part(const json::object &doctor) {
 json::object browser_part(const json::object &diagnostics) {
     if (diagnostics.empty()) return {{"status", "not_running"}};
     json::object out;
-    copy(out, diagnostics, {"backend", "status", "phase", "running", "isolatedContext", "templateCaptured",
+    copy(out, diagnostics, {"backend", "default_backend", "status", "phase", "running", "isolatedContext", "templateCaptured",
                             "modelDiscovery", "chunkBytes", "cookieRefresh", "bridgeSource", "bridgeSha256"});
     if (auto proxy = object_at(diagnostics, "proxy")) {
         json::object part;
@@ -147,7 +154,7 @@ json::object safe_report(const DiagnosticsSources &sources) {
         labels.emplace(string_or(account, "id"), label);
         json::object out{{"label", label}};
         copy(out, account, {"disabled", "expired", "firefox_identity"});
-        if (auto backend = account.if_contains("backend"); backend && backend->is_string() && backend->as_string().size() <= 32)
+        if (auto backend = account.if_contains("backend"); backend && backend->is_string() && valid_account_backend(backend->as_string()))
             out["backend"] = *backend;
         json::array cooldowns;
         if (auto failures = account.if_contains("failures"); failures && failures->is_array())

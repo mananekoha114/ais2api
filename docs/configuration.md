@@ -42,7 +42,7 @@
 |---|---|---|---|
 | `data_dir` | 字符串，程序旁 `data/` | 重启 | 数据库、日志、下载与浏览器临时资料所在目录。 |
 | `browser_executable` | 字符串，`""` | 重启 | 浏览器路径。留空时自动使用程序旁 `browser-runtime/` 中的锁定浏览器，或 `setup` 安装的浏览器。`camoufox` 后端只在它指向 Camoufox（`camoufox[.exe]`）时使用它，否则使用开发版打包的 Camoufox，再其次是 `setup` 安装的 Camoufox。 |
-| `browser_backend` | 字符串，`"cloakbrowser"`（[开发版](platforms.md#构建开发版)新建的配置为 `"camoufox"`） | 重启 | 浏览器后端。`camoufox` 为实验性的 Firefox 后端（通过 WebDriver BiDi 驱动 Camoufox，见 [Firefox 后端迁移计划](firefox-backends.md)）：先运行 `ais2api setup` 安装 Camoufox 和生成身份所需的 fpgen 模型（此时 `setup` 不下载 CloakBrowser，也不改写 `browser_executable`），每个账号的身份在本机生成并随指纹保存。 |
+| `browser_backend` | 字符串，`"cloakbrowser"`（[开发版](platforms.md#构建开发版)新建的配置为 `"camoufox"`） | 热更新 | **新账号**的默认浏览器后端，Cookie 导入也用它验证。已保存的账号各自记住自己的后端，修改此项不会改变它们，见 [按账号选择后端](browser.md#按账号选择后端)。`camoufox` 为实验性的 Firefox 后端（通过 WebDriver BiDi 驱动 Camoufox，见 [Firefox 后端迁移计划](firefox-backends.md)），新账号保存为“自动”；需要的运行时由 `ais2api setup` 安装，每个账号的 Firefox 身份在本机生成并随指纹保存。 |
 | `headless` | 布尔，`true` | 重启 | 是否以无界面模式运行浏览器。 |
 | `proxy` | 字符串，`""` | 重启 | 上游代理，同时用于浏览器和服务端下载。 |
 | `browser_proxy_relay` | 布尔，`false` | 重启 | 开启本机转发代理，让浏览器能使用带用户名密码的 HTTP 或 SOCKS5 代理，详见下文。 |
@@ -115,7 +115,7 @@
 
 ## 热更新与重启
 
-- **需要重启**的字段：`bind`、`port`、`data_dir`、`browser_executable`、`browser_backend`、`proxy`、`browser_proxy_relay`、`browser_remote_allow_origins`、`browser_site_isolation`、`headless`、`limits.generation_seconds`、`limits.stream_idle_seconds`、`limits.object_bytes`、`limits.relay_bytes`。
+- **需要重启**的字段：`bind`、`port`、`data_dir`、`browser_executable`、`proxy`、`browser_proxy_relay`、`browser_remote_allow_origins`、`browser_site_isolation`、`headless`、`limits.generation_seconds`、`limits.stream_idle_seconds`、`limits.object_bytes`、`limits.relay_bytes`。
 - 其余字段都可热更新。热更新前会校验完整配置；校验失败时保留原配置。
 - `ais2api config reload` 重新读取配置文件和环境变量。存在需要重启的差异时返回 `restart_required`，不会只应用其中一部分。
 - 通过管理 API 或 WebUI 保存时，如果修改中包含需要重启的字段，整份配置会作为“待重启配置”保存到磁盘，当前进程继续使用原配置；之后的修改以待重启配置为基础叠加。详见 [管理 API](management-api.md#配置保存与重启)。

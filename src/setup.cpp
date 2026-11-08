@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/runtime.hpp"
+#include "ais2api/backend_router.hpp"
 #include "ais2api/media.hpp"
 #include "ais2api/browser.hpp"
 #include "ais2api/bundle.hpp"
@@ -758,9 +759,8 @@ std::vector<std::string> linux_runtime_packages(std::string_view os_release) {
             "libxfixes3", "libxrandr2", "libgbm1", "libasound2t64", "libgtk-3-0t64",
             "fonts-noto-cjk", "fonts-noto-color-emoji", "ca-certificates"};
 }
-json::object setup_runtime(Config &config, bool approved) {
-    if (config.browser_backend == "camoufox")
-        return setup_camoufox(config);
+namespace {
+json::object setup_cloakbrowser(Config &config, bool approved) {
     auto m = manifest();
     auto system = platform();
     auto version = string_or(m, "browser_version");
@@ -926,6 +926,22 @@ json::object setup_runtime(Config &config, bool approved) {
     }
     return prepared(launcher, false);
 }
+} // namespace
+json::object setup_runtime(Config &config, bool approved, std::string_view backend) {
+    const auto backends = backend.empty() ? backends_needed(config.browser_backend, stored_backends(config.data_dir))
+                                          : std::vector<std::string>{std::string(backend)};
+    // The first backend's result is the answer; the others nest under their names.
+    json::object result;
+    json::array prepared;
+    for (const auto &name : backends) {
+        auto next = name == "camoufox" ? setup_camoufox(config) : setup_cloakbrowser(config, approved);
+        if (result.empty()) result = std::move(next);
+        else result[name] = std::move(next);
+        prepared.emplace_back(name);
+    }
+    result["backends"] = std::move(prepared);
+    return result;
+}
 namespace {
 json::object rollback_camoufox(const Config &config, const fs::path &program_directory) {
     if (camoufox_executable(config, program_directory).source == "bundle")
@@ -953,8 +969,8 @@ json::object rollback_camoufox(const Config &config, const fs::path &program_dir
     return result;
 }
 } // namespace
-json::object rollback_runtime(Config &config, const fs::path &program_directory) {
-    if (config.browser_backend == "camoufox")
+json::object rollback_runtime(Config &config, const fs::path &program_directory, std::string_view backend) {
+    if ((backend.empty() ? effective_backend({}, config.browser_backend) : backend) == "camoufox")
         return rollback_camoufox(config, program_directory);
     auto file = config.data_dir / "runtime/previous.json";
     auto previous = json::parse(read_file(file, 65536)).as_object();
@@ -979,20 +995,32 @@ json::object rollback_runtime(Config &config, const fs::path &program_directory)
             {"browser_executable", path_utf8(path)},
             {"browser_verification", browser_verification}};
 }
-json::object doctor(const Config &config, const fs::path &program_directory) {
+json::object doctor(const Config &config, const fs::path &program_directory,
+                    std::optional<std::vector<std::string>> stored) {
+    const auto backends = backends_needed(config.browser_backend, stored ? *stored : stored_backends(config.data_dir));
+    const auto needs = [&](std::string_view backend) {
+        return std::find(backends.begin(), backends.end(), backend) != backends.end();
+    };
+    json::array needed;
+    for (const auto &backend : backends) needed.emplace_back(backend);
     json::object result{{"config_version", config.version},
             {"build_mode", build_mode()},
             {"program_directory", path_utf8(program_directory)},
             {"config_file", path_utf8(config.config_file)},
             {"download_directory", path_utf8(config.data_dir / "runtime/downloads")},
             {"service_log", path_utf8(config.data_dir / "service.log")},
-            {"browser_configured", !config.browser_executable.empty()},
-            {"browser_exists", fs::is_regular_file(config.browser_executable)},
             {"data_directory", path_utf8(config.data_dir)},
             {"manifest_available", !manifest().empty()},
             {"browser_backend", config.browser_backend},
+            {"backends_needed", std::move(needed)},
             {"google_access", "not_checked"}};
-    if (config.browser_backend == "camoufox") {
+    // Ready only when every backend the accounts need is.
+    bool configured = true, exists = true;
+    if (needs("cloakbrowser")) {
+        configured = !config.browser_executable.empty();
+        exists = fs::is_regular_file(config.browser_executable);
+    }
+    if (needs("camoufox")) {
         const auto model = fpgen_model_pin();
         const bool embedded = fpgen_model_embedded(model);
         const auto directory = fpgen_model_directory(config.data_dir, model);
@@ -1026,11 +1054,13 @@ json::object doctor(const Config &config, const fs::path &program_directory) {
                                                   {"state", camoufox_state(bundle, *pin)}};
         }
         camoufox["setup_needed"] = outdated;
-        result["browser_configured"] = !executable.path.empty();
-        result["browser_exists"] = !executable.path.empty() && fs::is_regular_file(executable.path, error) &&
-                                   model_state == "installed" && (!outdated || selection.held);
+        configured = configured && !executable.path.empty();
+        exists = exists && !executable.path.empty() && fs::is_regular_file(executable.path, error) &&
+                 model_state == "installed" && (!outdated || selection.held);
         result["camoufox"] = std::move(camoufox);
     }
+    result["browser_configured"] = configured;
+    result["browser_exists"] = exists;
     return result;
 }
 std::string media_detail::fetch_with_resolver(std::string_view input, std::size_t limit, std::string_view proxy,

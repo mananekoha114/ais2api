@@ -77,7 +77,7 @@ TEST_CASE("browser DevTools origins and site isolation keep Chromium defaults an
         for (auto key : {"browser_remote_allow_origins", "browser_site_isolation"})
             CHECK_THROWS_AS(cfg.patched({{key, invalid}}), Error);
 }
-TEST_CASE("browser backend defaults to CloakBrowser, accepts Camoufox and needs a restart", "[config][admin][browser]") {
+TEST_CASE("browser backend defaults to CloakBrowser, accepts Camoufox and applies without a restart", "[config][admin][browser]") {
     AdminDirectory dir;
     // A file that names no backend; a new one starts on the build's backend.
     atomic_write(dir.path / "config.json", R"({"version":1})");
@@ -87,7 +87,8 @@ TEST_CASE("browser backend defaults to CloakBrowser, accepts Camoufox and needs 
     CHECK(cfg.to_json().at("browser_backend") == "cloakbrowser");
     auto camoufox = cfg.patched({{"browser_backend", "camoufox"}});
     CHECK(camoufox.browser_backend == "camoufox");
-    CHECK(restart_required(cfg, camoufox));
+    // It only names the backend of accounts stored from now on.
+    CHECK_FALSE(restart_required(cfg, camoufox));
     camoufox.save();
     CHECK(Config::load(cfg.config_file).browser_backend == "camoufox");
     CHECK(Config::load(cfg.config_file, {{"browser_backend", "cloakbrowser"}}).browser_backend == "cloakbrowser");
