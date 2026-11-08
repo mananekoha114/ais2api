@@ -142,6 +142,11 @@ include(scripts/browser-bundle.cmake)
 if(AIS2API_DEV_BUNDLE AND AIS2API_BROWSER_BUNDLE_DIR)
   message(FATAL_ERROR "A dev bundle carries Camoufox; it cannot also bundle CloakBrowser")
 endif()
+if(AIS2API_DEV_BUNDLE)
+  include(scripts/camoufox-bundle.cmake)
+elseif(AIS2API_CAMOUFOX_BUNDLE_DIR)
+  message(FATAL_ERROR "Only a dev bundle (AIS2API_DEV_BUNDLE) carries Camoufox")
+endif()
 
 # Optional developer fuzzing. This block does not change normal builds.
 option(AIS2API_BUILD_FUZZER "Build the LLVM libFuzzer wire-parser harness" OFF)
