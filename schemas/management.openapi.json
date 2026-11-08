@@ -1993,7 +1993,7 @@
     "/diagnostics": {
       "get": {
         "operationId": "get_diagnostics",
-        "summary": "Get redacted diagnostic snapshot and log inventory",
+        "summary": "Get the administrator diagnostic view, per-backend event counters and log inventory",
         "responses": {
           "200": {
             "description": "Success",
@@ -2037,7 +2037,7 @@
     "/diagnostics/export": {
       "post": {
         "operationId": "post_diagnostics_export",
-        "summary": "Export redacted diagnostic JSON snapshot",
+        "summary": "Export the allowlisted diagnostic report (no cookies, emails, account IDs, request content or local paths)",
         "responses": {
           "200": {
             "description": "Success",
