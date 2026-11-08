@@ -219,16 +219,18 @@ TEST_CASE("the runtime manifest pins Camoufox for Windows and Linux", "[setup]")
                       "camoufox-158.0.1-beta.41-win.x86_64.zip");
     CHECK(pin->size == 1320075455);
     CHECK(camoufox_directory("data", *pin) == fs::path("data") / "runtime" / "camoufox" / "158.0.1-beta.41-windows-x64");
+    // Termux runs the Linux ARM64 build in its container.
     for (const auto &[platform, archive] : {std::pair<std::string, std::string>{"linux-x64", "lin.x86_64"},
-                                            {"linux-arm64", "lin.arm64"}}) {
+                                            {"linux-arm64", "lin.arm64"}, {"termux-arm64", "lin.arm64"}}) {
         const auto linux_pin = camoufox_pin(source, platform);
         REQUIRE(linux_pin);
         CHECK(linux_pin->version == pin->version);
         CHECK(linux_pin->url == "https://github.com/daijro/camoufox/releases/download/v158.0.1-beta.41/"
                                 "camoufox-158.0.1-beta.41-" + archive + ".zip");
     }
-    // Termux comes with its own stage.
-    CHECK_FALSE(camoufox_pin(source, "termux-arm64"));
+    CHECK(camoufox_pin(source, "termux-arm64")->sha256 == camoufox_pin(source, "linux-arm64")->sha256);
+    CHECK(camoufox_keeps("termux-arm64", "fonts/LMW/a.ttf"));
+    CHECK_FALSE(camoufox_keeps("termux-arm64", "fonts/W/a.ttf"));
     CHECK_FALSE(camoufox_pin(json::object{}, "windows-x64"));
 
     const auto manifest = [](std::string version, std::string url, std::string digest, std::uint64_t size) {
@@ -553,6 +555,19 @@ TEST_CASE("Linux setup accepts exact supported os-release identities", "[setup]"
     for (auto package : {"xvfb", "libgtk-3-0t64", "libasound2t64", "libgl1-mesa-dri"})
         REQUIRE(std::find(camoufox.begin(), camoufox.end(), package) != camoufox.end());
     for (const auto &package : camoufox) REQUIRE_FALSE(package.starts_with("fonts-"));
+}
+TEST_CASE("missing_packages reads what a dpkg status file records as installed", "[setup]") {
+    const std::string status = "Package: xvfb\nStatus: install ok installed\nArchitecture: arm64\n\n"
+                               "Package: libegl1\r\nStatus: deinstall ok config-files\r\n\r\n"
+                               "Package: fontconfig\nStatus: hold ok installed \nDescription: x\n continued\n\n"
+                               "Package: libgtk-3-0t64\nStatus: install ok half-configured\n\n"
+                               "Package: libasound2t64\nArchitecture: armhf\nStatus: install ok not-installed\n\n"
+                               "Package: libasound2t64\nArchitecture: arm64\nStatus: install ok installed";
+    CHECK(missing_packages(status, {"xvfb", "libegl1", "fontconfig", "libgtk-3-0t64", "libasound2t64", "libdbus-1-3"}) ==
+          std::vector<std::string>{"libegl1", "libgtk-3-0t64", "libdbus-1-3"});
+    CHECK(missing_packages("", {"xvfb"}) == std::vector<std::string>{"xvfb"});
+    // Only a stanza's own fields count.
+    CHECK(missing_packages("Package: a\nDescription: Status: install ok installed\n", {"a"}) == std::vector<std::string>{"a"});
 }
 TEST_CASE("Linux setup rejects unsupported distributions and substring lookalikes", "[setup]") {
     for (auto release : {"ID=debian\nVERSION_ID=12\n", "ID=debian\nVERSION_ID=130\n",
