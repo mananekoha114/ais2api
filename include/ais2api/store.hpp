@@ -95,6 +95,11 @@ public:
     std::optional<Account> choose(std::string_view model, const std::vector<std::string>& excluded = {},
                                   bool auth_probe = false);
     void failure(std::string_view account, std::string_view model, std::string_view kind, unsigned retry_seconds = 0);
+    // Diagnostic counters per browser backend, kept per UTC day and cleared
+    // with the request statistics: {since (Unix seconds), backends: {<backend>:
+    // {<event>: {total, last_7_days, today, last_at}}}}.
+    void record_backend_event(std::string_view backend, std::string_view event);
+    json::object backend_events();
     void success(std::string_view account, std::string_view model);
     json::object stats(const std::optional<RequestQuery> &query = std::nullopt);
     void begin_request(const json::object &record);

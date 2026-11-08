@@ -13,7 +13,11 @@ struct CookieImportResult {
 };
 // Once at least one account is verified, no probe starts that is unlikely to
 // finish before `deadline`; the scan returns what it has verified instead.
+// `observe` receives the diagnostic events the first probe proves about the
+// cookies themselves ("login_redirect", "terms_required"); later probes end
+// the multi-login scan and are not counted.
 CookieImportResult probe_cookie_import(const json::object &request, unsigned max_accounts,
                                       GenerationBackend &backend, std::stop_token token = {},
-                                      std::optional<Clock::time_point> deadline = std::nullopt);
+                                      std::optional<Clock::time_point> deadline = std::nullopt,
+                                      const std::function<void(std::string_view)> &observe = {});
 }

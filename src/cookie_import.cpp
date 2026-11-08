@@ -62,7 +62,8 @@ json::object checked_state(const json::object &v) {
 }
 CookieImportResult probe_cookie_import(const json::object &request, unsigned max_accounts,
                                       GenerationBackend &backend, std::stop_token token,
-                                      std::optional<Clock::time_point> deadline) {
+                                      std::optional<Clock::time_point> deadline,
+                                      const std::function<void(std::string_view)> &observe) {
     check_cancel(token);
     if (max_accounts < 1 || max_accounts > 32) invalid();
     if (json::serialize(request).size() > 1024 * 1024)
@@ -134,6 +135,7 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
         ++attempted;
         const auto probe_started = Clock::now();
         const auto record_duration = [&] { longest_probe = std::max(longest_probe, Clock::now() - probe_started); };
+        const auto report = [&](std::string_view event) { if (observe && attempted == 1) observe(event); };
         try {
             identity = backend.probe_import(a, token);
             record_duration();
@@ -142,8 +144,11 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
             record_duration();
             check_cancel(token);
             if (e.status == 499 || e.code == "cancelled") throw Error(499, "cancelled", "Request cancelled");
-            if (e.code == "terms_required")
+            if (e.code == "terms_required") {
+                report("terms_required");
                 throw Error(409, "cookie_terms_required", "AI Studio asks this account to accept its terms; accept them in a normal browser, then import again");
+            }
+            if (e.code == "session_expired") report("login_redirect");
             if (e.code == "identity_unverified" || e.code == "identity_mismatch")
                 throw Error(409, "identity_unverified", "Cookie account identity could not be verified");
             if (e.code == "region_blocked" || e.code == "cookie_region_blocked")
@@ -175,6 +180,7 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
             skipped_partition += std::min(n, std::numeric_limits<std::uint64_t>::max() - skipped_partition);
         }
         if (bool_or(identity, "login")) {
+            report("login_redirect");
             if (++consecutive_failures < max_consecutive_probe_failures) continue;
             stopped = true;
             break;

@@ -55,6 +55,7 @@ class CamoufoxGateway final : public GenerationBackend {
     json::object probe(const Account &account, std::stop_token cancel = {}) override;
     json::object probe_import(Account &account, std::stop_token cancel = {}) override;
     json::object diagnostics() override;
+    std::string_view backend_for(const Account &) override { return "camoufox"; }
     void reconfigure(const Config &config) override;
     // Launches the browser without an identity and checks, on a local page,
     // what generation depends on: the bridge preload, navigator.webdriver,

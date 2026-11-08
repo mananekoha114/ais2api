@@ -145,6 +145,7 @@ json::object manage(Store& store, Config& config, const json::object& command) {
         throw Error(409, "keys_managed_in_config",
                     "Edit api_key in config.json, then run config reload or restart; clear it to revoke access");
     if (name == "stats") return store.stats();
+    if (name == "diagnostics.events") return store.backend_events();
     if (name == "config.show") {
         json::value value(config.to_json());
         redact(value);

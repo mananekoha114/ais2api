@@ -105,6 +105,21 @@ class Service {
     }
     Store &store() { return store_; }
     PriceService &prices() { return prices_; }
+    // Diagnostic counters per browser backend; they never fail the work.
+    void count_event(std::string_view backend, std::string_view event) {
+        try { store_.record_backend_event(backend, event); } catch (...) {}
+    }
+    // The events an error code itself proves.
+    void count_error(std::string_view backend, std::string_view code) {
+        if (code == "permission_denied") count_event(backend, "permission_denied");
+        else if (code == "session_expired") count_event(backend, "login_redirect");
+        else if (code == "terms_required") count_event(backend, "terms_required");
+    }
+    void count_cooldown(std::string_view backend, std::string_view kind) {
+        if (kind == "auth") count_event(backend, "auth_cooldown");
+        else if (kind == "permission_temporary") count_event(backend, "permission_cooldown");
+        else if (kind == "login_expired") count_event(backend, "login_expired");
+    }
     void usage_failure(std::string_view id) {
         usage_healthy_ = false;
         log({{"event", "request_history_error"}, {"request_id", id}, {"code", "request_history_write_failed"}});
@@ -367,8 +382,10 @@ class Service {
                 // answer before the HTTP handler's timeout discards them.
                 const auto scan_deadline = job->started_at +
                     std::chrono::seconds(job->config.cookie_import_timeout_seconds) - cookie_import_commit_margin;
+                const std::string backend(gateway_->backend_for(Account{}));
                 auto verified = probe_cookie_import(job->input, job->config.cookie_import_max_accounts,
-                                                    *gateway_, job->cancellation.get_token(), scan_deadline);
+                                                    *gateway_, job->cancellation.get_token(), scan_deadline,
+                                                    [&](std::string_view event) { count_event(backend, event); });
                 check_cancel(job->cancellation.get_token());
                 json::array accounts;
                 {
@@ -548,12 +565,19 @@ class Service {
                              } catch (const Error &e) {
                                  // Only a sign-in redirect or missing credentials
                                  // prove expiry; other auth failures cool down.
+                                 const std::string backend(gateway_->backend_for(a));
+                                 count_error(backend, e.code);
+                                 std::string_view kind;
                                  if (e.code == "session_expired" || e.code == "missing_cookies")
-                                     store_.failure(a.id, "probe", "login_expired");
+                                     kind = "login_expired";
                                  else if (e.code == "terms_required")
-                                     store_.failure(a.id, "probe", "terms_required");
+                                     kind = "terms_required";
                                  else if (e.status == 401)
-                                     store_.failure(a.id, "probe", "auth");
+                                     kind = "auth";
+                                 if (!kind.empty()) {
+                                     store_.failure(a.id, "probe", kind);
+                                     count_cooldown(backend, kind);
+                                 }
                                  if (!id.empty() || e.code == "cancelled")
                                      throw;
                                  results.push_back(
@@ -731,6 +755,7 @@ class Service {
                                 "with the CLI");
                 }
                 work->usage->begin_attempt(account->id);
+                const std::string backend(gateway_->backend_for(*account));
                 { std::lock_guard lock(queue_mutex_); active_account_id_ = account->id; }
                 log({{"event", "generation_attempt"}, {"request_id", work->usage->id()},
                     {"account_id", account->id}, {"attempt", attempt+1}});
@@ -745,6 +770,7 @@ class Service {
                         [&](GenerationEvent next) {
                             check_cancel(token);
                             if (next.kind == GenerationEvent::Kind::continuation_failed) {
+                                count_error(backend, string_or(next.data, "error"));
                                 work->usage->end_attempt(string_or(next.data, "error"));
                                 return;
                             }
@@ -829,6 +855,7 @@ class Service {
                     return;
                 } catch (const Error &e) {
                     work->usage->end_attempt(e.code);
+                    count_error(backend, e.code);
                     if (token.stop_requested() || delivered || continuing)
                         throw;
                     const bool last = attempt + 1 == cfg.limits.max_attempts;
@@ -867,6 +894,7 @@ class Service {
                     case FailureAction::restart_browser: {
                         recovered = true;
                         const bool rebuild = decision.action == FailureAction::rebuild_session;
+                        count_event(backend, rebuild ? "session_rebuild" : "browser_restart");
                         log({{"event", "session_recovery"}, {"request_id", work->usage->id()},
                              {"account_id", account->id}, {"code", e.code},
                              {"action", rebuild ? "rebuild_session" : "restart_browser"}});
@@ -877,6 +905,7 @@ class Service {
                     }
                     case FailureAction::cool_and_switch:
                         store_.failure(account->id, request.model, decision.cooldown, e.retry_after);
+                        count_cooldown(backend, decision.cooldown);
                         log({{"event", "account_failure"}, {"request_id", work->usage->id()},
                              {"account_id", account->id}, {"kind", decision.cooldown}, {"code", e.code}});
                         previous = e;
@@ -1354,6 +1383,7 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
             {"browser", service.control({{"command", "browser.diagnostics"}})},
             {"config", service.control({{"command", "config.show"}})},
             {"stats", service.control({{"command", "stats"}})},
+            {"events", service.control({{"command", "diagnostics.events"}})},
             {"logs", log_sources(cfg.data_dir)}, {"google_verified", false}};
     }
     else if (post && path == "/service/stop") {

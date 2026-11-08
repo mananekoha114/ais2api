@@ -60,6 +60,7 @@ class BrowserGateway final : public GenerationBackend {
     json::object probe(const Account &account, std::stop_token cancel = {}) override;
     json::object probe_import(Account &account, std::stop_token cancel = {}) override;
     json::object diagnostics() override;
+    std::string_view backend_for(const Account &) override { return "cloakbrowser"; }
     void reconfigure(const Config &config) override;
     json::object verify_runtime(std::stop_token cancel = {});
     void close() override;
