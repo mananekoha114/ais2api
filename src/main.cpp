@@ -118,9 +118,10 @@ void help() {
     std::cout << "ais2api: Chromium/CDP Gemini and OpenAI gateway\n\n"
                  "Commands:\n"
                  "  init | serve | start | stop | status | setup | doctor\n"
-                 "  browser update | browser rollback\n"
+                 "  browser update [BACKEND] | browser rollback [BACKEND]\n"
                  "  accounts list | import (--file PATH | --stdin) [--name NAME]\n"
                  "  accounts select ID | remove ID | reset ID | probe (ID | all)\n"
+                 "  accounts backend (ID | --all) (cloakbrowser | auto | camoufox) [--yes]\n"
                  "  keys list (edit api_key in config.json to set or rotate)\n"
                  "  stats | diagnostics | models list | config show | config validate | config reload\n"
                  "  operations status ID\n\n"
@@ -130,7 +131,8 @@ void help() {
                  "  --request-bytes N --object-bytes N --relay-bytes N --queue-size N\n"
                  "  --queue-seconds N --generation-seconds N --stream-idle-seconds N\n"
                  "  --max-attempts N\n"
-                 "setup/browser update accept --yes to approve required system package changes.\n"
+                 "setup/browser update accept --yes to approve required system package changes;\n"
+                 "accounts backend needs --yes to move accounts between CloakBrowser and Firefox.\n"
                  "All non-help results are JSON. Set api_key in config.json; secrets are never printed.\n";
 }
 
@@ -234,14 +236,15 @@ json::object execute(Arguments args) {
     if ((args.import_file || args.stdin_import) &&
         !(command == "accounts" && p.size() > 1 && p[1] == "import"))
         usage_error("--file and --stdin are only valid for accounts import");
-    if (args.all && !(command == "accounts" && p.size() > 1 && p[1] == "probe"))
-        usage_error("--all is only valid for accounts probe");
+    const bool account_backend = command == "accounts" && p.size() > 1 && p[1] == "backend";
+    if (args.all && !(command == "accounts" && p.size() > 1 && p[1] == "probe") && !account_backend)
+        usage_error("--all is only valid for accounts probe or accounts backend");
     if (!args.name.empty() && !(p.size() > 1 && ((command == "accounts" && p[1] == "import") ||
                                                  (command == "keys" && p[1] == "create"))))
         usage_error("--name is only valid for account import or key creation");
     if (args.yes &&
-        !(command == "setup" || (command == "browser" && p.size() > 1 && p[1] == "update")))
-        usage_error("--yes is only valid for setup or browser update");
+        !(command == "setup" || (command == "browser" && p.size() > 1 && p[1] == "update") || account_backend))
+        usage_error("--yes is only valid for setup, browser update or accounts backend");
     if (command == "serve") {
         count(1, 1);
         auto result = serve(config);
@@ -316,21 +319,27 @@ json::object execute(Arguments args) {
         return doctor(config);
     }
     if (command == "setup" || command == "browser") {
+        std::string backend;
         if (command == "setup")
             count(1, 1);
         else {
-            count(2, 2);
+            count(2, 3);
             if (p[1] != "update" && p[1] != "rollback")
                 usage_error("Unknown browser command");
+            if (p.size() == 3) {
+                backend = p[2];
+                if (backend != "cloakbrowser" && backend != "camoufox")
+                    usage_error("The browser backend must be cloakbrowser or camoufox");
+            }
         }
         require_offline(config);
         InstanceLock lock(config.data_dir);
         if (command == "browser" && p[1] == "rollback")
-            return rollback_runtime(config);
-        return setup_runtime(config, args.yes);
+            return rollback_runtime(config, Config::default_directory(), backend);
+        return setup_runtime(config, args.yes, backend);
     }
     if (command == "accounts") {
-        count(2, 3);
+        count(2, 4);
         const auto &action = p[1];
         json::object request{{"command", "accounts." + action}};
         if (action == "import") {
@@ -353,6 +362,16 @@ json::object execute(Arguments args) {
         } else if (action == "select" || action == "remove" || action == "reset") {
             count(3, 3);
             request["id"] = p[2];
+        } else if (action == "backend") {
+            // accounts backend ID VALUE, or accounts backend --all VALUE
+            if (args.all) {
+                count(3, 3);
+                request = {{"command", "accounts.backend.all"}, {"backend", p[2]}};
+            } else {
+                count(4, 4);
+                request = {{"command", "accounts.fingerprint.update"}, {"id", p[2]}, {"backend", p[3]}};
+            }
+            request["confirm_identity_change"] = args.yes;
         } else
             usage_error("Unknown accounts command");
         return dispatch(config, request);

@@ -39,9 +39,14 @@ class ControlServer {
 int serve(Config config);
 class GenerationBackend;
 int serve_with_backend(Config config, std::unique_ptr<GenerationBackend> backend);
-json::object setup_runtime(Config &config, bool approve_system_changes = false);
+// Prepares `backend` ("cloakbrowser" or "camoufox"), or by default every
+// backend the default and the stored accounts need.
+json::object setup_runtime(Config &config, bool approve_system_changes = false, std::string_view backend = {});
 std::vector<std::string> linux_runtime_packages(std::string_view os_release);
-json::object doctor(const Config &config, const fs::path &program_directory = Config::default_directory());
+// Checks every backend the default and the stored accounts need; `stored`
+// defaults to the stored_backends() of the data directory.
+json::object doctor(const Config &config, const fs::path &program_directory = Config::default_directory(),
+                    std::optional<std::vector<std::string>> stored = std::nullopt);
 // Removes the per-launch browser profiles (runtime/browser-<hex> and
 // runtime/camoufox-<hex>) a forcibly ended service left behind; installs and
 // other runtime directories are never touched. Call it only while holding
@@ -50,7 +55,9 @@ std::size_t remove_profile_leftovers(const fs::path &data_dir);
 // This host's runtime platform key, such as "windows-x64", "linux-x64" or
 // "termux-arm64"; empty on a platform setup does not support.
 std::string runtime_platform();
-json::object rollback_runtime(Config &config, const fs::path &program_directory = Config::default_directory());
+// Rolls `backend` back, by default the default backend.
+json::object rollback_runtime(Config &config, const fs::path &program_directory = Config::default_directory(),
+                              std::string_view backend = {});
 void download_verified(std::string_view url, const fs::path &destination, std::string_view digest,
                        std::string_view proxy = {}, std::uint64_t expected_size = 0);
 // `keep`, when given, names the entries (by their '/'-separated path) that

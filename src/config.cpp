@@ -417,7 +417,6 @@ Config Config::patched(const json::object& patch) const {
 bool restart_required(const Config& previous, const Config& next) {
   return next.bind != previous.bind || next.port != previous.port ||
     next.data_dir != previous.data_dir || next.browser_executable != previous.browser_executable ||
-    next.browser_backend != previous.browser_backend ||
     next.proxy != previous.proxy || next.browser_proxy_relay != previous.browser_proxy_relay ||
     next.browser_remote_allow_origins != previous.browser_remote_allow_origins ||
     next.browser_site_isolation != previous.browser_site_isolation ||

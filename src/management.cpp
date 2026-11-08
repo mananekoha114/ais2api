@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/management.hpp"
+#include "ais2api/backend_router.hpp"
 #include "ais2api/diagnostics.hpp"
 #include "ais2api/log_sources.hpp"
 #include "ais2api/region.hpp"
@@ -22,7 +23,7 @@ std::string identifier(const json::object& command) {
 
 json::object account_summary(const json::object& input) {
     json::object output;
-    for (auto key : {"id", "name", "email", "auth_user", "disabled", "expired", "failures", "fingerprint", "firefox_identity"}) {
+    for (auto key : {"id", "name", "email", "auth_user", "disabled", "expired", "failures", "fingerprint", "firefox_identity", "backend"}) {
         if (auto value = input.if_contains(key)) output[key] = *value;
     }
     return output;
@@ -66,26 +67,80 @@ void redact(json::value& value) {
 
 // Stored values plus what the browser will actually present; empty stored
 // timezone/locale follow this computer's region settings.
-json::object fingerprint_view(const BrowserFingerprint& fingerprint) {
+json::object fingerprint_view(Store& store, const Config& config, std::string_view id, const BrowserFingerprint& fingerprint) {
     const auto timezone = host_timezone(), locale = host_locale();
-    return {{"seed", fingerprint.seed}, {"platform", fingerprint_platform()},
+    const std::string backend = fingerprint.backend.empty() ? std::string(adopted_backend(config.browser_backend)) : fingerprint.backend;
+    const auto effective = effective_backend(backend, config.browser_backend);
+    const auto firefox = store.firefox_identity(id);
+    // A Firefox identity presents the OS it was generated on, CloakBrowser
+    // the platform it fakes.
+#ifdef _WIN32
+    std::string platform = "windows";
+#else
+    std::string platform = "linux";
+#endif
+    if (identity_family(effective) == "chrome") platform = fingerprint_platform();
+    else if (firefox && !string_or(*firefox, "os").empty()) platform = string_or(*firefox, "os");
+    return {{"seed", fingerprint.seed}, {"platform", platform},
             {"timezone", fingerprint.timezone}, {"locale", fingerprint.locale},
             {"effective_timezone", fingerprint.timezone.empty() ? timezone : fingerprint.timezone},
             {"effective_locale", fingerprint.locale.empty() ? locale : fingerprint.locale},
-            {"host_timezone", timezone}, {"host_locale", locale}};
+            {"host_timezone", timezone}, {"host_locale", locale},
+            {"backend", backend}, {"effective_backend", effective}, {"identity", identity_family(effective)},
+            {"firefox_identity_saved", firefox.has_value()}};
+}
+json::object fingerprint_view(Store& store, const Config& config, std::string_view id) {
+    return fingerprint_view(store, config, id, store.fingerprint(id));
+}
+std::string backend_value(const json::object& command) {
+    const auto value = command.if_contains("backend");
+    if (!value || !value->is_string() || !valid_account_backend(value->as_string()))
+        throw Error(400, "invalid_backend", "backend must be cloakbrowser, auto, camoufox or spidermonkey");
+    if (value->as_string() == "spidermonkey")
+        throw Error(400, "backend_unavailable", "The SpiderMonkey backend is not available yet");
+    return std::string(value->as_string());
+}
+bool identity_change_confirmed(const json::object& command) {
+    const auto value = command.if_contains("confirm_identity_change");
+    if (value && !value->is_bool())
+        throw Error(400, "invalid_command", "confirm_identity_change must be a boolean");
+    return value && value->as_bool();
+}
+// Whether moving the account to `backend` swaps its Chrome identity for a
+// Firefox one or back.
+bool changes_identity(const BrowserFingerprint& fingerprint, const Config& config, std::string_view backend) {
+    const std::string_view current = fingerprint.backend.empty() ? adopted_backend(config.browser_backend)
+                                                                 : std::string_view(fingerprint.backend);
+    return identity_family(effective_backend(current, config.browser_backend)) !=
+           identity_family(effective_backend(backend, config.browser_backend));
+}
+[[noreturn]] void identity_change_unconfirmed() {
+    throw Error(409, "identity_change_unconfirmed",
+                "Switching between CloakBrowser and a Firefox backend gives the account a new browser identity, "
+                "which Google sees as a new device; confirm the change");
 }
 }
 
 json::object manage(Store& store, Config& config, const json::object& command) {
     auto name = string_or(command, "command");
-    if (name == "accounts.fingerprint") return fingerprint_view(store.fingerprint(identifier(command)));
-    if (name == "accounts.fingerprint.regenerate") return fingerprint_view(store.regenerate_fingerprint(identifier(command)));
+    // Accounts stored since the last command settle on the default backend.
+    if (name.starts_with("accounts.")) adopt_backends(store, config);
+    if (name == "accounts.fingerprint") return fingerprint_view(store, config, identifier(command));
+    if (name == "accounts.fingerprint.regenerate") {
+        const auto id = identifier(command);
+        return fingerprint_view(store, config, id, store.regenerate_fingerprint(id));
+    }
     if (name == "accounts.fingerprint.update") {
-        std::optional<std::string> timezone, locale;
+        std::optional<std::string> timezone, locale, backend;
         bool any = false;
         for (const auto& field : command) {
             const auto key = field.key();
-            if (key == "command" || key == "id") continue;
+            if (key == "command" || key == "id" || key == "confirm_identity_change") continue;
+            if (key == "backend") {
+                backend = backend_value(command);
+                any = true;
+                continue;
+            }
             if (key != "timezone" && key != "locale")
                 throw Error(400, "invalid_command", "Unknown fingerprint field");
             // null or "" restores the host default.
@@ -95,8 +150,34 @@ json::object manage(Store& store, Config& config, const json::object& command) {
             (key == "timezone" ? timezone : locale) = std::move(value);
             any = true;
         }
-        if (!any) throw Error(400, "invalid_command", "Fingerprint update requires timezone or locale");
-        return fingerprint_view(store.set_fingerprint_region(identifier(command), timezone, locale));
+        if (!any) throw Error(400, "invalid_command", "Fingerprint update requires timezone, locale or backend");
+        const auto id = identifier(command);
+        const bool confirmed = identity_change_confirmed(command);
+        if (backend && changes_identity(store.fingerprint(id), config, *backend) && !confirmed)
+            identity_change_unconfirmed();
+        if (timezone || locale) store.set_fingerprint_region(id, timezone, locale);
+        if (backend) store.set_backend(id, *backend);
+        return fingerprint_view(store, config, id);
+    }
+    // Moves every account to one backend: the explicit migration between
+    // CloakBrowser and Firefox identities.
+    if (name == "accounts.backend.all") {
+        for (const auto& field : command)
+            if (field.key() != "command" && field.key() != "backend" && field.key() != "confirm_identity_change")
+                throw Error(400, "invalid_command", "Unknown account backend field");
+        const auto backend = backend_value(command);
+        const bool confirmed = identity_change_confirmed(command);
+        std::size_t identities = 0, updated = 0;
+        const auto accounts = store.accounts();
+        for (const auto& account : accounts)
+            identities += changes_identity(store.fingerprint(account.id), config, backend);
+        if (identities && !confirmed) identity_change_unconfirmed();
+        for (const auto& account : accounts)
+            if (store.fingerprint(account.id).backend != backend) {
+                store.set_backend(account.id, backend);
+                ++updated;
+            }
+        return {{"backend", backend}, {"updated", updated}, {"identity_changed", identities}};
     }
     if (name == "accounts.list") {
         json::array accounts;
@@ -107,8 +188,13 @@ json::object manage(Store& store, Config& config, const json::object& command) {
         auto input = command.if_contains("input");
         if (!input) throw Error(400, "invalid_command", "Account import input is required");
         auto imported = store.import_accounts(*input, string_or(command, "name"));
+        adopt_backends(store, config);
         json::array accounts;
-        for (auto& item : imported) accounts.push_back(account_summary(item.as_object()));
+        for (auto& item : imported) {
+            auto summary = account_summary(item.as_object());
+            if (auto backend = store.account_backend(string_or(summary, "id"))) summary["backend"] = *backend;
+            accounts.push_back(std::move(summary));
+        }
         return {{"imported", accounts.size()}, {"accounts", accounts}};
     }
     if (name == "accounts.update") {
@@ -152,7 +238,7 @@ json::object manage(Store& store, Config& config, const json::object& command) {
     if (name == "diagnostics.report") {
         // The service is not running: no service status or browser state.
         DiagnosticsSources sources;
-        sources.runtime = doctor(config);
+        sources.runtime = doctor(config, Config::default_directory(), store.stored_backends());
         sources.config = config;
         sources.accounts = store.account_status();
         sources.events = store.backend_events();
