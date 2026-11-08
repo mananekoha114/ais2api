@@ -94,6 +94,10 @@
       - 裁剪还去掉了完整版的一处泄漏：Firefox 递归启用自带的字体目录，完整版里其他 OS 的字体组也能被 Linux 身份读到（Camoufox 的 `FONTS.md` 记述了这一点，例如 Windows 的 Calibri 与 Cambria）。所以 Linux 上的 `[.camoufox-fonts]` 只要求有 Linux 字体的字体族、通用字体族与完整版一致，并且裁剪后不多出字体。CI 实测，差异只出现在没有 Linux 字体的名称上（Calibri、Cambria、Helvetica、Times、Palatino 等）。
   - **扩展**：不加载自带的 uBlock Origin，与现有的 `--disable-extensions` 一致，解压时就跳过 `addons/UBO`。
   - 开发版可以把 Camoufox 一起打包。
+  - **Termux**：
+    - Linux ARM64 版安装在 Termux 一侧，裁剪方式与 Linux 相同；
+    - 与 CloakBrowser 共用 proot 容器 `ais2api-browser`，`setup` 在容器内只安装缺少的包；
+    - 网关通过 `proot-distro login` 启动 Xvfb 和 Camoufox，把数据目录按原路径绑定进去。`proot-distro` 不传递宿主的环境变量，身份配置等都用 `--env` 传入，所以不需要 CloakBrowser 那样的启动脚本。
 
 ## SpiderMonkey 后端
 

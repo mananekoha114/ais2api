@@ -67,12 +67,12 @@ ais2api stop      停止服务
 - 程序旁存在 `browser-runtime/PLATFORM/chrome[.exe]`（Browser-Local 包）时会自动使用，无需下载；`setup` 仍会校验其完整文件清单并准备系统依赖。
 - 需要实验性的 `camoufox` 后端时，`setup` 安装以下两项，都按 `runtime-manifest.json` 锁定的版本下载并核对 SHA-256；不下载 CloakBrowser，也不改写 `browser_executable`：
   - 生成 Firefox 身份所需的 fpgen 模型，逐个文件核对；
-  - Camoufox，支持 Windows x64、Linux x64 和 Linux ARM64：
+  - Camoufox，支持 Windows x64、Linux x64、Linux ARM64 和 Termux（ARM64）：
     - 压缩包约 1.3 GB，下载时需要约 3 GiB 空闲空间；
-    - 安装到 `<data_dir>/runtime/camoufox/<版本>-<平台>/`，Windows 约 400 MB，Linux 约 1.3 GB；
+    - 安装到 `<data_dir>/runtime/camoufox/<版本>-<平台>/`，Windows 约 400 MB，Linux 与 Termux 约 1.3 GB；
     - 身份总是呈现本机 OS，解压时据此裁剪自带的字体。Windows 上 Camoufox 用系统字体，只保留 Firefox 本身也带的 emoji 字体 `TwemojiMozilla.ttf`；Linux 上只保留 Linux 身份读取的字体组和 Linux 的 fontconfig。如果新版本的字体分组与此不符，安装会以 `camoufox_layout_changed` 失败；
     - uBlock Origin 从不加载，所以不解压；
-    - Linux 上先检查 Camoufox 需要的系统包，只安装缺少的，缺包时需要 `--yes`，见 [构建与打包](platforms.md#camoufox-后端)；
+    - Linux 上先检查 Camoufox 需要的系统包，只安装缺少的，缺包时需要 `--yes`，见 [构建与打包](platforms.md#camoufox-后端)；Termux 上检查的是 `ais2api-browser` 容器内的包，没有容器时先创建，见 [浏览器容器](platforms.md#浏览器容器)；
     - 无界面验证通过后才切换为当前版本，并删除下载的压缩包；
     - `browser_executable` 指向 Camoufox（`camoufox[.exe]` 或 `camoufox-bin`）时不下载，只验证该程序。
   - [开发版](platforms.md#构建开发版)嵌入了模型、附带了 Camoufox，`setup` 两样都不下载，只验证打包的 Camoufox。
