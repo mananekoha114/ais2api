@@ -61,7 +61,7 @@ sudo apt-get install -y build-essential clang cmake ninja-build git curl zip unz
 sh scripts/build.sh linux --package       # 加 --webui 嵌入网页控制台
 ```
 
-脚本会获取 `vcpkg.json` 中指定提交的 vcpkg，完成配置、构建和 CTest，安装到 `build/linux/install`，并在 `build/linux/packages` 生成 TGZ。在 ARM64（aarch64）上脚本使用 `arm64-linux` 三元组；CloakBrowser 没有 Linux ARM64 版本，这里只能使用 Camoufox 后端（见下文），也不能打包本地浏览器。新的依赖工具放在 `build/deps`；脚本不会把已有的 checkout 更新到其他提交。要复用已准备好的工具，把 `VCPKG_ROOT` 设为处于固定版本的 checkout。依赖下载仍需要网络或已填充的 vcpkg 缓存。
+脚本会获取 `vcpkg.json` 中指定提交的 vcpkg，完成配置、构建和 CTest，安装到 `build/linux/install`，并在 `build/linux/packages` 生成 TGZ。在 ARM64（aarch64）上脚本使用 `arm64-linux` 三元组；ais2api 没有为 Linux ARM64 锁定 CloakBrowser，这里只能使用 Camoufox 后端（见下文），也不能打包本地浏览器。新的依赖工具放在 `build/deps`；脚本不会把已有的 checkout 更新到其他提交。要复用已准备好的工具，把 `VCPKG_ROOT` 设为处于固定版本的 checkout。依赖下载仍需要网络或已填充的 vcpkg 缓存。
 
 `scripts/build.sh` 的选项：
 
@@ -110,7 +110,7 @@ build/linux/install/bin/ais2api setup --yes
   - 身份与 Windows 上一样呈现本机 OS，即 Linux。
   - 字体只用 Camoufox 自带的、Linux 身份会读取的四组字体（约 0.9 GB），通过 Camoufox 的 Linux fontconfig 读取，不使用系统字体。`setup` 只解压这几组字体和 Linux 的 fontconfig，安装后约 1.3 GB。
   - 字体缓存放在 `<data_dir>/runtime/camoufox-fontconfig/`，第一次启动时扫描一次。
-- ARM64：CloakBrowser 对这个平台返回 `unsupported_platform`。要先把 `browser_backend` 设为 `camoufox`（或让账号使用 Firefox 后端），再运行 `setup`。
+- ARM64：`runtime-manifest.json` 没有为这个平台锁定 CloakBrowser，准备 CloakBrowser 时返回 `unsupported_platform`。要先把 `browser_backend` 设为 `camoufox`（或让账号使用 Firefox 后端），再运行 `setup`。
 
 ### WSL 2 中的 Debian 13
 

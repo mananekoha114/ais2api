@@ -101,7 +101,7 @@ if [ "$target" = termux ]; then
   fi
   cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DAIS2API_BUILD_WEBUI="$webui" -DAIS2API_DEV_BUNDLE=OFF -DCMAKE_PREFIX_PATH="$prefix_path" -DCMAKE_CXX_COMPILER="${CXX:-clang++}" -DCMAKE_INSTALL_PREFIX="$build_dir/install"
 else
-  # ARM64 builds the Camoufox backend only: CloakBrowser has no Linux ARM64 build to bundle.
+  # ARM64 builds the Camoufox backend only: no CloakBrowser is pinned for Linux ARM64.
   case "$(uname -m)" in
     x86_64) triplet=x64-linux ;;
     aarch64) triplet=arm64-linux; [ -z "$browser_bundle" ] || { echo '--browser-bundle needs Linux x86_64.' >&2; exit 2; } ;;
