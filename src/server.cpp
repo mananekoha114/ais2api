@@ -88,7 +88,14 @@ class Service {
         : config_(std::move(config)), journal_(config_.data_dir), store_(config_.data_dir),
           prices_(store_, [this] { return this->config(); }, !backend),
           gateway_(backend ? std::move(backend) : browser_gateway(config_, store_)),
-          worker_([this](std::stop_token token) { work_loop(token); }) { store_.recover_requests(); }
+          worker_([this](std::stop_token token) { work_loop(token); }) {
+        store_.recover_requests();
+        // serve() holds the instance lock, so no other process uses them.
+        try {
+            if (const auto removed = remove_profile_leftovers(config_.data_dir))
+                log({{"event", "runtime_leftovers_removed"}, {"count", removed}});
+        } catch (...) {}
+    }
     ~Service() { shutdown(); log_writer_.join(); }
     void shutdown() {
         stop();

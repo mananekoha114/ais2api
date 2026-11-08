@@ -56,6 +56,23 @@ std::size_t entries(const fs::path &directory) {
     return static_cast<std::size_t>(std::distance(fs::directory_iterator(directory), fs::directory_iterator()));
 }
 } // namespace
+TEST_CASE("leftover browser profiles are removed and installs are kept", "[setup]") {
+    Directory dir;
+    const auto runtime = dir.root / "runtime";
+    const std::string hex(24, 'a');
+    for (const auto *name : {"camoufox", "fpgen", "downloads", "camoufox-fontconfig", "chromium-146-linux-x64",
+                             "camoufox-ABCDEFABCDEFABCDEFABCDEF", "browser-0123", "staging-12345678"})
+        fs::create_directories(runtime / name / "kept");
+    fs::create_directories(runtime / ("camoufox-" + hex) / "profile");
+    fs::create_directories(runtime / ("browser-" + std::string(24, '0')) / "home");
+    std::ofstream(runtime / ("camoufox-" + std::string(24, 'b')), std::ios::binary) << "not a profile";
+    CHECK(remove_profile_leftovers(dir.root) == 2);
+    CHECK_FALSE(fs::exists(runtime / ("camoufox-" + hex)));
+    CHECK(fs::is_regular_file(runtime / ("camoufox-" + std::string(24, 'b'))));
+    CHECK(entries(runtime) == 9);
+    CHECK(remove_profile_leftovers(dir.root / "missing") == 0);
+}
+
 TEST_CASE("the runtime manifest pins the fpgen model", "[setup]") {
     const auto pin = fpgen_model_pin();
     CHECK(pin.tag == "model-2/2026");
