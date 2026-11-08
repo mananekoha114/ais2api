@@ -152,6 +152,12 @@ CMake 选项 `AIS2API_DEV_BUNDLE` 区分开发版与正式分发版，默认关�
 
 P1 已于 2026-11-06 在 Windows 上用测试账号完成验证，见 [原型报告](reports/camoufox-prototype-2026-11-06.md)。
 
+P2 的各项已于 2026-11-08 实现（#19–#25），并按合并标准做了离线验证：
+- Windows：本机运行隐藏测试；
+- Linux x64 与 ARM64（含 Docker）、Termux ARM64：CI 的 `camoufox-runtime.yml` 用 `setup` 安装 Camoufox 并运行隐藏测试，全程只打开本地页面。
+
+接下来在 P3 开始前用真实账号统一验证。
+
 每项工作单独开分支、提 PR 到 main，由维护者审核合并。
 
 ## 低成本改进（独立推进）
