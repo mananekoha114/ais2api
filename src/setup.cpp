@@ -108,14 +108,9 @@ json::object verify_browser(const Config &config, const fs::path &executable) {
     BrowserGateway gateway(verification, store);
     return gateway.verify_runtime();
 }
-bool termux_container_exists() {
-    auto prefix = std::getenv("TERMUX__PREFIX");
-    if (!prefix)
-        prefix = std::getenv("PREFIX");
-    return prefix && (fs::is_directory(fs::path(prefix) /
-                                       "var/lib/proot-distro/containers/ais2api-browser/rootfs") ||
-                      fs::is_directory(fs::path(prefix) /
-                                       "var/lib/proot-distro/installed-rootfs/ais2api-browser"));
+const char *termux_prefix() {
+    const char *prefix = std::getenv("TERMUX__PREFIX");
+    return prefix ? prefix : std::getenv("PREFIX");
 }
 } // namespace
 bool media_detail::public_address(const boost::asio::ip::address &address) {
@@ -492,6 +487,48 @@ void write_selection(const fs::path &data_dir, const CamoufoxSelection &selectio
 }
 } // namespace
 std::string runtime_platform() { return host_platform(); }
+fs::path termux_container_rootfs() {
+    const auto prefix = termux_prefix();
+    if (!prefix) return {};
+    const auto containers = fs::path(prefix) / "var" / "lib" / "proot-distro";
+    const std::string name(termux_container);
+    // proot-distro moves a container of the older layout at its next login.
+    for (const auto &rootfs : {containers / "containers" / name / "rootfs", containers / "installed-rootfs" / name}) {
+        std::error_code error;
+        if (fs::is_directory(rootfs, error)) return rootfs;
+    }
+    return {};
+}
+std::vector<std::string> missing_packages(std::string_view dpkg_status, const std::vector<std::string> &packages) {
+    std::set<std::string> installed;
+    std::string package;
+    bool present = false;
+    const auto finish = [&] {
+        if (present && !package.empty()) installed.insert(package);
+        package.clear();
+        present = false;
+    };
+    std::istringstream input{std::string(dpkg_status)};
+    for (std::string line; std::getline(input, line);) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) {
+            finish();
+        } else if (line.starts_with("Package:")) {
+            package = line.substr(8);
+            package.erase(0, package.find_first_not_of(" \t"));
+            package.erase(package.find_last_not_of(" \t") + 1);
+        } else if (line.starts_with("Status:")) {
+            // "install ok installed": its last word is the package's state.
+            const auto end = line.find_last_not_of(" \t");
+            present = end != std::string::npos && line.substr(0, end + 1).ends_with(" installed");
+        }
+    }
+    finish();
+    std::vector<std::string> missing;
+    for (const auto &name : packages)
+        if (!installed.contains(name)) missing.push_back(name);
+    return missing;
+}
 std::size_t remove_profile_leftovers(const fs::path &data_dir) {
     std::size_t removed = 0;
     std::error_code error;
@@ -677,6 +714,79 @@ json::object verify_camoufox(const Config &config, const fs::path &executable) {
     CamoufoxGateway gateway(verification, store);
     return gateway.verify_runtime();
 }
+// The image setup creates the Termux container from, and its os-release.
+constexpr std::string_view container_image = "ubuntu:24.04";
+constexpr std::string_view container_os_release = "ID=ubuntu\nVERSION_ID=\"24.04\"\n";
+// Creates the Termux container unless it exists, recording in
+// runtime/proot-owned.json that setup did; one setup did not create is left
+// alone. Returns its rootfs.
+fs::path prepare_termux_container(const fs::path &runtime) {
+    checked_process({"pkg", "install", "-y", "proot-distro"});
+    const auto created = runtime / "proot-owned.json";
+    if (termux_container_rootfs().empty()) {
+        atomic_write(created, "{\"version\":1,\"phase\":\"creating\"}", true);
+        checked_process({"proot-distro", "install", std::string(container_image), "--name", std::string(termux_container)});
+    } else if (!fs::exists(created))
+        throw Error(409, "unknown_container",
+                    "Existing " + std::string(termux_container) + " container has no ownership marker");
+    auto rootfs = termux_container_rootfs();
+    if (rootfs.empty())
+        throw Error(502, "system_prepare", "proot-distro created no " + std::string(termux_container) + " container");
+    return rootfs;
+}
+void install_container_packages(const std::vector<std::string> &packages) {
+    const std::vector<std::string> login{"proot-distro", "login", std::string(termux_container), "--"};
+    auto command = login;
+    command.insert(command.end(), {"apt-get", "update"});
+    checked_process(command);
+    command = login;
+    command.insert(command.end(), {"apt-get", "install", "-y"});
+    command.insert(command.end(), packages.begin(), packages.end());
+    checked_process(command);
+}
+void mark_termux_container_ready(const fs::path &runtime) {
+    atomic_write(runtime / "proot-owned.json", "{\"version\":1,\"phase\":\"ready\"}", true);
+}
+// Those of `packages` the container's dpkg does not record as installed.
+std::vector<std::string> missing_container_packages(const fs::path &rootfs, const std::vector<std::string> &packages) {
+    const auto status = rootfs / "var" / "lib" / "dpkg" / "status";
+    std::error_code error;
+    return missing_packages(fs::is_regular_file(status, error) ? read_file(status, 64ull << 20) : std::string(), packages);
+}
+// On Termux Camoufox runs in the container: setup creates it and installs
+// the packages Camoufox needs there. Nothing is asked or run when it holds
+// them already.
+json::object prepare_camoufox_container(const fs::path &runtime, bool approved) {
+    const auto packages = camoufox_linux_packages(container_os_release);
+    auto rootfs = termux_container_rootfs();
+    if (!rootfs.empty() && !fs::exists(runtime / "proot-owned.json"))
+        throw Error(409, "unknown_container",
+                    "Existing " + std::string(termux_container) + " container has no ownership marker");
+    auto missing = rootfs.empty() ? packages : missing_container_packages(rootfs, packages);
+    std::error_code error;
+    const auto prefix = termux_prefix();
+    const bool proot = prefix && fs::is_regular_file(fs::path(prefix) / "bin" / "proot-distro", error);
+    if (proot && !rootfs.empty() && missing.empty()) return {{"status", "ready"}, {"container", termux_container}};
+    std::string names;
+    for (const auto &package : missing) names += (names.empty() ? "" : " ") + package;
+    if (!approved)
+        throw Error(409, "system_confirmation_required",
+                    (rootfs.empty() ? "Camoufox runs in the " + std::string(termux_container) +
+                                          " container, which setup creates with proot-distro from " +
+                                          std::string(container_image) + ", with these packages: "
+                                    : "Camoufox needs these packages in the " + std::string(termux_container) +
+                                          " container: ") +
+                        (names.empty() ? "none (proot-distro is missing)" : names) +
+                        ". Review the setup documentation and run setup --yes to approve package-manager changes");
+    console::emit_record({{"event", "setup_stage"}, {"stage", "system-packages"}, {"container", termux_container}, {"packages", names}});
+    rootfs = prepare_termux_container(runtime);
+    missing = missing_container_packages(rootfs, packages);
+    if (!missing.empty()) install_container_packages(missing);
+    mark_termux_container_ready(runtime);
+    json::array installed;
+    for (const auto &package : missing) installed.emplace_back(package);
+    return {{"status", "installed"}, {"container", termux_container}, {"installed", std::move(installed)}};
+}
 // Whether dpkg records `package` as installed; it also knows removed ones.
 bool package_installed(const std::string &package) {
     return run_process({"sh", "-c", "dpkg-query -W -f='${db:Status-Abbrev}' \"$1\" 2>/dev/null | grep -q '^ii'",
@@ -684,8 +794,9 @@ bool package_installed(const std::string &package) {
 }
 // Installs the packages Camoufox needs that this Ubuntu or Debian lacks.
 // Nothing is asked or run when none is missing, as in the Docker image.
-json::object prepare_camoufox_system(bool approved) {
+json::object prepare_camoufox_system(const fs::path &runtime, bool approved) {
     const auto system = platform();
+    if (system == "termux-arm64") return prepare_camoufox_container(runtime, approved);
     if (system != "linux-x64" && system != "linux-arm64") return {};
     std::vector<std::string> packages;
     try {
@@ -766,7 +877,7 @@ json::object setup_camoufox(const Config &config, bool approved) {
                         {"browser_backend", config.browser_backend},
                         {"fpgen_model", std::move(model_record)},
                         {"note", "Run accounts probe and an actual generation to verify Google access"}};
-    if (auto system = prepare_camoufox_system(approved); !system.empty())
+    if (auto system = prepare_camoufox_system(root, approved); !system.empty())
         result["system_packages"] = std::move(system);
 
     // Neither browser_executable nor a bundle is installed; both are verified.
@@ -931,41 +1042,9 @@ json::object setup_cloakbrowser(Config &config, bool approved) {
         command.insert(command.end(), packages.begin(), packages.end());
         checked_process(command);
     } else if (system == "termux-arm64") {
-        checked_process({"pkg", "install", "-y", "proot-distro"});
-        auto created = root / "proot-owned.json";
-        if (!termux_container_exists()) {
-            atomic_write(created, "{\"version\":1,\"phase\":\"creating\"}", true);
-            checked_process(
-                {"proot-distro", "install", "ubuntu:24.04", "--name", "ais2api-browser"});
-        } else if (!fs::exists(created))
-            throw Error(409, "unknown_container",
-                        "Existing ais2api-browser container has no ownership marker");
-        checked_process({"proot-distro", "login", "ais2api-browser", "--", "apt-get", "update"});
-        checked_process({"proot-distro",
-                         "login",
-                         "ais2api-browser",
-                         "--",
-                         "apt-get",
-                         "install",
-                         "-y",
-                         "libnss3",
-                         "libnspr4",
-                         "libatk1.0-0t64",
-                         "libatk-bridge2.0-0t64",
-                         "libcups2t64",
-                         "libdrm2",
-                         "libxkbcommon0",
-                         "libxcomposite1",
-                         "libxdamage1",
-                         "libxfixes3",
-                         "libxrandr2",
-                         "libgbm1",
-                         "libasound2t64",
-                         "libgtk-3-0t64",
-                         "fonts-noto-cjk",
-                         "fonts-noto-color-emoji",
-                         "ca-certificates"});
-        atomic_write(created, "{\"version\":1,\"phase\":\"ready\"}", true);
+        prepare_termux_container(root);
+        install_container_packages(linux_runtime_packages(container_os_release));
+        mark_termux_container_ready(root);
     }
     if (auto bundle = bundled_browser(Config::default_directory()); !bundle.empty()) {
         stage("bundle-check");
@@ -1025,7 +1104,7 @@ json::object setup_cloakbrowser(Config &config, bool approved) {
              data = fs::absolute(config.data_dir).string();
         auto text = "#!" + std::string(prefix) + "/bin/sh\nexec proot-distro login --bind " +
                     sh_quote(target_string + ":" + target_string) + " --bind " +
-                    sh_quote(data + ":" + data) + " ais2api-browser -- " +
+                    sh_quote(data + ":" + data) + " " + std::string(termux_container) + " -- " +
                     sh_quote(fs::absolute(executable).string()) + " \"$@\"\n";
         atomic_write(launcher, text, true);
 #ifndef _WIN32
