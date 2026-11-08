@@ -35,6 +35,8 @@
 | `-BrowserBundleDirectory PATH` | 打包本地浏览器，见下文 |
 | `-SkipTests` | 跳过测试 |
 
+`build.ps1` 和 `build.sh` 只做正式版构建：构建目录如果已经被配置为开发版（见 [构建开发版](#构建开发版)），脚本会报错退出。
+
 项目与 vcpkg triplet 都使用 `/MT` 静态运行库，运行包不依赖单独安装的 MSVC 运行库。
 
 也可以使用 CMake 预设（需先在 `.tools/vcpkg` 准备固定版本的 vcpkg）：
@@ -201,7 +203,7 @@ Linux 可执行文件依赖目标系统的 ABI：Ubuntu 构建的程序不保证
 python3 scripts/check-package.py PATH_TO_ARCHIVE
 ```
 
-在不解压的情况下检查必需的运行文件、依赖许可证、SHA-256，以及是否混入已知的私有或构建路径。需要 Python 3.11+（仅开发使用）。
+在不解压的情况下检查必需的运行文件、依赖许可证、SHA-256，以及是否混入已知的私有或构建路径；可执行文件必须是正式版构建，包中不能含有 Camoufox。需要 Python 3.11+（仅开发使用）。
 
 ## 便携数据与本地浏览器包
 
@@ -232,6 +234,28 @@ python scripts/check-package.py --with-browser build/windows/packages/*Browser-L
 - 同时保留两种运行包时请使用不同的构建目录。CMake 的等价参数为 `-DAIS2API_BROWSER_BUNDLE_DIR=/absolute/clean/staged/runtime`。
 - 配置和安装阶段会校验浏览器目录的完整文件清单；CPack 只包含该浏览器目录，并在归档名后加 `-Browser-Local`。含有资料目录、配置或下载缓存的目录会被拒绝，运行时数据库和 API Key 不会被打包。
 - `init` 与 `start` 会自动使用程序旁的锁定浏览器；`setup` 可以校验每个文件并准备系统库。打包浏览器并不能免除 Linux 的系统依赖，也不会登录 Google。
+- `Browser-Local` 不能与开发版同时构建，将随 CloakBrowser 退役一起删除。
+
+### 构建开发版
+
+开发版（CMake 选项 `AIS2API_DEV_BUNDLE`）嵌入 fpgen 模型，并附带锁定版本的 Camoufox，解压后不用再运行 `setup` 下载，新建的配置默认使用 `camoufox` 后端。开发版只在本机构建，供本人或内部使用，**不要作为公开发行附件上传**。目前只有 Windows x64：
+
+```powershell
+./scripts/build-dev.ps1 -Proxy http://127.0.0.1:7890   # 不需要代理时省略 -Proxy
+```
+
+脚本依次完成：
+
+1. 下载 `runtime-manifest.json` 锁定的 fpgen 模型并逐个文件核对，放在 `build/windows-dev/dev-bundle/fpgen/`；
+2. 以 `-DAIS2API_DEV_BUNDLE=ON` 配置并构建（默认嵌入 WebUI，`-SkipWebUI` 跳过）；
+3. 用刚构建的程序运行 `setup`，把 Camoufox 安装到 `build/windows-dev/dev-bundle/data/`，裁剪方式与正式版相同，并在无界面模式下用本地页面验证。第一次运行要下载约 1.3 GB，之后复用已经装好的版本；
+4. 运行 CTest（`-SkipTests` 跳过）并安装；
+5. 用一份全新的配置运行安装目录中的 `doctor`，确认使用打包的 Camoufox 和嵌入的模型，不需要 `setup`；
+6. 生成 `build/windows-dev/packages/ais2api-<版本>-Windows-AMD64-Dev.zip`，并用 `check-package.py --dev` 检查。
+
+其余参数与 `build.ps1` 相同（`-BuildDirectory`、`-VcpkgRoot`、`-Configuration`、`-Triplet`、`-Jobs`）。开发版必须使用单独的构建目录：脚本拒绝已配置为正式版的目录，`build.ps1` 也拒绝开发版的目录。
+
+Camoufox 位于运行包的 `bin/camoufox-runtime/<版本>-<平台>/`。`doctor` 的 `build_mode` 为 `dev`，`camoufox.source` 为 `bundle`，`fpgen_model.source` 为 `embedded`。
 
 ## 持续集成
 

@@ -75,6 +75,33 @@ TEST_CASE("the runtime manifest pins the fpgen model", "[setup]") {
           model("a", url, std::string(64, 'A'), "a"), model("a", url, digest, "a/b"), json::object{}})
         CHECK_THROWS_AS(fpgen_model_pin(manifest), Error);
 }
+TEST_CASE("only a dev bundle embeds the pinned fpgen model", "[setup]") {
+    Directory d;
+    Config config;
+    config.data_dir = d.root;
+    config.browser_backend = "camoufox";
+    const auto pin = fpgen_model_pin();
+    const auto model = doctor(config).at("fpgen_model").as_object();
+#ifdef AIS2API_DEV_BUNDLE
+    CHECK(fpgen_model_embedded(pin));
+    REQUIRE_NOTHROW(load_fpgen_model(d.root, pin));
+    CHECK(string_or(model, "source") == "embedded");
+    CHECK(string_or(model, "state") == "installed");
+    CHECK_FALSE(model.contains("directory"));
+#else
+    CHECK_FALSE(fpgen_model_embedded(pin));
+    CHECK_THROWS_AS(load_fpgen_model(d.root, pin), Error);
+    CHECK(string_or(model, "source") == "setup");
+    CHECK(string_or(model, "state") == "missing");
+#endif
+    // Another model than the embedded one is setup's to install.
+    auto other = pin;
+    other.tag = "model-9/2030";
+    CHECK_FALSE(fpgen_model_embedded(other));
+    other = pin;
+    other.file_sha256.begin()->second = std::string(64, 'a');
+    CHECK_FALSE(fpgen_model_embedded(other));
+}
 TEST_CASE("setup installs the pinned fpgen model and leaves other directories alone", "[setup]") {
     Directory d;
     // A model fpgen loads, archived as a release is.
@@ -96,6 +123,7 @@ TEST_CASE("setup installs the pinned fpgen model and leaves other directories al
     CHECK(entries(directory) == 4);  // the three files and the marker
     CHECK(entries(directory.parent_path()) == 1);
     REQUIRE_NOTHROW(fpgen::Model::load(directory, pin.file_sha256));
+    REQUIRE_NOTHROW(load_fpgen_model(d.root, pin));
 
     // A damaged model, or another release under the same tag, is replaced.
     std::ofstream(directory / "values.dat.zst", std::ios::binary) << "x";
@@ -330,6 +358,7 @@ TEST_CASE("doctor tells the launcher when Camoufox needs setup", "[setup]") {
     config.data_dir = d.root;
     config.browser_backend = "camoufox";
     auto result = doctor(config);
+    CHECK(string_or(result, "build_mode") == build_mode());
     CHECK_FALSE(bool_or(result, "browser_configured"));
     CHECK_FALSE(bool_or(result, "browser_exists"));
     CHECK(string_or(result.at("camoufox").as_object(), "source").empty());
@@ -346,6 +375,61 @@ TEST_CASE("doctor tells the launcher when Camoufox needs setup", "[setup]") {
     // Version 1.0 is not the pinned one where this platform pins Camoufox.
     CHECK(bool_or(camoufox, "setup_needed") == camoufox_pin().has_value());
     CHECK_FALSE(bool_or(camoufox, "held"));
+    CHECK_FALSE(camoufox.contains("bundle"));
+}
+TEST_CASE("the Camoufox bundled beside the program comes before setup's", "[setup]") {
+    const auto pin = camoufox_pin();
+    if (!pin) return;  // This platform pins no Camoufox yet.
+    Directory d;
+    const auto program = d.root / "bin";
+    Config config;
+    config.data_dir = program / "data";
+    config.browser_backend = "camoufox";
+    const auto bundle = camoufox_bundle_directory(program, *pin);
+    CHECK(bundle == program / "camoufox-runtime" / (pin->version + "-" + pin->platform));
+    fake_camoufox(config.data_dir, "1.0");
+    select_camoufox(config.data_dir, "1.0-windows-x64");
+    CHECK(camoufox_executable(config, program).source == "setup");
+
+    // A dev bundle carries the pinned build as setup installs it.
+    const auto archive = d.root / "camoufox.zip";
+    make_archive(archive,
+                 {{camoufox_program, "exe"}, {"application.ini", application_ini(pin->version)},
+                  {"properties.json", "[]"}, {"fonts/001__Arial.ttf", "font"}},
+                 true);
+    install_camoufox(archive, bundle, *pin);
+    const auto found = camoufox_executable(config, program);
+    CHECK(found.source == "bundle");
+    CHECK(found.path == bundle / camoufox_program);
+    auto result = doctor(config, program);
+    CHECK(string_or(result, "program_directory") == path_utf8(program));
+    auto camoufox = result.at("camoufox").as_object();
+    CHECK(string_or(camoufox, "source") == "bundle");
+    CHECK_FALSE(bool_or(camoufox, "setup_needed"));
+    CHECK(string_or(camoufox.at("bundle").as_object(), "state") == "installed");
+    // It ships with the program: rolling back means the previous package.
+    try {
+        rollback_runtime(config, program);
+        FAIL("a rollback replaced the bundled Camoufox");
+    } catch (const Error &error) {
+        CHECK(error.code == "bundled_runtime");
+    }
+    config.browser_executable = d.root / "build" / "camoufox.exe";
+    CHECK(camoufox_executable(config, program).source == "browser_executable");
+    config.browser_executable.clear();
+
+    // One trimmed under other rules, or damaged, is passed over.
+    auto owner = json::parse(read_file(bundle / ".ais2api-runtime.json")).as_object();
+    owner["kept"] = json::array{};
+    atomic_write(bundle / ".ais2api-runtime.json", json::serialize(owner));
+    CHECK(camoufox_executable(config, program).source == "setup");
+    camoufox = doctor(config, program).at("camoufox").as_object();
+    CHECK(string_or(camoufox, "source") == "setup");
+    CHECK(string_or(camoufox.at("bundle").as_object(), "state") == "damaged");
+    install_camoufox(archive, bundle, *pin);
+    CHECK(camoufox_executable(config, program).source == "bundle");
+    fs::remove(bundle / "application.ini");
+    CHECK(camoufox_executable(config, program).source == "setup");
 }
 TEST_CASE("Linux setup accepts exact supported os-release identities", "[setup]") {
     auto debian = linux_runtime_packages("PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\n"

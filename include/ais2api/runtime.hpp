@@ -10,6 +10,9 @@
 #include <memory>
 #include <optional>
 namespace ais2api {
+namespace fpgen {
+class Model;
+}
 fs::path executable_path();
 int run_process(const std::vector<std::string> &args);
 void spawn_service(const Config &config);
@@ -38,8 +41,8 @@ class GenerationBackend;
 int serve_with_backend(Config config, std::unique_ptr<GenerationBackend> backend);
 json::object setup_runtime(Config &config, bool approve_system_changes = false);
 std::vector<std::string> linux_runtime_packages(std::string_view os_release);
-json::object doctor(const Config &config);
-json::object rollback_runtime(Config &config);
+json::object doctor(const Config &config, const fs::path &program_directory = Config::default_directory());
+json::object rollback_runtime(Config &config, const fs::path &program_directory = Config::default_directory());
 void download_verified(std::string_view url, const fs::path &destination, std::string_view digest,
                        std::string_view proxy = {}, std::uint64_t expected_size = 0);
 // `keep`, when given, names the entries (by their '/'-separated path) that
@@ -62,6 +65,10 @@ fs::path fpgen_model_directory(const fs::path &data_dir, const FpgenModelPin &pi
 std::string fpgen_model_state(const fs::path &directory, const FpgenModelPin &pin);
 // Installs the model from its downloaded archive, replacing a damaged one.
 void install_fpgen_model(const fs::path &archive, const fs::path &directory, const FpgenModelPin &pin);
+// Whether a dev bundle embeds this pin's model. setup then installs none.
+bool fpgen_model_embedded(const FpgenModelPin &pin);
+// The pin's model: the embedded one, else setup's install under `data_dir`.
+fpgen::Model load_fpgen_model(const fs::path &data_dir, const FpgenModelPin &pin);
 // The Camoufox build the Camoufox backend runs, pinned per platform by
 // runtime-manifest.json and installed by setup.
 struct CamoufoxPin {
@@ -96,14 +103,19 @@ CamoufoxSelection camoufox_selection(const fs::path &data_dir);
 void select_camoufox(const fs::path &data_dir, const std::string &name);
 // Swaps current and previous, and holds the result.
 void hold_previous_camoufox(const fs::path &data_dir);
+// <program_directory>/camoufox-runtime/<version>-<platform>: the Camoufox a
+// dev bundle carries, laid out as setup installs it.
+fs::path camoufox_bundle_directory(const fs::path &program_directory, const CamoufoxPin &pin);
 // The executable the Camoufox backend runs: browser_executable when it names
-// Camoufox ("browser_executable"), else the current install ("setup"). The
-// path is empty when there is neither.
+// Camoufox ("browser_executable"), else the pinned build bundled beside the
+// program ("bundle"), else setup's current install ("setup"). The path is
+// empty when there is none.
 struct CamoufoxExecutable {
     fs::path path;
     std::string source;
 };
-CamoufoxExecutable camoufox_executable(const Config &config);
+CamoufoxExecutable camoufox_executable(const Config &config,
+                                       const fs::path &program_directory = Config::default_directory());
 std::string fetch_public_media(std::string_view url, std::size_t limit, std::string_view proxy = {},
                                std::stop_token cancel = {});
 } // namespace ais2api

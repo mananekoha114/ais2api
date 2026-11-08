@@ -68,7 +68,17 @@ void restrict_access(const fs::path &path, bool directory) {
         throw Error(500, "permissions", "Cannot protect data path");
 #endif
 }
+// scripts/check-package.py looks for the whole tag in the executable.
+#ifdef AIS2API_DEV_BUNDLE
+constexpr char build_tag[] = "ais2api-build-mode=dev";
+#else
+constexpr char build_tag[] = "ais2api-build-mode=release";
+#endif
 } // namespace
+std::string_view build_mode() {
+    const std::string_view tag(build_tag);
+    return tag.substr(tag.find('=') + 1);
+}
 std::string random_hex(std::size_t bytes) {
     if (bytes > 1024)
         throw Error(500, "random", "Invalid random request");

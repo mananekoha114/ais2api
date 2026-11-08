@@ -172,6 +172,33 @@ TEST_CASE("fpgen reads values in one pass over values.dat", "[fpgen]") {
     CHECK_THROWS(model.values({3}));
 }
 
+TEST_CASE("fpgen loads a model from its files' bytes as from its directory", "[fpgen]") {
+    Fixture fixture;
+    const auto a = fixture.add(R"("a")"), b = fixture.add(R"("b")");
+    const auto from_directory = fixture.load({node("V", {}, codes({a, b}), table({{a, 0.25}, {b, 0.75}}))});
+    std::map<std::string, std::string> contents;
+    for (const auto &[name, digest] : fixture.sha256s) contents[name] = read_file(fixture.directory.path / name);
+    const std::map<std::string, std::string_view> files(contents.begin(), contents.end());
+    const auto from_bytes = Model::load(files, fixture.sha256s);
+    const auto node = from_bytes.node("V");
+    REQUIRE(node);
+    CHECK(from_bytes.trace(*node, {}) == from_directory.trace(*node, {}));
+    CHECK(from_bytes.values({a, b}) == from_directory.values({a, b}));
+
+    auto altered = contents;
+    altered["values.json.zst"] += "x";
+    CHECK_THROWS_AS(Model::load(std::map<std::string, std::string_view>(altered.begin(), altered.end()), fixture.sha256s),
+                    Error);
+    auto missing = files;
+    missing.erase("values.dat.zst");
+    try {
+        Model::load(missing, fixture.sha256s);
+        FAIL("a model without values.dat loaded");
+    } catch (const Error &error) {
+        CHECK(error.code == "browser_not_configured");
+    }
+}
+
 TEST_CASE("fpgen refuses missing, altered and malformed models", "[fpgen]") {
     Fixture fixture;
     const auto v = fixture.add("1");

@@ -240,7 +240,7 @@ const reloadConfig = () => action('reload', () => api.post('/config/reload'), '�
       </section>
 
       <p v-if="status" class="t-caption t-tertiary footer-meta">
-        ais2api {{ status.version }} · 日志 {{ status.logging_healthy ? '正常' : '积压' }} · 状态每 5 秒刷新
+        ais2api {{ status.version }}{{ status.build_mode === 'dev' ? '（开发版）' : '' }} · 日志 {{ status.logging_healthy ? '正常' : '积压' }} · 状态每 5 秒刷新
       </p>
     </div>
   </div>

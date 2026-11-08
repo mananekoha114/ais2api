@@ -79,6 +79,8 @@ TEST_CASE("browser DevTools origins and site isolation keep Chromium defaults an
 }
 TEST_CASE("browser backend defaults to CloakBrowser, accepts Camoufox and needs a restart", "[config][admin][browser]") {
     AdminDirectory dir;
+    // A file that names no backend; a new one starts on the build's backend.
+    atomic_write(dir.path / "config.json", R"({"version":1})");
     auto cfg = Config::load(dir.path / "config.json");
     CHECK(Config{}.browser_backend == "cloakbrowser");
     CHECK(cfg.browser_backend == "cloakbrowser");
@@ -256,6 +258,23 @@ TEST_CASE("new configurations start with the default management password", "[con
     // The default can never be configured again through a patch.
     CHECK_THROWS_AS(reloaded.patched({{"admin_key", "admin"}}), Error);
     CHECK(reloaded.patched({{"admin_key", "replacement-admin"}}).admin_key == "replacement-admin");
+}
+TEST_CASE("new configurations start with the build's browser backend", "[config]") {
+#ifdef AIS2API_DEV_BUNDLE
+    CHECK(build_mode() == "dev");
+    const std::string backend = "camoufox";
+#else
+    CHECK(build_mode() == "release");
+    const std::string backend = "cloakbrowser";
+#endif
+    AdminDirectory dir;
+    auto fresh = Config::load(dir.path / "config.json");
+    CHECK(fresh.browser_backend == backend);
+    fresh.save();
+    CHECK(Config::load(fresh.config_file).browser_backend == backend);
+    // A file that names no backend keeps CloakBrowser in every build.
+    atomic_write(fresh.config_file, R"({"version":1})");
+    CHECK(Config::load(fresh.config_file).browser_backend == "cloakbrowser");
 }
 TEST_CASE("management password replacement policy", "[config][admin]") {
     CHECK_NOTHROW(validate_admin_password("strong-password-1", "admin"));

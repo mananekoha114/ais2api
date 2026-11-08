@@ -13,6 +13,7 @@ import { formatBytes, formatDuration } from '../utils/format'
 
 interface Diagnostics {
   version?: string
+  build_mode?: 'release' | 'dev'
   status?: Status
   config?: ConfigView
   stats?: { records?: unknown[] }
@@ -115,6 +116,10 @@ const capabilityList = computed(() =>
           <h3>运行时</h3>
           <div class="card info-grid">
             <div><span class="t-caption t-secondary">版本</span><strong>{{ data.version ?? '—' }}</strong></div>
+            <div>
+              <span class="t-caption t-secondary">构建</span>
+              <strong>{{ data.build_mode === 'dev' ? '开发版' : data.build_mode === 'release' ? '正式版' : '—' }}</strong>
+            </div>
             <div><span class="t-caption t-secondary">管理 API</span><strong>{{ capabilities?.api_version ?? 'v1' }}</strong></div>
             <div><span class="t-caption t-secondary">运行时间</span><strong>{{ formatDuration(data.status?.uptime_seconds) }}</strong></div>
             <div>

@@ -72,13 +72,17 @@ ais2api stop      停止服务
     - 解压时跳过自带的字体和 uBlock Origin：身份总是呈现本机 OS，这时 Camoufox 只用系统字体，外加 Firefox 本身也带的 emoji 字体 `TwemojiMozilla.ttf`（保留）；uBlock Origin 从不加载；
     - 无界面验证通过后才切换为当前版本，并删除下载的压缩包；
     - `browser_executable` 指向 Camoufox（`camoufox[.exe]`）时不下载，只验证该程序。
+  - [开发版](platforms.md#构建开发版)嵌入了模型、附带了 Camoufox，`setup` 两样都不下载，只验证打包的 Camoufox。
+- Camoufox 的使用顺序：指向 Camoufox 的 `browser_executable`；开发版打包在程序旁 `camoufox-runtime/<版本>-<平台>/` 中的锁定版本；`setup` 安装的当前版本。
 - `camoufox` 后端的 `doctor`：
-  - 显示模型状态：`installed`、`missing`、`damaged`，或不是 `setup` 创建的 `foreign`；
-  - 显示 Camoufox 的来源、当前版本、上一版本和锁定版本；
-  - 当前版本不是锁定版本，或锁定版本的安装与本程序的解压规则不符时，`camoufox.setup_needed` 为 true、`browser_exists` 为 false，因此程序升级后启动脚本会自动运行 `setup`。
+  - `build_mode` 为 `release` 或 `dev`（开发版）；
+  - 显示模型的来源（`setup` 或开发版的 `embedded`）和状态：`installed`、`missing`、`damaged`，或不是 `setup` 创建的 `foreign`；
+  - 显示 Camoufox 的来源（`browser_executable`、`bundle` 或 `setup`）、当前版本、上一版本和锁定版本；程序旁有打包目录时，`camoufox.bundle` 给出它的位置和状态；
+  - 使用 `setup` 安装的版本时，如果当前版本不是锁定版本，或锁定版本的安装与本程序的解压规则不符，`camoufox.setup_needed` 为 true、`browser_exists` 为 false，因此程序升级后启动脚本会自动运行 `setup`。
 - `camoufox` 后端会保留上一个 Camoufox：
   - `browser rollback` 退回上一版本并保持，启动脚本不再自动升级；
-  - `browser update` 重新安装锁定版本，并解除保持。
+  - `browser update` 重新安装锁定版本，并解除保持；
+  - 使用开发版打包的 Camoufox 时，`browser rollback` 返回 409 `bundled_runtime`：要退回请换用上一个开发版包，或让 `browser_executable` 指向另一个 Camoufox。
 
 ### 一键启动脚本
 

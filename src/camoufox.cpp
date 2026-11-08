@@ -481,7 +481,7 @@ struct CamoufoxGateway::Impl {
                 throw Error(503, "browser_not_configured", std::string("The fpgen model is not pinned: ") + error.what());
             }
             // Before any launch, so a missing model fails fast.
-            const auto model = fpgen::Model::load(fpgen_model_directory(config.data_dir, pin), pin.file_sha256);
+            const auto model = load_fpgen_model(config.data_dir, pin);
             auto machine = firefox_identity::local_host();
             machine.gpu = host_gpu(token);
             const auto generated = firefox_identity::generate(model, pin.tag, machine,

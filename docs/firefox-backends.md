@@ -105,11 +105,18 @@ CMake 选项 `AIS2API_DEV_BUNDLE` 区分开发版与正式分发版，默认关�
 
 | | 开发版（开启） | 正式分发版（关闭） |
 |---|---|---|
+| 构建方式 | `scripts/build-dev.ps1` 在本机构建 | `scripts/build.ps1`、`scripts/build.sh` 与 CI |
 | 身份 | 本机生成（与正式版相同） | 本机生成 |
 | fpgen 模型 | 嵌入 | `setup` 下载 |
-| Camoufox | 可以一起打包 | `setup` 下载 |
+| Camoufox | 一起打包，放在 `bin/camoufox-runtime/<版本>-<平台>/` | `setup` 下载 |
+| 新建配置的后端 | `camoufox` | `cloakbrowser` |
 
-打包与检查脚本（`scripts/check-package.py`、`scripts/build.ps1`、`scripts/build.sh` 的发布流程）遇到开启状态的构建，拒绝生成正式分发包；诊断信息显示当前构建模式。现有的 `Browser-Local` 包由该开关取代。
+- 开发版目前只有 Windows x64；Linux 版脚本在 Linux 阶段加入。构建方法见 [构建与打包](platforms.md#构建开发版)。
+- 打包的 Camoufox 是刚构建的程序用 `setup` 安装后原样复制的，裁剪方式和归属标记都与 `setup` 的安装相同。只有它是锁定版本、且按本程序的规则裁剪时才使用。使用顺序：指向 Camoufox 的 `browser_executable`、打包版、`setup` 的安装。使用打包版时 `browser rollback` 不可用，要退回就换回上一个开发版包。
+- 已有的配置保持原来的后端：账号换成 Firefox 身份始终要显式操作。
+- 防止误发：`build.ps1` 和 `build.sh` 拒绝开启了该选项的构建目录；`check-package.py` 要求正式分发包里是正式版构建、且不含 Camoufox，开发版包用 `--dev` 检查。
+- 诊断信息、`/version`、`doctor` 和 WebUI 都显示构建模式（`build_mode`：`release` 或 `dev`）。
+- CloakBrowser 的 `Browser-Local` 包不能与开发版同时构建，它随 CloakBrowser 退役一起删除；打包 Camoufox 只用开发版。
 
 ## 合并标准与问题反馈
 

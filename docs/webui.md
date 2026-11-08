@@ -29,7 +29,7 @@ GitHub CI 的 Windows、Ubuntu、Debian 与 Termux 运行包均启用 WebUI。
 | `/stats` | 用量统计 | 统计概览、逐次请求记录与 USD 估算费用 |
 | `/logs` | 日志 | 全部日志来源的历史与实时流 |
 | `/config` | 服务配置 | 网络、浏览器与存储、API 兼容性、限额等 |
-| `/diagnostics` | 诊断 | 浏览器适配阶段、当前指纹、模型发现、Cookie 写回状态，导出脱敏快照 |
+| `/diagnostics` | 诊断 | 构建模式（正式版或开发版）、浏览器适配阶段、当前指纹、模型发现、Cookie 写回状态，导出脱敏快照 |
 | `/settings` | 设置 | 外观与连接偏好（仅保存在当前浏览器）、修改管理密码 |
 
 控制台通过同源的 `/api/admin/v1` 调用管理 API，无需配置跨域来源。

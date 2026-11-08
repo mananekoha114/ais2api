@@ -48,6 +48,11 @@ case "$jobs" in ''|*[!0-9]*|0) echo '--jobs must be positive.' >&2; exit 2 ;; es
 cd "$project"
 [ -n "$build_dir" ] || build_dir="$project/build/$target"
 case "$build_dir" in /*) ;; *) build_dir="$project/$build_dir" ;; esac
+# Release archives never come from a dev build (scripts/build-dev.ps1).
+if [ -f "$build_dir/CMakeCache.txt" ] && grep -qx 'AIS2API_DEV_BUNDLE:BOOL=ON' "$build_dir/CMakeCache.txt"; then
+  echo "$build_dir holds a dev build; use another --build-dir." >&2
+  exit 1
+fi
 build_type=${BUILD_TYPE:-Release}
 need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing build tool: $1" >&2; exit 1; }; }
 # GitHub occasionally times out (HTTP 408) on large partial-clone fetches.
@@ -94,7 +99,7 @@ if [ "$target" = termux ]; then
     cmake --install "$deps/catch2-build"
     prefix_path="$deps/catch2-install;$PREFIX"
   fi
-  cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DAIS2API_BUILD_WEBUI="$webui" -DCMAKE_PREFIX_PATH="$prefix_path" -DCMAKE_CXX_COMPILER="${CXX:-clang++}" -DCMAKE_INSTALL_PREFIX="$build_dir/install"
+  cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DAIS2API_BUILD_WEBUI="$webui" -DAIS2API_DEV_BUNDLE=OFF -DCMAKE_PREFIX_PATH="$prefix_path" -DCMAKE_CXX_COMPILER="${CXX:-clang++}" -DCMAKE_INSTALL_PREFIX="$build_dir/install"
 else
   [ "$(uname -m)" = x86_64 ] || { echo 'This desktop preset targets Linux x86_64.' >&2; exit 1; }
   [ "$packages" -eq 0 ] || { echo 'Install Linux build prerequisites using your OS package manager; see docs/platforms.md.' >&2; exit 2; }
@@ -110,7 +115,7 @@ else
   actual=$(git -C "$vcpkg_root" rev-parse HEAD)
   [ "$actual" = "$baseline" ] || { echo 'VCPKG_ROOT must match the manifest baseline; existing checkout was left unchanged.' >&2; exit 1; }
   [ -f "$vcpkg_root/vcpkg" ] || "$vcpkg_root/bootstrap-vcpkg.sh" -disableMetrics
-  cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DAIS2API_SANITIZE="$sanitize" -DAIS2API_BUILD_FUZZER="$fuzz" -DAIS2API_BUILD_WEBUI="$webui" -DCMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-linux -DCMAKE_INSTALL_PREFIX="$build_dir/install" -DAIS2API_BROWSER_BUNDLE_DIR="$browser_bundle"
+  cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DAIS2API_SANITIZE="$sanitize" -DAIS2API_BUILD_FUZZER="$fuzz" -DAIS2API_BUILD_WEBUI="$webui" -DAIS2API_DEV_BUNDLE=OFF -DCMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-linux -DCMAKE_INSTALL_PREFIX="$build_dir/install" -DAIS2API_BROWSER_BUNDLE_DIR="$browser_bundle"
 fi
 cmake --build "$build_dir" --parallel "$jobs"
 if [ "$testing" = ON ]; then ctest --test-dir "$build_dir" --output-on-failure; fi

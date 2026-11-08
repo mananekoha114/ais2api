@@ -3095,6 +3095,12 @@
           "version": {
             "type": "string"
           },
+          "build_mode": {
+            "enum": [
+              "release",
+              "dev"
+            ]
+          },
           "active_generation_account_id": {
             "type": [
               "string",
