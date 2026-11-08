@@ -8,11 +8,12 @@
 
   python scripts/camoufox-dev.py venv
       Create .tools/camoufox-venv with the pinned camoufox Python package.
-  python scripts/camoufox-dev.py fetch
-      Download the Windows x64 Camoufox build runtime-manifest.json pins into
-      .tools/camoufox/<tag>/, verify it and print its executable. Unlike the
-      install setup makes, it keeps the bundled fonts: the hidden
-      [.camoufox-fonts] test compares the two.
+  python scripts/camoufox-dev.py fetch [--platform windows-x64|linux-x64|linux-arm64]
+      Download the Camoufox build runtime-manifest.json pins for this machine
+      into .tools/camoufox/<tag>/ (another platform's into <tag>-<platform>/),
+      verify it and print its executable. Unlike the install setup makes, it
+      keeps all the bundled fonts: the hidden [.camoufox-fonts] test compares
+      the two.
   .tools/camoufox-venv/Scripts/python.exe -I scripts/camoufox-dev.py catalog
       Copy the identity catalogues ais2api embeds (fonts, voices, media devices,
       launcher constants) from the pinned camoufox package into browser/camoufox/.
@@ -37,6 +38,7 @@ import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import platform
 import shutil
 import subprocess
 import sys
@@ -49,13 +51,9 @@ REPO = Path(__file__).resolve().parent.parent
 TOOLS = REPO / '.tools'
 VENV = TOOLS / 'camoufox-venv'
 CAMOUFOX_PYTHON = '0.5.9'  # pins TAG in its browser-pin.json
-# The Camoufox build setup installs, as runtime-manifest.json pins it.
+# The Camoufox builds setup installs, as runtime-manifest.json pins them.
 MANIFEST = json.loads((REPO / 'runtime-manifest.json').read_text(encoding='utf-8'))
 TAG = 'v' + MANIFEST['camoufox']['version']
-URL = MANIFEST['camoufox']['artifacts']['windows-x64']['url']
-ASSET = URL.rsplit('/', 1)[1]
-ASSET_SHA256 = MANIFEST['camoufox']['artifacts']['windows-x64']['sha256']
-ASSET_SIZE = MANIFEST['camoufox']['artifacts']['windows-x64']['size']
 RELEASE = 'release.json'
 INT32 = (-2**31, 2**31 - 1)
 CATALOG = REPO / 'browser' / 'camoufox'
@@ -78,6 +76,18 @@ def venv(_args):
     print(python)
 
 
+def host_platform():
+    machine = platform.machine().lower()
+    if os.name == 'nt':
+        return 'windows-x64'
+    return 'linux-arm64' if machine in ('aarch64', 'arm64') else 'linux-x64'
+
+
+def program(key):
+    """The browser executable in a build for the platform `key`, as setup runs it."""
+    return 'camoufox.exe' if key == 'windows-x64' else 'camoufox-bin'
+
+
 def safe_member(name):
     path = PurePosixPath(name)
     if '\\' in name or ':' in name or '\x00' in name or path.is_absolute() or '..' in path.parts:
@@ -85,13 +95,14 @@ def safe_member(name):
     return path
 
 
-def download(target, segments=8):
+def download(artifact, target, segments=8):
     # Parallel ranges, each resumed after an early end: a single long download
     # from GitHub's storage can crawl or end without an error.
+    url, size = artifact['url'], artifact['size']
     partial = target.with_name(target.name + '.part')
     with open(partial, 'wb') as output:
-        output.truncate(ASSET_SIZE)
-    bounds = [(i * ASSET_SIZE // segments, (i + 1) * ASSET_SIZE // segments) for i in range(segments)]
+        output.truncate(size)
+    bounds = [(i * size // segments, (i + 1) * size // segments) for i in range(segments)]
     received = [0] * segments
     lock = threading.Lock()
     shown = [0]
@@ -103,7 +114,7 @@ def download(target, segments=8):
                 position = start + received[index]
                 if position >= end:
                     return
-                request = urllib.request.Request(URL, headers={'Range': f'bytes={position}-{end - 1}'})
+                request = urllib.request.Request(url, headers={'Range': f'bytes={position}-{end - 1}'})
                 try:
                     with urllib.request.urlopen(request, timeout=60) as response:
                         if response.status != 206:
@@ -114,44 +125,50 @@ def download(target, segments=8):
                             output.write(block)
                             with lock:
                                 received[index] += len(block)
-                                step = sum(received) * 20 // ASSET_SIZE
+                                step = sum(received) * 20 // size
                                 if step > shown[0]:
                                     shown[0] = step
-                                    print(f'{step * 5}% of {ASSET_SIZE // (1024 * 1024)} MiB', file=sys.stderr)
+                                    print(f'{step * 5}% of {size // (1024 * 1024)} MiB', file=sys.stderr)
                 except OSError as error:
                     print(f'segment {index} interrupted at {start + received[index]}: {error}', file=sys.stderr)
 
     with ThreadPoolExecutor(segments) as pool:
         list(pool.map(segment, range(segments)))
-    if sum(received) != ASSET_SIZE or not verify(partial):
+    if sum(received) != size or not verify(artifact, partial):
         partial.unlink()
-        fail(f'{ASSET} did not download completely or does not match the pinned SHA-256 {ASSET_SHA256}')
+        fail(f'{target.name} did not download completely or does not match the pinned SHA-256 {artifact["sha256"]}')
     partial.replace(target)
 
 
-def verify(archive):
+def verify(artifact, archive):
     digest = hashlib.sha256()
     with open(archive, 'rb') as source:
         while block := source.read(1024 * 1024):
             digest.update(block)
-    return digest.hexdigest() == ASSET_SHA256
+    return digest.hexdigest() == artifact['sha256']
 
 
 def fetch(args):
-    root = Path(args.dir).resolve() / TAG
+    key = args.platform or host_platform()
+    artifact = MANIFEST['camoufox']['artifacts'].get(key)
+    if artifact is None:
+        fail(f'runtime-manifest.json pins no Camoufox for {key}')
+    asset = artifact['url'].rsplit('/', 1)[1]
+    # Another platform's build beside this machine's.
+    root = Path(args.dir).resolve() / (TAG if key == host_platform() else f'{TAG}-{key}')
     browser = root / 'browser'
     marker = root / RELEASE
     if browser.is_dir() and marker.exists():
         release = json.loads(marker.read_text(encoding='utf-8'))
-        if release.get('sha256') == ASSET_SHA256:
+        if release.get('sha256') == artifact['sha256']:
             print(browser / release['executable'])
             return
     root.mkdir(parents=True, exist_ok=True)
-    archive = Path(args.archive).resolve() if args.archive else root / ASSET
+    archive = Path(args.archive).resolve() if args.archive else root / asset
     if not archive.exists():
-        download(archive)
-    elif not verify(archive):
-        fail(f'{archive} does not match the pinned SHA-256 {ASSET_SHA256}')
+        download(artifact, archive)
+    elif not verify(artifact, archive):
+        fail(f'{archive} does not match the pinned SHA-256 {artifact["sha256"]}')
     # Extract into a fresh directory and move it into place once complete.
     staging = root / f'browser.{uuid.uuid4().hex[:8]}'
     staging.mkdir()
@@ -160,9 +177,15 @@ def fetch(args):
             for member in source.infolist():
                 safe_member(member.filename)
             source.extractall(staging)
-        executables = sorted(staging.rglob('camoufox.exe'), key=lambda path: len(path.parts))
+            # zipfile leaves out the permissions a Linux build's programs need.
+            if os.name != 'nt':
+                for member in source.infolist():
+                    mode = member.external_attr >> 16
+                    if mode and not member.is_dir():
+                        os.chmod(staging / member.filename, mode & 0o777)
+        executables = sorted(staging.rglob(program(key)), key=lambda path: len(path.parts))
         if not executables:
-            fail('camoufox.exe not found in ' + ASSET)
+            fail(f'{program(key)} not found in {asset}')
         if browser.exists():
             shutil.rmtree(browser)
         staging.replace(browser)
@@ -170,7 +193,7 @@ def fetch(args):
         shutil.rmtree(staging, ignore_errors=True)
         raise
     executable = executables[0].relative_to(staging)
-    marker.write_text(json.dumps({'tag': TAG, 'asset': ASSET, 'sha256': ASSET_SHA256, 'executable': executable.as_posix()}, indent=2) + '\n', encoding='utf-8')
+    marker.write_text(json.dumps({'tag': TAG, 'asset': asset, 'sha256': artifact['sha256'], 'executable': executable.as_posix()}, indent=2) + '\n', encoding='utf-8')
     if not args.archive and not args.keep_archive:
         archive.unlink()
     print(browser / executable)
@@ -188,7 +211,7 @@ def check_identities(args):
     if version('camoufox') != CAMOUFOX_PYTHON:
         fail(f'camoufox {version("camoufox")} is installed; this script is pinned to {CAMOUFOX_PYTHON}')
     executable = Path(args.executable).resolve()
-    if executable.stem.lower() != 'camoufox' or not executable.is_file():
+    if executable.stem.lower() not in ('camoufox', 'camoufox-bin') or not executable.is_file():
         fail(f'{executable} is not a camoufox executable')
     native = [json.loads(line) for line in Path(args.identities).read_text(encoding='utf-8').splitlines() if line.strip()]
     if not native:
@@ -305,6 +328,8 @@ def main():
     commands.add_parser('venv', help='create the camoufox Python environment').set_defaults(run=venv)
     command = commands.add_parser('fetch', help='download and unpack the pinned Camoufox build')
     command.add_argument('--dir', default=str(TOOLS / 'camoufox'))
+    command.add_argument('--platform', choices=('windows-x64', 'linux-x64', 'linux-arm64'),
+                         help='the build to fetch (default: this machine\'s)')
     command.add_argument('--archive', help='use an already downloaded archive')
     command.add_argument('--keep-archive', action='store_true')
     command.set_defaults(run=fetch)
