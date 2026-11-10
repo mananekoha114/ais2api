@@ -36,7 +36,10 @@
 ## 身份
 
 - **内容**：navigator、屏幕、字体、WebGL、语音、媒体设备、时区与语言。
-- **OS**：非 macOS 主机呈现宿主真实的 OS（Linux 主机呈现 Linux）。Camoufox 在 Linux 上伪装 Windows 时 canvas/WebGL 读回随机数据，本身就是特征；是否伪装 Windows 留到 Linux 阶段实测决定。
+- **OS**：非 macOS 主机呈现宿主真实的 OS（Linux 主机呈现 Linux），不伪装 Windows。
+  - Camoufox 在 Linux 上伪装 Windows 时 canvas/WebGL 读回随机数据，这本身就是特征。
+  - Linux 阶段在 CI 的 Ubuntu 24.04 x64 与 ARM64 上实测了呈现 Linux 的情况（Xvfb，软件渲染）：页面读数与身份一致；同一幅 canvas 和 WebGL 图案在一次启动中读两次、换一次启动再读，结果都相同；`check-identities` 的分布与启动器相近。
+  - 有硬件 GPU 的 Linux 主机留到测试阶段在真机上确认，包括 fpgen 没有记录这块 GPU、开启了 canvas 读回保护的情况。
 - **GPU**：按 Camoufox 官方启动器的做法，不带身份启动一次 Camoufox，在本地页面读出 WebGL 厂商与渲染器。读取时的显示模式和首选项与身份启动相同，每个进程只读一次。
   - fpgen 记录过这块 GPU：身份就声称它。
   - 是硬件 GPU 但没有记录：抽一块 GPU，并开启 canvas 读回保护。
@@ -94,6 +97,10 @@
       - 裁剪还去掉了完整版的一处泄漏：Firefox 递归启用自带的字体目录，完整版里其他 OS 的字体组也能被 Linux 身份读到（Camoufox 的 `FONTS.md` 记述了这一点，例如 Windows 的 Calibri 与 Cambria）。所以 Linux 上的 `[.camoufox-fonts]` 只要求有 Linux 字体的字体族、通用字体族与完整版一致，并且裁剪后不多出字体。CI 实测，差异只出现在没有 Linux 字体的名称上（Calibri、Cambria、Helvetica、Times、Palatino 等）。
   - **扩展**：不加载自带的 uBlock Origin，与现有的 `--disable-extensions` 一致，解压时就跳过 `addons/UBO`。
   - 开发版可以把 Camoufox 一起打包。
+  - **Termux**：
+    - Linux ARM64 版安装在 Termux 一侧，裁剪方式与 Linux 相同；
+    - 与 CloakBrowser 共用 proot 容器 `ais2api-browser`，`setup` 在容器内只安装缺少的包；
+    - 网关通过 `proot-distro login` 启动 Xvfb 和 Camoufox，把数据目录按原路径绑定进去。`proot-distro` 不传递宿主的环境变量，身份配置等都用 `--env` 传入，所以不需要 CloakBrowser 那样的启动脚本。
 
 ## SpiderMonkey 后端
 
@@ -145,6 +152,12 @@ CMake 选项 `AIS2API_DEV_BUNDLE` 区分开发版与正式分发版，默认关�
 
 P1 已于 2026-11-06 在 Windows 上用测试账号完成验证，见 [原型报告](reports/camoufox-prototype-2026-11-06.md)。
 
+P2 的各项已于 2026-11-08 实现（#19–#25），并按合并标准做了离线验证：
+- Windows：本机运行隐藏测试；
+- Linux x64 与 ARM64（含 Docker）、Termux ARM64：CI 的 `camoufox-runtime.yml` 用 `setup` 安装 Camoufox 并运行隐藏测试，全程只打开本地页面。
+
+接下来在 P3 开始前用真实账号统一验证。
+
 每项工作单独开分支、提 PR 到 main，由维护者审核合并。
 
 ## 低成本改进（独立推进）
@@ -170,7 +183,6 @@ P1 已于 2026-11-06 在 Windows 上用测试账号完成验证，见 [原型报
 | 事项 | 决定时机 |
 |---|---|
 | 新账号的默认后端 | SpiderMonkey 原型结果出来后 |
-| Linux 主机是否伪装 Windows | Linux 阶段实测 |
 | Firefox 网络指纹的实现方案 | SpiderMonkey 原型阶段调研后 |
 | 多账号并发 | SpiderMonkey 后端稳定后 |
 | 整个核心拆成库 | 桌面 App 或 Android App 立项时 |

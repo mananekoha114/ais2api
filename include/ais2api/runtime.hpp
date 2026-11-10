@@ -46,6 +46,14 @@ json::object setup_runtime(Config &config, bool approve_system_changes = false, 
 // os-release is rejected.
 std::vector<std::string> linux_runtime_packages(std::string_view os_release);
 std::vector<std::string> camoufox_linux_packages(std::string_view os_release);
+// Those of `packages` a dpkg status file (var/lib/dpkg/status) does not record
+// as installed, in their order.
+std::vector<std::string> missing_packages(std::string_view dpkg_status, const std::vector<std::string> &packages);
+// On Termux both backends' browsers run in this proot-distro container,
+// Ubuntu 24.04, which setup creates.
+inline constexpr std::string_view termux_container = "ais2api-browser";
+// The container's rootfs; empty when there is none.
+fs::path termux_container_rootfs();
 // Checks every backend the default and the stored accounts need; `stored`
 // defaults to the stored_backends() of the data directory.
 json::object doctor(const Config &config, const fs::path &program_directory = Config::default_directory(),

@@ -50,7 +50,9 @@
 
 - `display_unavailable`：
   - `headless=true` 时，表示找不到 Xvfb，或 Xvfb 没能启动。运行 `setup --yes` 安装 `xvfb`，Xvfb 的输出会记在 `logs/camoufox-*.log` 中。
-  - `headless=false` 时，表示没有可用的桌面显示（`DISPLAY` 或 `WAYLAND_DISPLAY`）。在无桌面的机器上改回 `headless=true`。
+  - `headless=false` 时，表示没有可用的桌面显示（`DISPLAY` 或 `WAYLAND_DISPLAY`）。在无桌面的机器上改回 `headless=true`。Termux 上要先启动 Termux:X11 并设置 `DISPLAY`。
+- Termux 上返回 `browser_not_configured`，提示 `ais2api-browser` 容器不存在：运行 `setup --yes`，它会创建容器并安装 Camoufox 需要的包。
+- `unknown_container`：已有名为 `ais2api-browser` 的容器，但不是 `setup` 创建的。先用 `proot-distro rename` 改名保留它，或确认不再需要后删除，再运行 `setup --yes`。
 - 容器里浏览器启动后很快崩溃：多半是共享内存不足，给容器加上 `--shm-size=1g`。
 
 ### Windows 中文显示乱码
