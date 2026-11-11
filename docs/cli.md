@@ -62,10 +62,11 @@ ais2api stop      停止服务
 
 - `setup` 准备当前平台的浏览器和依赖，需要联网；`--yes` 授权本次列出的系统包变更。它准备“需要的后端”：默认后端（`browser_backend`），加上已保存账号用到的后端，所以 CloakBrowser 账号和 Firefox 账号并存时两者都会安装。返回的 `backends` 列出准备了哪些，第一个之外的结果放在以后端命名的字段中。
 - `doctor` 检查本地前提，并列出实际使用的程序、配置、下载、数据与日志路径。`backends_needed` 列出需要的后端，全部就绪时 `browser_exists` 才为 true。浏览器文件存在不代表 Google 调用成功。
+- `doctor` 和 `setup` 的结果都带有 `deprecations`：默认后端或有账号仍是已弃用的 CloakBrowser 时，其中有一项 `cloakbrowser_backend`，`default_backend` 和 `accounts` 说明是哪一处在用；没有时为空数组。迁移方法见 [按账号选择后端](browser.md#按账号选择后端)。
 - `browser update` 与 `browser rollback` 管理浏览器版本，可以用 `cloakbrowser` 或 `camoufox` 指定后端：`update` 默认准备所有需要的后端，`rollback` 默认退回默认后端。
 - 执行 `setup`、`browser update`、`browser rollback` 前需先停止服务，它们与服务使用同一把数据目录独占锁。
 - 程序旁存在 `browser-runtime/PLATFORM/chrome[.exe]`（Browser-Local 包）时会自动使用，无需下载；`setup` 仍会校验其完整文件清单并准备系统依赖。
-- 需要实验性的 `camoufox` 后端时，`setup` 安装以下两项，都按 `runtime-manifest.json` 锁定的版本下载并核对 SHA-256；不下载 CloakBrowser，也不改写 `browser_executable`：
+- 需要 `camoufox` 后端时（新建配置的默认后端），`setup` 安装以下两项，都按 `runtime-manifest.json` 锁定的版本下载并核对 SHA-256；不下载 CloakBrowser，也不改写 `browser_executable`：
   - 生成 Firefox 身份所需的 fpgen 模型，逐个文件核对；
   - Camoufox，支持 Windows x64、Linux x64、Linux ARM64 和 Termux（ARM64）：
     - 压缩包约 1.3 GB，下载时需要约 3 GiB 空闲空间；

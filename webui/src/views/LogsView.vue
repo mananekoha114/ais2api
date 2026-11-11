@@ -85,6 +85,7 @@ const EVENT_LABELS: Record<string, string> = {
   setup_stage: '安装阶段',
   setup_download: '安装下载',
   runtime_leftovers_removed: '已清理残留的临时目录',
+  backend_deprecated: '仍在使用已弃用的浏览器后端',
 }
 
 function journalTone(record: Record<string, unknown>): Line['tone'] {

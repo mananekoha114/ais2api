@@ -87,6 +87,11 @@ class Service {
         store_.recover_requests();
         // Accounts from before per-account backends keep the one they used.
         adopt_backends(store_, config_);
+        for (const auto &item : backend_deprecations(config_.browser_backend, store_.stored_backends())) {
+            json::object record{{"event", "backend_deprecated"}};
+            for (const auto &field : item.as_object()) record.insert_or_assign(field.key(), field.value());
+            log(std::move(record));
+        }
         // serve() holds the instance lock, so no other process uses them.
         try {
             if (const auto removed = remove_profile_leftovers(config_.data_dir))
@@ -225,8 +230,9 @@ class Service {
         if (action == "status") {
             // Every backend the accounts need must be installed.
             const auto cfg = config();
+            const auto runtime = doctor(cfg, Config::default_directory(), store_.stored_backends());
             const bool ready = (!cfg.api_key.empty() || !store_.managed_keys().empty()) && store_.choose("readiness").has_value() &&
-                               bool_or(doctor(cfg, Config::default_directory(), store_.stored_backends()), "browser_exists");
+                               bool_or(runtime, "browser_exists");
             std::lock_guard lock(queue_mutex_);
             return {{"running", true},
                     {"version", "0.1.0"},
@@ -240,6 +246,7 @@ class Service {
                     {"queued", queue_.size()},
                     {"connections", live_connections.load()},
                     {"ready", ready},
+                    {"deprecations", runtime.at("deprecations")},
                     {"verification", "not_a_generation_check"}};
         }
         if (action == "stop") {

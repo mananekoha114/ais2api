@@ -29,7 +29,7 @@ const backend = ref<AccountBackend>('cloakbrowser')
 const confirmingRegenerate = ref(false)
 
 const BACKENDS: { value: AccountBackend; label: string; hint: string; disabled?: boolean }[] = [
-  { value: 'cloakbrowser', label: 'CloakBrowser', hint: 'Chrome 身份' },
+  { value: 'cloakbrowser', label: 'CloakBrowser', hint: 'Chrome 身份。已弃用，将在以后的版本中移除' },
   { value: 'auto', label: '自动', hint: 'Firefox 身份，由 ais2api 选择 Firefox 后端（目前即 Camoufox）' },
   { value: 'camoufox', label: 'Camoufox', hint: 'Firefox 身份，固定使用 Camoufox' },
   { value: 'spidermonkey', label: 'SpiderMonkey', hint: '尚未提供', disabled: true },

@@ -84,6 +84,19 @@ TEST_CASE("account backends map onto the gateways that serve them", "[router]") 
     CHECK(backends_needed("camoufox", {"camoufox", "cloakbrowser"}) == std::vector<std::string>{"camoufox", "cloakbrowser"});
 }
 
+TEST_CASE("CloakBrowser is reported as deprecated wherever it is still used", "[router]") {
+    const auto entry = [](bool by_default, bool accounts) {
+        return json::array{json::object{{"code", "cloakbrowser_backend"}, {"default_backend", by_default}, {"accounts", accounts}}};
+    };
+    CHECK(backend_deprecations("camoufox", {}).empty());
+    CHECK(backend_deprecations("camoufox", {"auto", "camoufox", "spidermonkey", ""}).empty());
+    CHECK(backend_deprecations("camoufox", {"auto", "cloakbrowser"}) == entry(false, true));
+    CHECK(backend_deprecations("cloakbrowser", {}) == entry(true, false));
+    CHECK(backend_deprecations("cloakbrowser", {"auto"}) == entry(true, false));
+    // An unsettled account follows the default.
+    CHECK(backend_deprecations("cloakbrowser", {""}) == entry(true, true));
+}
+
 TEST_CASE("stored accounts settle on the backend they used and keep it", "[router][state]") {
     Directory dir;
     std::string first, second;
@@ -239,6 +252,9 @@ TEST_CASE("doctor checks every backend the stored accounts need", "[router][setu
     config.browser_executable = dir.path / "missing-chrome";
     auto result = doctor(config, dir.path, std::vector<std::string>{});
     CHECK(result.at("backends_needed").as_array() == json::array{"cloakbrowser"});
+    CHECK(result.at("deprecations").as_array().size() == 1);
+    CHECK(result.at("deprecations").at(0).at("default_backend") == true);
+    CHECK(result.at("deprecations").at(0).at("accounts") == false);
     CHECK_FALSE(result.contains("camoufox"));
     // A Firefox account adds Camoufox, whose runtime this directory lacks.
     atomic_write(config.browser_executable, "stub");
@@ -248,4 +264,11 @@ TEST_CASE("doctor checks every backend the stored accounts need", "[router][setu
     CHECK(result.at("backends_needed").as_array() == json::array{"cloakbrowser", "camoufox"});
     CHECK(result.contains("camoufox"));
     CHECK(result.at("browser_exists") == false);
+    // On Camoufox nothing is deprecated until an account stays on CloakBrowser.
+    config.browser_backend = "camoufox";
+    CHECK(doctor(config, dir.path, std::vector<std::string>{"auto"}).at("deprecations").as_array().empty());
+    result = doctor(config, dir.path, std::vector<std::string>{"auto", "cloakbrowser"});
+    CHECK(result.at("deprecations").at(0).at("code") == "cloakbrowser_backend");
+    CHECK(result.at("deprecations").at(0).at("default_backend") == false);
+    CHECK(result.at("deprecations").at(0).at("accounts") == true);
 }

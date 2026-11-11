@@ -13,6 +13,9 @@ services:
       - "18451:18451"
     volumes:
       - ./data:/data
+    # Camoufox, the default browser backend, needs more shared memory than
+    # Docker's 64 MB.
+    shm_size: "1g"
     # The first start generates a random management password and prints it to
     # the container log, unless AIS2API_ADMIN_KEY is set.
     # environment:

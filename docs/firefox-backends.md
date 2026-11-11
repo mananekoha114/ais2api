@@ -119,7 +119,7 @@ CMake 选项 `AIS2API_DEV_BUNDLE` 区分开发版与正式分发版，默认关�
 | 身份 | 本机生成（与正式版相同） | 本机生成 |
 | fpgen 模型 | 嵌入 | `setup` 下载 |
 | Camoufox | 一起打包，放在 `bin/camoufox-runtime/<版本>-<平台>/` | `setup` 下载 |
-| 新建配置的后端 | `camoufox` | `cloakbrowser` |
+| 新建配置的后端 | `camoufox` | `camoufox`（带 CloakBrowser 的 `Browser-Local` 包为 `cloakbrowser`） |
 
 - 开发版支持 Windows x64（`build-dev.ps1`）和 Linux x64（`build-dev.sh`）。构建方法见 [构建与打包](platforms.md#构建开发版)。
 - 打包的 Camoufox 是刚构建的程序用 `setup` 安装后原样复制的，裁剪方式和归属标记都与 `setup` 的安装相同。只有它是锁定版本、且按本程序的规则裁剪时才使用。使用顺序：指向 Camoufox 的 `browser_executable`、打包版、`setup` 的安装。使用打包版时 `browser rollback` 不可用，要退回就换回上一个开发版包。
@@ -138,7 +138,9 @@ CMake 选项 `AIS2API_DEV_BUNDLE` 区分开发版与正式分发版，默认关�
 ## CloakBrowser 退役
 
 1. 在 Camoufox 后端覆盖所有平台（包括 Termux）之前，CloakBrowser 保持 `146.0.7680.177.4` 不变。
-2. 覆盖之后的下一个版本把 CloakBrowser 标为弃用，并提供一条把账号显式迁移到 Firefox 身份的命令（`accounts backend --all auto --yes`，P2 已实现）。
+2. 覆盖之后的下一个版本把 CloakBrowser 标为弃用，并提供一条把账号显式迁移到 Firefox 身份的命令（`accounts backend --all auto --yes`，P2 已实现）。**已实现**：
+   - 新建的配置默认使用 `camoufox`；带有 CloakBrowser 的 `Browser-Local` 包新建的配置仍是 `cloakbrowser`。已有的配置和账号保持不变。
+   - 默认后端或有账号仍是 CloakBrowser 时，`doctor`、`/status`、`setup` 和诊断报告给出 `deprecations`，服务启动时写日志，WebUI 显示提示，见 [按账号选择后端](browser.md#按账号选择后端)。
 3. 再下一个版本删除 CloakBrowser 的全部代码与资料：`runtime-manifest.json` 中的浏览器条目、`Browser-Local` 打包、许可文件和相关文档。
 
 ## 分阶段计划

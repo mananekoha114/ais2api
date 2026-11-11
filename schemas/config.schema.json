@@ -57,8 +57,8 @@
     "browser_backend": {
       "type": "string",
       "enum": ["cloakbrowser", "camoufox"],
-      "default": "cloakbrowser",
-      "description": "Default browser backend: the one new accounts are stored with (camoufox stores them as auto) and the one Cookie import verifies with. Stored accounts keep their own backend, which changes only explicitly (accounts backend, or the fingerprint API). camoufox (experimental) drives Camoufox over WebDriver BiDi with a Firefox identity generated per account. Applies without a restart."
+      "default": "camoufox",
+      "description": "Default browser backend: the one new accounts are stored with (camoufox stores them as auto) and the one Cookie import verifies with. New configurations start on camoufox; a file without this field is an older installation and stays on cloakbrowser. Stored accounts keep their own backend, which changes only explicitly (accounts backend, or the fingerprint API). camoufox drives Camoufox over WebDriver BiDi with a Firefox identity generated per account. cloakbrowser is deprecated and will be removed in a later release. Applies without a restart."
     },
     "proxy": {
       "type": "string",

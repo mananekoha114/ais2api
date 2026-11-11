@@ -33,6 +33,14 @@ std::vector<std::string> backends_needed(std::string_view default_backend, const
     }
     return result;
 }
+json::array backend_deprecations(std::string_view default_backend, const std::vector<std::string> &stored) {
+    const bool by_default = effective_backend({}, default_backend) == "cloakbrowser";
+    const bool accounts = std::any_of(stored.begin(), stored.end(), [&](const std::string &backend) {
+        return effective_backend(backend, default_backend) == "cloakbrowser";
+    });
+    if (!by_default && !accounts) return {};
+    return {json::object{{"code", "cloakbrowser_backend"}, {"default_backend", by_default}, {"accounts", accounts}}};
+}
 void adopt_backends(Store &store, const Config &config) {
     store.adopt_backends(adopted_backend(config.browser_backend));
 }

@@ -67,6 +67,16 @@ json::object runtime_part(const json::object &doctor) {
             if (backend == "cloakbrowser" || backend == "camoufox") backends.push_back(backend);
         out["backends_needed"] = std::move(backends);
     }
+    if (auto deprecations = doctor.if_contains("deprecations"); deprecations && deprecations->is_array()) {
+        json::array known;
+        for (const auto &item : deprecations->as_array()) {
+            if (!item.is_object() || string_or(item.as_object(), "code") != "cloakbrowser_backend") continue;
+            json::object entry{{"code", "cloakbrowser_backend"}};
+            copy(entry, item.as_object(), {"default_backend", "accounts"});
+            known.push_back(std::move(entry));
+        }
+        out["deprecations"] = std::move(known);
+    }
     if (auto model = object_at(doctor, "fpgen_model")) {
         json::object fpgen;
         copy(fpgen, *model, {"tag", "source", "state"});

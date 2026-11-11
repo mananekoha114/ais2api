@@ -29,6 +29,11 @@ std::string_view effective_backend(std::string_view stored, std::string_view def
 std::string_view identity_family(std::string_view backend);
 // The gateways new accounts and the stored ones need, the default first.
 std::vector<std::string> backends_needed(std::string_view default_backend, const std::vector<std::string> &stored);
+// What this installation still uses that a later release removes, for
+// doctor, the service status and the diagnostics report. CloakBrowser gives
+// {"code":"cloakbrowser_backend"} with whether new accounts ("default_backend")
+// and stored ones ("accounts") are on it; empty when nothing is deprecated.
+json::array backend_deprecations(std::string_view default_backend, const std::vector<std::string> &stored);
 // Settles every unsettled account on adopted_backend(config.browser_backend).
 void adopt_backends(Store &store, const Config &config);
 

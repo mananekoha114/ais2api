@@ -182,11 +182,12 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   // their stored value, including an empty key that disables management.
   if (!fs::exists(c.config_file)) {
     c.admin_key = std::string(default_admin_key);
-#ifdef AIS2API_DEV_BUNDLE
-    // A dev bundle carries the Camoufox backend. Existing files keep their
-    // backend: switching an account's identity is always explicit.
-    c.browser_backend = "camoufox";
-#endif
+    // New installations start on Camoufox: CloakBrowser is deprecated, and
+    // only a package that carries it (Browser-Local) still starts on it.
+    // Existing files keep their backend, since switching an account's
+    // identity is always explicit.
+    if (bundled_browser(default_directory()).empty())
+      c.browser_backend = "camoufox";
   }
   bool explicit_browser = false;
   auto o = c.to_json();

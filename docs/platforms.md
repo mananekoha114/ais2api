@@ -110,7 +110,7 @@ build/linux/install/bin/ais2api setup --yes
   - 身份与 Windows 上一样呈现本机 OS，即 Linux。
   - 字体只用 Camoufox 自带的、Linux 身份会读取的四组字体（约 0.9 GB），通过 Camoufox 的 Linux fontconfig 读取，不使用系统字体。`setup` 只解压这几组字体和 Linux 的 fontconfig，安装后约 1.3 GB。
   - 字体缓存放在 `<data_dir>/runtime/camoufox-fontconfig/`，第一次启动时扫描一次。
-- ARM64：`runtime-manifest.json` 没有为这个平台锁定 CloakBrowser，准备 CloakBrowser 时返回 `unsupported_platform`。要先把 `browser_backend` 设为 `camoufox`（或让账号使用 Firefox 后端），再运行 `setup`。
+- ARM64：`runtime-manifest.json` 没有为这个平台锁定 CloakBrowser，准备 CloakBrowser 时返回 `unsupported_platform`。新建的配置默认就是 `camoufox`；旧配置要先把 `browser_backend` 设为 `camoufox`（或让账号使用 Firefox 后端），再运行 `setup`。
 
 ### WSL 2 中的 Debian 13
 
@@ -267,6 +267,7 @@ python scripts/check-package.py --with-browser build/windows/packages/*Browser-L
 - 同时保留两种运行包时请使用不同的构建目录。CMake 的等价参数为 `-DAIS2API_BROWSER_BUNDLE_DIR=/absolute/clean/staged/runtime`。
 - 配置和安装阶段会校验浏览器目录的完整文件清单；CPack 只包含该浏览器目录，并在归档名后加 `-Browser-Local`。含有资料目录、配置或下载缓存的目录会被拒绝，运行时数据库和 API Key 不会被打包。
 - `init` 与 `start` 会自动使用程序旁的锁定浏览器；`setup` 可以校验每个文件并准备系统库。打包浏览器并不能免除 Linux 的系统依赖，也不会登录 Google。
+- 用 `Browser-Local` 包新建的配置默认使用 `cloakbrowser` 后端（其他包默认 `camoufox`）。CloakBrowser 已弃用，这个包只为还在使用它的安装保留。
 - `Browser-Local` 不能与开发版同时构建，将随 CloakBrowser 退役一起删除。
 
 ### 构建开发版

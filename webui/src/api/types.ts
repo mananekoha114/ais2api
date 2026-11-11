@@ -18,7 +18,16 @@ export interface Status {
   queued?: number
   connections?: number
   ready?: boolean
+  /** What this installation still uses that a later release removes. */
+  deprecations?: Deprecation[]
   verification?: string
+}
+
+/** `cloakbrowser_backend`: new accounts (`default_backend`) or stored ones (`accounts`) are on CloakBrowser. */
+export interface Deprecation {
+  code: string
+  default_backend?: boolean
+  accounts?: boolean
 }
 
 export interface Cooldown {

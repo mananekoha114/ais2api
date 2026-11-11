@@ -3134,6 +3134,27 @@
               "null"
             ]
           },
+          "deprecations": {
+            "type": "array",
+            "description": "What this installation still uses that a later release removes. cloakbrowser_backend: new accounts (default_backend) or stored ones (accounts) are on CloakBrowser.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "default_backend": {
+                  "type": "boolean"
+                },
+                "accounts": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "code"
+              ]
+            }
+          },
           "verification": {
             "type": "string"
           }
