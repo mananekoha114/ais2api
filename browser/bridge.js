@@ -220,33 +220,64 @@
       for (const match of label.matchAll(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig)) emails.add(match[0].toLowerCase());
     }
     const pageReady = url.hostname === 'aistudio.google.com' && !login && document.readyState === 'complete';
-    return { login, regionBlocked: url.pathname.includes('available-regions'), ready: pageReady && !!document.querySelector('textarea'), identityReady: pageReady && emails.size === 1, email: emails.size === 1 ? [...emails][0] : '', identityAmbiguous: emails.size > 1, termsRequired: termsDialog(url) };
+    return { login, regionBlocked: url.pathname.includes('available-regions'), ready: pageReady && !!document.querySelector('textarea'), identityReady: pageReady && emails.size === 1, email: emails.size === 1 ? [...emails][0] : '', identityAmbiguous: emails.size > 1, termsRequired: termsDialog(url), welcomeContinued };
   }
   // AI Studio can open a modal that asks the account to accept its terms. The
-  // page behind it is aria-hidden, so the account badge never appears; report
-  // the dialog so the gateway fails at once. It is never agreed to here.
+  // page behind it is aria-hidden, so the account badge never appears.
+  const dialogSelector = 'mat-dialog-container, cdk-dialog-container, [role="dialog"], [role="alertdialog"]';
+  const dialogShown = dialog => !(typeof dialog.getClientRects === 'function' && dialog.getClientRects().length === 0);
+  function asksForTerms(dialog, url) {
+    const links = typeof dialog.querySelectorAll === 'function' ? [...dialog.querySelectorAll('a[href]')] : [];
+    if (links.some(el => {
+      try {
+        const target = new URL(el.getAttribute('href'), url.href);
+        return /(^|\.)google\.(com|dev)$/.test(target.hostname) && /\/terms(\/|$)/.test(target.pathname);
+      } catch (_) { return false; }
+    })) return true;
+    return /terms of service|additional terms|服务条款/i.test(dialog.innerText || dialog.textContent || '');
+  }
+  // The welcome dialog opens in new sessions even for accounts that accepted
+  // it before, so it is continued here. It is told apart by its shape, in any
+  // language: it links the terms and offers one button and nothing to tick.
+  // Any other dialog about terms is left to the account's owner.
+  const welcomePressed = new WeakMap();
+  let welcomeContinued = 0;
+  function continueWelcome(dialog) {
+    if (typeof dialog.querySelectorAll !== 'function') return false;
+    const buttons = [...dialog.querySelectorAll('button')];
+    if (buttons.length !== 1 || buttons[0].disabled || buttons[0].getAttribute('aria-disabled') === 'true') return false;
+    if (dialog.querySelectorAll('input, textarea, select, mat-checkbox, [role="checkbox"], [role="switch"], [role="radio"]').length) return false;
+    try { buttons[0].click(); } catch (_) { return false; }
+    welcomePressed.set(dialog, Date.now());
+    ++welcomeContinued;
+    return true;
+  }
+  // 'none' when the dialog is not about terms, 'continued' while a welcome
+  // dialog that was continued is closing, 'required' when the owner must act.
+  function termsState(dialog, url) {
+    if (!dialogShown(dialog) || !asksForTerms(dialog, url)) return 'none';
+    const pressed = welcomePressed.get(dialog);
+    if (pressed === undefined) return continueWelcome(dialog) ? 'continued' : 'required';
+    // A dialog that stays open did not take the button.
+    return Date.now() - pressed < 10000 ? 'continued' : 'required';
+  }
   function termsDialog(url) {
-    for (const dialog of document.querySelectorAll('mat-dialog-container, cdk-dialog-container, [role="dialog"], [role="alertdialog"]')) {
-      if (typeof dialog.getClientRects === 'function' && dialog.getClientRects().length === 0) continue;
-      const links = typeof dialog.querySelectorAll === 'function' ? [...dialog.querySelectorAll('a[href]')] : [];
-      if (links.some(el => {
-        try {
-          const target = new URL(el.getAttribute('href'), url.href);
-          return /(^|\.)google\.(com|dev)$/.test(target.hostname) && /\/terms(\/|$)/.test(target.pathname);
-        } catch (_) { return false; }
-      })) return true;
-      if (/terms of service|additional terms|服务条款/i.test(dialog.innerText || dialog.textContent || '')) return true;
-    }
-    return false;
+    let required = false;
+    for (const dialog of document.querySelectorAll(dialogSelector))
+      if (termsState(dialog, url) === 'required') required = true;
+    return required;
   }
   const controlLabel = el => (el.innerText || el.getAttribute('aria-label') || '').trim();
-  // Overlays such as welcome or announcement dialogs are only ever dismissed:
-  // never tick a checkbox or press a button that agrees, accepts or continues,
-  // since those can change account settings or terms.
+  // Other overlays, such as announcements, are only ever dismissed: never tick
+  // a checkbox or press a button that agrees, accepts or continues, since
+  // those can change account settings or terms. The welcome dialog is the one
+  // exception, see continueWelcome.
   const dismissLabels = /^(close|dismiss|got it|no,? thanks|not now|maybe later|skip|cancel)$/i;
   function dismissDialogs() {
     let dismissed = 0;
-    for (const dialog of document.querySelectorAll('mat-dialog-container, cdk-dialog-container, [role="dialog"], [role="alertdialog"]')) {
+    const url = new URL(location.href);
+    for (const dialog of document.querySelectorAll(dialogSelector)) {
+      if (termsState(dialog, url) === 'continued') { ++dismissed; continue; }
       const button = [...dialog.querySelectorAll('button')].find(el => !el.disabled &&
         el.getAttribute('aria-disabled') !== 'true' && dismissLabels.test(controlLabel(el)));
       try {

@@ -30,7 +30,7 @@ const eventNames: Record<string, { label: string; hint: string }> = {
   auth_cooldown: { label: '认证冷却', hint: '账号因认证失败进入冷却' },
   permission_cooldown: { label: '403 冷却', hint: '账号因重复的 403 进入冷却' },
   login_expired: { label: '登录失效', hint: '账号被标记为需要重新登录' },
-  terms_required: { label: '需要同意条款', hint: 'AI Studio 要求账号同意条款；ais2api 不会代为同意' },
+  terms_required: { label: '需要同意条款', hint: 'AI Studio 要求账号同意条款；ais2api 只会自动继续欢迎对话框' },
   session_rebuild: { label: '就地重建会话', hint: '失败后在同一浏览器内重建页面会话' },
   browser_restart: { label: '重启浏览器', hint: '失败后重启了整个浏览器进程' },
 }

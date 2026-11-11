@@ -1003,7 +1003,7 @@ struct CamoufoxGateway::Impl {
         browser_detail::check_identity(object, allow_login);
         return object;
     }
-    void await_account_identity(const Account& account, std::stop_token token, bool require_editor) {
+    void await_account_identity(const Account& account, std::stop_token token, bool require_editor) try {
         browser_detail::await_account_identity({
             [&](std::chrono::seconds timeout) {
                 const auto exists = eval("!!globalThis.__ais2bridge", token, timeout);
@@ -1013,28 +1013,44 @@ struct CamoufoxGateway::Impl {
             [&] { pause(token, 250ms); },
             [&] { record_page("identity"); },
         }, account.email, require_editor, token);
+    } catch (...) {
+        // Debug only: what the page showed when the account was refused.
+        record_page("refused");
+        throw;
     }
     // Debug only: the page state and a screenshot as logs/<profile>-<what>.*.
     void record_page(std::string_view what) noexcept {
         if (!debug || page.empty() || !bidi) return;
         const auto stem = config.data_dir / "logs" / (path_utf8(root.filename()) + "-" + std::string(what));
         try {
-            const auto state = eval(R"((() => {
+            const auto state = eval(R"((async () => {
+  // The first read is what a script sees at once; the second allows the
+  // voices two seconds to arrive.
+  const voices = speechSynthesis.getVoices().length;
+  const voicesLater = await new Promise((resolve) => {
+    if (voices) return resolve(voices);
+    const timer = setTimeout(() => resolve(speechSynthesis.getVoices().length), 2000);
+    speechSynthesis.addEventListener('voiceschanged', () => { clearTimeout(timer); resolve(speechSynthesis.getVoices().length); }, { once: true });
+  });
   const links = [...document.querySelectorAll('a[href*="accounts.google.com"], a[href*="myaccount.google.com"]')];
   const labelled = [...document.querySelectorAll('[data-email], [aria-label*="@"], img[alt*="@"]')];
   const bridge = globalThis.__ais2bridge;
   let identity = null;
-  try { if (bridge) { const i = bridge.identity(); identity = { login: i.login, ready: i.ready, identityReady: i.identityReady, ambiguous: i.identityAmbiguous, email: !!i.email }; } } catch (error) { identity = String(error); }
+  try { if (bridge) { const i = bridge.identity(); identity = { login: i.login, ready: i.ready, identityReady: i.identityReady, ambiguous: i.identityAmbiguous, email: !!i.email, welcomeContinued: i.welcomeContinued }; } } catch (error) { identity = String(error); }
   return { page: location.origin + location.pathname, title: document.title, readyState: document.readyState,
     visibility: document.visibilityState, bridge: !!bridge, identity, accountLinks: links.length,
     accountLinksWithEmail: links.filter(a => /@/.test((a.getAttribute('aria-label') || '') + (a.getAttribute('data-email') || ''))).length,
     labelled: labelled.length, labelledVisible: labelled.filter(el => el.getClientRects().length > 0).length,
     textarea: !!document.querySelector('textarea'), dialogs: document.querySelectorAll('[role="dialog"], mat-dialog-container').length,
+    dialogList: [...document.querySelectorAll('mat-dialog-container, cdk-dialog-container, [role="dialog"], [role="alertdialog"]')].slice(0, 8).map((dialog) => ({
+      tag: dialog.tagName, shown: dialog.getClientRects().length > 0, text: (dialog.innerText || dialog.textContent || '').slice(0, 600),
+      links: [...dialog.querySelectorAll('a[href]')].slice(0, 12).map((a) => { try { const u = new URL(a.getAttribute('href'), location.href); return u.origin + u.pathname; } catch (error) { return ''; } }),
+      buttons: [...dialog.querySelectorAll('button')].slice(0, 12).map((b) => (b.innerText || b.getAttribute('aria-label') || '').trim().slice(0, 40)) })),
     environment: { userAgent: navigator.userAgent, platform: navigator.platform, webdriver: navigator.webdriver,
       language: navigator.language, languages: navigator.languages, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       intlLocale: Intl.DateTimeFormat().resolvedOptions().locale, offset: new Date().getTimezoneOffset(), hasFocus: document.hasFocus(),
       cores: navigator.hardwareConcurrency, screen: [screen.width, screen.height, devicePixelRatio], window: [innerWidth, innerHeight],
-      voices: speechSynthesis.getVoices().length,
+      voices, voicesLater,
       byob: (() => { try { new Response('x').body.getReader({ mode: 'byob' }).releaseLock(); return true; } catch (error) { return false; } })() },
     text: (document.body ? document.body.innerText : '').slice(0, 600) };
 })())", {}, 5s);
