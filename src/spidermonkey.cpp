@@ -509,43 +509,63 @@ struct SpiderMonkeyGateway::Impl {
             }
         });
     }
+
+    // The page, and with `program` its settled WAA program.
+    void bootstrap(const Account &account, std::string_view model, bool program, std::stop_token token) {
+        try {
+            if (program) ensure_vm(account, model, token);
+            else ensure_page(account, model, token);
+        } catch (const Error &error) {
+            if (error.code != "cancelled") last_status = "bootstrap_failed";
+            throw;
+        }
+    }
+    // The two halves of generate(): a proof for the request's content from
+    // the WAA program, and the request sent from the page with a proof.
+    struct Content {
+        std::string timezone, digest, model, prompt;
+    };
+    Content content_of(const Request &request) const;
+    std::string prove(const Content &content, std::stop_token token);
+    void send(const Request &request, const Account &account, const Content &content, std::string_view proof, const EventSink &sink,
+              std::stop_token cancel);
 };
 
 SpiderMonkeyGateway::SpiderMonkeyGateway(const Config &config, Store &store) : impl_(std::make_unique<Impl>(config, store)) {}
 SpiderMonkeyGateway::~SpiderMonkeyGateway() = default;
 
-void SpiderMonkeyGateway::generate(const Request &request, const Account &account, const EventSink &sink, std::stop_token cancel) {
-    std::lock_guard lock(impl_->mutex);
-    auto &impl = *impl_;
-    try {
-        impl.ensure_vm(account, request.model, cancel);
-    } catch (const Error &error) {
-        if (error.code != "cancelled") impl.last_status = "bootstrap_failed";
-        throw;
-    }
-    const auto chunk_bytes = std::min<std::size_t>(32768, impl.config.limits.relay_bytes);
-    if (!chunk_bytes) throw Error(500, "invalid_config", "Browser relay byte budget must be positive");
-    const auto timezone = impl.host.profile.timezone.empty() ? std::string("UTC") : impl.host.profile.timezone;
+SpiderMonkeyGateway::Impl::Content SpiderMonkeyGateway::Impl::content_of(const Request &request) const {
+    Content content;
+    content.timezone = host.profile.timezone.empty() ? std::string("UTC") : host.profile.timezone;
+    auto wire = encode_request(request, {}, "", content.timezone);
+    content.digest = browser_detail::wire_content_hash(wire);
+    content.model = wire.empty() || !wire[0].is_string() ? std::string() : std::string(wire[0].as_string());
+    content.prompt = sm::page_prompt(request);
+    return content;
+}
+
+std::string SpiderMonkeyGateway::Impl::prove(const Content &content, std::stop_token token) {
     // The proof binds the request's text, typed into the prompt box and run.
-    impl.phase = "waa_proof";
-    auto wire = encode_request(request, {}, "", timezone);
-    const auto digest = browser_detail::wire_content_hash(wire);
-    const auto model = wire.empty() || !wire[0].is_string() ? std::string() : std::string(wire[0].as_string());
-    json::array().swap(wire);
-    const auto prompt = sm::page_prompt(request);
+    phase = "waa_proof";
     std::string proof;
     try {
-        proof = impl.vm->proof(digest, prompt, !prompt.empty(), cancel);
+        proof = vm->proof(content.digest, content.prompt, !content.prompt.empty(), token);
     } catch (const Error &error) {
         // A program that failed is not used again.
-        if (error.code != "cancelled") impl.vm.reset();
+        if (error.code != "cancelled") vm.reset();
         throw;
     }
     if (!proof.starts_with('!')) {
-        impl.vm.reset();
+        vm.reset();
         throw Error(502, "waa_proof_invalid", "The WAA program returned a malformed proof");
     }
+    return proof;
+}
 
+void SpiderMonkeyGateway::Impl::send(const Request &request, const Account &account, const Content &content, std::string_view proof,
+                                     const EventSink &sink, std::stop_token cancel) {
+    const auto chunk_bytes = std::min<std::size_t>(32768, config.limits.relay_bytes);
+    if (!chunk_bytes) throw Error(500, "invalid_config", "Browser relay byte budget must be positive");
     struct Transfer {
         std::unique_ptr<browser_detail::HttpExchange> exchange;
         std::uint64_t sequence = 0;
@@ -556,26 +576,26 @@ void SpiderMonkeyGateway::generate(const Request &request, const Account &accoun
     } transfer;
     bool counted = false;
     browser_detail::GenerationIO io;
-    io.encode = [&](std::string_view checkpoint) { return json::serialize(encode_request(request, {}, proof, timezone, checkpoint)); };
+    io.encode = [&](std::string_view checkpoint) { return json::serialize(encode_request(request, {}, proof, content.timezone, checkpoint)); };
     io.start = [&](std::string_view body, const std::function<void()> &check) {
         check();
         transfer = {};
-        impl.phase = "request_authorization";
-        impl.refresh_tier(cancel);
-        auto context = impl.rpc_context(true);
-        transfer.benefit = impl.fresh_tier();
+        phase = "request_authorization";
+        refresh_tier(cancel);
+        auto context = rpc_context(true);
+        transfer.benefit = fresh_tier();
         context.tier = std::string(sm::tier_header(transfer.benefit));
-        if (!counted && !prompt.empty() && !model.empty()) {
+        if (!counted && !content.prompt.empty() && !content.model.empty()) {
             counted = true;
             auto companion = context;
             companion.tier.clear();
-            impl.schedule_count_tokens(sm::count_tokens_body(model, prompt), companion);
+            schedule_count_tokens(sm::count_tokens_body(content.model, content.prompt), companion);
         }
         context.priority = "u=0";
-        HttpRequest upload{"POST", std::string(maker_suite) + "GenerateContent", sm::rpc_headers(impl.headers, context), std::string(body)};
+        HttpRequest upload{"POST", std::string(maker_suite) + "GenerateContent", sm::rpc_headers(headers, context), std::string(body)};
         check();
-        impl.phase = "generation_start";
-        transfer.exchange = impl.http->open(std::move(upload), cancel, 60s);
+        phase = "generation_start";
+        transfer.exchange = http->open(std::move(upload), cancel, 60s);
         transfer.status = transfer.exchange->status();
         transfer.retry_after = retry_after(transfer.exchange->headers());
         if (transfer.status < 200 || transfer.status >= 300) {
@@ -591,7 +611,7 @@ void SpiderMonkeyGateway::generate(const Request &request, const Account &accoun
             transfer.error = "upstream_http_" + std::to_string(transfer.status);
             transfer.done = true;
         }
-        impl.phase = "generation_read";
+        phase = "generation_read";
     };
     io.next = [&](std::uint64_t) -> json::value {
         auto state = sm::relay_state({.done = transfer.done,
@@ -616,11 +636,36 @@ void SpiderMonkeyGateway::generate(const Request &request, const Account &accoun
         return state;
     };
     io.completed = [&] {
-        impl.phase = "generation_complete";
-        if (Clock::now() - impl.cookies_saved_at >= 300s) impl.persist_cookies(account);
+        phase = "generation_complete";
+        if (Clock::now() - cookies_saved_at >= 300s) persist_cookies(account);
     };
-    browser_detail::run_generation(request, impl.config.limits, impl.config.continuation_retry_enabled, io, sink, cancel);
-    impl.phase = "ready";
+    browser_detail::run_generation(request, config.limits, config.continuation_retry_enabled, io, sink, cancel);
+    phase = "ready";
+}
+
+void SpiderMonkeyGateway::generate(const Request &request, const Account &account, const EventSink &sink, std::stop_token cancel) {
+    std::lock_guard lock(impl_->mutex);
+    auto &impl = *impl_;
+    impl.bootstrap(account, request.model, true, cancel);
+    const auto content = impl.content_of(request);
+    const auto proof = impl.prove(content, cancel);
+    impl.send(request, account, content, proof, sink, cancel);
+}
+
+std::string SpiderMonkeyGateway::experiment_proof(const Request &request, const Account &account, std::stop_token cancel) {
+    std::lock_guard lock(impl_->mutex);
+    auto &impl = *impl_;
+    impl.bootstrap(account, request.model, true, cancel);
+    return impl.prove(impl.content_of(request), cancel);
+}
+
+void SpiderMonkeyGateway::experiment_send(const Request &request, const Account &account, std::string_view proof, const EventSink &sink,
+                                          std::stop_token cancel) {
+    std::lock_guard lock(impl_->mutex);
+    auto &impl = *impl_;
+    // The page and its RPC context, without starting a program.
+    impl.bootstrap(account, request.model, false, cancel);
+    impl.send(request, account, impl.content_of(request), proof, sink, cancel);
 }
 
 json::array SpiderMonkeyGateway::models(const Account &account, std::stop_token cancel) {

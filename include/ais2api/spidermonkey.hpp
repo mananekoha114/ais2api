@@ -127,6 +127,12 @@ class SpiderMonkeyGateway final : public GenerationBackend {
     // There is no captured template to discard.
     void clear_template() override {}
     bool release_idle() override;
+    // For tools/waa_experiment only: generate() in its two halves. A proof
+    // from the account's WAA program for the request's content, and the
+    // request sent over HTTP from the loaded page with a proof from anywhere.
+    std::string experiment_proof(const Request &request, const Account &account, std::stop_token cancel = {});
+    void experiment_send(const Request &request, const Account &account, std::string_view proof, const EventSink &sink,
+                         std::stop_token cancel = {});
 
   private:
     struct Impl;
