@@ -7,7 +7,8 @@
 # The WAA runtime. Every build compiles the parts that need no JavaScript
 # engine, so that they are tested on every platform; the virtual machine itself
 # is compiled with AIS2API_SPIDERMONKEY.
-add_library(ais2api_waa STATIC src/loop.cpp)
+add_library(ais2api_waa STATIC src/challenge.cpp src/loop.cpp src/text.cpp)
+target_include_directories(ais2api_waa PUBLIC include)
 target_link_libraries(ais2api_waa PUBLIC ais2api_common)
 if(NOT MSVC)
   target_compile_options(ais2api_waa PRIVATE -Wall -Wextra -Wpedantic)
@@ -52,8 +53,18 @@ foreach(index RANGE ${spidermonkey_library_last})
   endif()
 endforeach()
 
-target_sources(ais2api_waa PRIVATE src/js.cpp)
-target_include_directories(ais2api_waa PRIVATE "${third_party}/mozjs")
-target_compile_definitions(ais2api_waa PUBLIC AIS2API_HAS_SPIDERMONKEY)
-target_link_libraries(ais2api_waa PUBLIC ${spidermonkey_libraries})
+find_package(ada CONFIG REQUIRED)
+find_package(ZLIB REQUIRED)
+set(waa_host_inc "${CMAKE_CURRENT_BINARY_DIR}/generated/waa_host.inc")
+add_custom_command(OUTPUT "${waa_host_inc}"
+  COMMAND "${CMAKE_COMMAND}" "-DDOM=${third_party}/dom.js" "-DHOST=${third_party}/smhost.js"
+    "-DSHAPE=${third_party}/firefox152.json.gz" "-DOUTPUT=${waa_host_inc}"
+    -P "${PROJECT_SOURCE_DIR}/scripts/embed-waa.cmake"
+  DEPENDS "${third_party}/dom.js" "${third_party}/smhost.js" "${third_party}/firefox152.json.gz"
+    "${PROJECT_SOURCE_DIR}/scripts/embed-waa.cmake" VERBATIM)
+target_sources(ais2api_waa PRIVATE src/js.cpp src/url.cpp src/host.cpp src/runtime.cpp "${waa_host_inc}")
+target_include_directories(ais2api_waa PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated" "${third_party}/mozjs")
+target_compile_definitions(ais2api_waa PUBLIC AIS2API_HAS_SPIDERMONKEY
+  PRIVATE AIS2API_SPIDERMONKEY_VERSION="${spidermonkey_version}")
+target_link_libraries(ais2api_waa PRIVATE ada::ada ZLIB::ZLIB PUBLIC ${spidermonkey_libraries})
 message(STATUS "SpiderMonkey ${spidermonkey_version} from ${spidermonkey_dir}")
