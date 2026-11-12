@@ -1,0 +1,30 @@
+# SpiderMonkey 152.0.4 as a static library for ais2api: windows-x64, clang-cl,
+# static C runtime. Used by build-windows.sh, which sets MOZ_OBJDIR.
+
+# Only the JavaScript engine, optimised, without assertions.
+ac_add_options --enable-project=js
+ac_add_options --target=x86_64-pc-windows-msvc
+ac_add_options --enable-optimize
+ac_add_options --disable-debug
+
+# A static library whose symbols are not DLL exports; the embedding shim's C
+# functions are the only interface the host program links against.
+ac_add_options --disable-shared-js
+ac_add_options --disable-export-js
+
+# The host program keeps its own allocator.
+ac_add_options --disable-jemalloc
+
+# Not used by the embedding.
+ac_add_options --disable-ctypes
+ac_add_options --disable-tests
+
+# Let the build download the compiler (clang-cl) and the Visual Studio and
+# Windows SDK files it was released with, so the result does not depend on
+# what this machine has. Rust is not bootstrapped outside Mozilla's CI:
+# build-windows.cmd installs the version Firefox 152 is built with.
+ac_add_options --enable-bootstrap
+
+# Rust code links the static C runtime too, like the C++ objects
+# (patches/0002-static-msvcrt.patch).
+export RUSTFLAGS="-C target-feature=+crt-static"
