@@ -17,7 +17,8 @@ enum class IdentityVerdict { pending, verified, mismatch, ambiguous };
 IdentityVerdict identity_verdict(const json::object &identity, std::string_view expected_email);
 // What the page identity probe proves at once: a sign-in page (unless the
 // caller tolerates one while navigating), a region block, and an AI Studio
-// terms dialog, which only the account's owner may accept.
+// terms dialog that only the account's owner may accept. The bridge continues
+// the welcome dialog itself and does not report it.
 void check_identity(const json::object &identity, bool allow_login);
 // How a gateway reads the account page. `bridge_ready` and `identity` take a
 // timeout; `identity` returns the probe already passed through check_identity

@@ -256,13 +256,16 @@ test('identity probe reports ambiguity and Google sign-in redirects', () => {
   assert.equal(h.bridge.identity().ready, false); h.bridge.dispose();
 });
 
+// A dialog as the terms probe reads it: its links, buttons and form controls.
+const termsLink = href => ({ getAttribute: name => name === 'href' ? href : null });
+function modal({ text = '', links = [], shown = true, buttons = [control('Decline'), control('Accept')], fields = [] } = {}) {
+  return { innerText: text, buttons, events: [], getClientRects: () => shown ? [{}] : [], dispatchEvent(event) { this.events.push(event); return true; },
+    querySelectorAll: selector => selector === 'a[href]' ? links : selector === 'button' ? buttons : selector.startsWith('input') ? fields : [] };
+}
+
 test('identity probe reports an AI Studio terms dialog and nothing else', () => {
   const h = harness();
-  const link = href => ({ getAttribute: name => name === 'href' ? href : null });
-  const modal = ({ text = '', links = [], shown = true } = {}) => ({
-    innerText: text, clicks: 0, getClientRects: () => shown ? [{}] : [],
-    querySelectorAll: selector => selector === 'a[href]' ? links : selector === 'button' ? [control('Continue')] : []
-  });
+  const link = termsLink;
   let dialogs = [];
   h.context.document.querySelectorAll = selector => selector.includes('[role="dialog"]') ? dialogs : [];
   assert.equal(h.bridge.identity().termsRequired, false);
@@ -278,6 +281,57 @@ test('identity probe reports an AI Studio terms dialog and nothing else', () => 
   dialogs = [modal({ links: [link('https://google.com.example.com/terms'), link('https://policies.google.com/termsfeed')] }),
              modal({ text: 'Additional Terms of Service', shown: false })];
   assert.equal(h.bridge.identity().termsRequired, false);
+  h.bridge.dispose();
+});
+
+test('the welcome dialog is continued once, and other terms dialogs are left alone', () => {
+  let now = 1000;
+  const h = harness({ now: () => now });
+  const terms = [termsLink('https://aistudio.google.com/docs/terms'), termsLink('https://policies.google.com/privacy')];
+  let dialogs = [];
+  h.context.document.querySelectorAll = selector => selector.includes('[role="dialog"]') ? dialogs : [];
+  // One button and nothing to tick, whatever its language.
+  const welcome = modal({ text: '欢迎使用 AI Studio', links: terms, buttons: [control('继续')] });
+  assert.equal(h.bridge.identity().welcomeContinued, 0);
+  dialogs = [welcome];
+  assert.equal(h.bridge.identity().termsRequired, false);
+  assert.equal(welcome.buttons[0].clicks, 1);
+  assert.equal(h.bridge.identity().welcomeContinued, 1);
+  // It is neither pressed again nor reported while it closes, and bootstrap
+  // does not send it Escape.
+  now += 9000;
+  assert.equal(h.bridge.identity().termsRequired, false);
+  page(h, { dialogs });
+  h.bridge.bootstrap();
+  assert.equal(welcome.buttons[0].clicks, 1);
+  assert.equal(welcome.events.length, 0);
+  h.bridge.finishBootstrap();
+  // A welcome dialog that stays open did not take the button.
+  now += 2000;
+  h.context.document.querySelectorAll = selector => selector.includes('[role="dialog"]') ? dialogs : [];
+  assert.equal(h.bridge.identity().termsRequired, true);
+  assert.equal(welcome.buttons[0].clicks, 1);
+  // A choice, a disabled button or a box to tick belongs to the owner.
+  const refused = [modal({ links: terms }), modal({ links: terms, buttons: [control('Continue', { 'aria-disabled': 'true' })] }),
+                   modal({ links: terms, buttons: [Object.assign(control('Continue'), { disabled: true })] }),
+                   modal({ links: terms, buttons: [control('Continue')], fields: [{}] }), modal({ links: terms, buttons: [] })];
+  for (const dialog of refused) {
+    dialogs = [dialog];
+    assert.equal(h.bridge.identity().termsRequired, true);
+    for (const button of dialog.buttons) assert.equal(button.clicks, 0);
+  }
+  // A single button on a dialog that is not about terms is not pressed.
+  const notice = modal({ text: 'What is new', buttons: [control('Continue')] });
+  dialogs = [notice];
+  assert.equal(h.bridge.identity().termsRequired, false);
+  assert.equal(notice.buttons[0].clicks, 0);
+  // bootstrap continues a welcome dialog that opened after the identity check.
+  const late = modal({ links: terms, buttons: [control('Continue')] });
+  page(h, { dialogs: [late] });
+  assert.equal(h.bridge.bootstrap(), true);
+  assert.equal(late.buttons[0].clicks, 1);
+  assert.equal(late.events.length, 0);
+  h.bridge.finishBootstrap();
   h.bridge.dispose();
 });
 

@@ -125,7 +125,7 @@ ais2api accounts probe all
 - **import**：输入可以是 Cookie 请求头文本、Netscape Cookie 文本、Cookie JSON、storage state 或已有凭据包。只有显式指定 `--stdin` 才会读取标准输入。不要把 Cookie 写在命令参数里，避免进入 shell 历史。导入与列表结果不包含 Cookie 值，但账号名称和邮箱对本机用户可见。
 - **select**：设为首选账号。
 - **backend**：修改账号的浏览器后端；`--all` 一次修改所有账号，用于把账号整体迁移到 Firefox 身份或迁回。在 CloakBrowser 与 Firefox 后端之间切换会换成另一种身份（Google 会把它看作新设备），必须加 `--yes`，否则返回 `identity_change_unconfirmed`；Firefox 后端之间可以直接切换。见 [按账号选择后端](browser.md#按账号选择后端)。
-- **reset**：清除账号记录的失败/禁用状态，不能修复已过期的 Google Cookie。账号因“需要同意条款”冷却时，先用该账号在普通浏览器中登录 AI Studio 并同意条款，再执行 reset。
+- **reset**：清除账号记录的失败/禁用状态，不能修复已过期的 Google Cookie。账号因“需要同意条款”冷却时（欢迎对话框会自动继续，这里指其他条款对话框），先用该账号在普通浏览器中登录 AI Studio 并同意条款，再执行 reset。
 - **probe**：使用账号凭据实际访问上游，需要服务正在运行，可能会启动浏览器。不要把它当作离线健康检查。
 
 账号 ID 来自 `accounts list`。
