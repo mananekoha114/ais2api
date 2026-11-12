@@ -28,12 +28,19 @@ const locale = ref('')
 const backend = ref<AccountBackend>('cloakbrowser')
 const confirmingRegenerate = ref(false)
 
-const BACKENDS: { value: AccountBackend; label: string; hint: string; disabled?: boolean }[] = [
+// SpiderMonkey is only offered by a build that includes it.
+const BACKENDS = computed<{ value: AccountBackend; label: string; hint: string; disabled?: boolean }[]>(() => [
   { value: 'cloakbrowser', label: 'CloakBrowser', hint: 'Chrome 身份。已弃用，将在以后的版本中移除' },
   { value: 'auto', label: '自动', hint: 'Firefox 身份，由 ais2api 选择 Firefox 后端（目前即 Camoufox）' },
   { value: 'camoufox', label: 'Camoufox', hint: 'Firefox 身份，固定使用 Camoufox' },
-  { value: 'spidermonkey', label: 'SpiderMonkey', hint: '尚未提供', disabled: true },
-]
+  view.value?.spidermonkey_available
+    ? {
+        value: 'spidermonkey',
+        label: 'SpiderMonkey（实验性）',
+        hint: '实验性原型：不启动浏览器，在本进程内运行 Google 的 WAA 程序。沿用 Camoufox 生成的 Firefox 身份，但声称 Firefox 152；网络层为普通 libcurl，TLS 与 HTTP/2 特征不是 Firefox 的。仅供测试账号使用',
+      }
+    : { value: 'spidermonkey', label: 'SpiderMonkey', hint: '此版本未包含 SpiderMonkey 后端', disabled: true },
+])
 
 // Same rules as the service (IANA zone names, BCP 47 tags).
 const TIMEZONE = /^[A-Za-z][A-Za-z0-9/_+-]{0,63}$/

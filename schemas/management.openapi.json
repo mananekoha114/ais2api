@@ -935,7 +935,7 @@
                       "camoufox",
                       "spidermonkey"
                     ],
-                    "description": "spidermonkey is rejected with backend_unavailable until it exists"
+                    "description": "spidermonkey is rejected with backend_unavailable by a build without that backend"
                   },
                   "confirm_identity_change": {
                     "type": "boolean"
@@ -3590,9 +3590,10 @@
             "type": "string",
             "enum": [
               "cloakbrowser",
-              "camoufox"
+              "camoufox",
+              "spidermonkey"
             ],
-            "description": "Gateway that serves the account now; auto runs on Camoufox"
+            "description": "Gateway that serves the account now; auto runs on Camoufox, and so does spidermonkey in a build without that backend"
           },
           "identity": {
             "type": "string",
@@ -3604,6 +3605,10 @@
           "firefox_identity_saved": {
             "type": "boolean",
             "description": "A Firefox identity is saved for the current seed"
+          },
+          "spidermonkey_available": {
+            "type": "boolean",
+            "description": "This build includes the experimental SpiderMonkey backend"
           }
         },
         "required": [

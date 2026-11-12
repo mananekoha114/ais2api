@@ -96,6 +96,19 @@ json::object browser_part(const json::object &diagnostics) {
     json::object out;
     copy(out, diagnostics, {"backend", "default_backend", "status", "phase", "running", "isolatedContext", "templateCaptured",
                             "modelDiscovery", "chunkBytes", "cookieRefresh", "bridgeSource", "bridgeSha256"});
+    // The SpiderMonkey backend: its page and program, the host files' and
+    // the interpreter's digests (Google's public file), and its network marker.
+    copy(out, diagnostics, {"pageLoaded", "vmsStarted", "claimedFirefox", "network", "benefitTier"});
+    if (auto vm = object_at(diagnostics, "vm")) {
+        json::object part;
+        copy(part, *vm, {"ageSeconds", "interpreter"});
+        out["vm"] = std::move(part);
+    }
+    if (auto host = object_at(diagnostics, "host")) {
+        json::object part;
+        copy(part, *host, {"dom", "host", "shape", "spidermonkey"});
+        out["host"] = std::move(part);
+    }
     if (auto proxy = object_at(diagnostics, "proxy")) {
         json::object part;
         copy(part, *proxy, {"mode", "relayError"});

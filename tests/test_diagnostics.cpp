@@ -103,6 +103,28 @@ TEST_CASE("the diagnostics report holds allowlisted fields only", "[diagnostics]
     CHECK(report.at("logs").as_array()[0].as_object().size() == 2);
 }
 
+TEST_CASE("the SpiderMonkey backend's state is reported without its identity", "[diagnostics]") {
+    auto sources = planted();
+    sources.browser = {{"backend", "spidermonkey"}, {"status", "gateway_ready"}, {"phase", "ready"}, {"running", true},
+                       {"pageLoaded", true}, {"vmsStarted", 2}, {"claimedFirefox", "152"}, {"network", "libcurl"},
+                       {"benefitTier", "free"}, {"vm", {{"ageSeconds", 30}, {"interpreter", "abcdefABCDEF"}, {"program", "planted program"}}},
+                       {"host", {{"dom", "d1"}, {"host", "h1"}, {"shape", "s1"}, {"spidermonkey", "152.0.4"}, {"path", "C:/Users/PlantedUser"}}},
+                       {"identity", {{"platform", "linux"}, {"userAgent", "Mozilla/5.0 PlantedAgent"}}}};
+    const auto report = safe_report(sources);
+    const auto text = json::serialize(report);
+    for (auto secret : {"Planted", "planted", "Users"}) {
+        INFO(secret);
+        CHECK(text.find(secret) == std::string::npos);
+    }
+    const auto &browser = report.at("browser");
+    CHECK(browser.at("network") == "libcurl");
+    CHECK(browser.at("claimedFirefox") == "152");
+    CHECK(browser.at("vmsStarted") == 2);
+    CHECK(browser.at("vm").as_object() == json::object{{"ageSeconds", 30}, {"interpreter", "abcdefABCDEF"}});
+    CHECK(browser.at("host").at("spidermonkey") == "152.0.4");
+    CHECK(browser.at("identity").at("platform") == "linux");
+}
+
 TEST_CASE("a report without a running service says so", "[diagnostics]") {
     DiagnosticsSources sources;
     const auto report = safe_report(sources);

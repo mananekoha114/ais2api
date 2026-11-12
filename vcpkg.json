@@ -10,7 +10,8 @@
       "description": "The experimental SpiderMonkey backend (AIS2API_SPIDERMONKEY)",
       "dependencies": [
         "ada-url",
-        "zlib"
+        "zlib",
+        {"name": "curl", "default-features": false, "features": ["http2", "brotli", "zstd"]}
       ]
     }
   }

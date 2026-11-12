@@ -7,6 +7,7 @@
 #include "ais2api/backend_router.hpp"
 #include "ais2api/browser.hpp"
 #include "ais2api/camoufox.hpp"
+#include "ais2api/spidermonkey.hpp"
 #include <algorithm>
 
 namespace ais2api {
@@ -16,10 +17,18 @@ bool valid_account_backend(std::string_view backend) {
 std::string_view adopted_backend(std::string_view default_backend) {
     return default_backend == "camoufox" ? "auto" : "cloakbrowser";
 }
+bool spidermonkey_available() {
+#ifdef AIS2API_HAS_SPIDERMONKEY
+    return true;
+#else
+    return false;
+#endif
+}
 // Always one of the literals, never a view of the arguments.
 std::string_view effective_backend(std::string_view stored, std::string_view default_backend) {
     if (stored == "cloakbrowser") return "cloakbrowser";
-    if (stored == "auto" || stored == "camoufox" || stored == "spidermonkey") return "camoufox";
+    if (stored == "spidermonkey") return spidermonkey_available() ? "spidermonkey" : "camoufox";
+    if (stored == "auto" || stored == "camoufox") return "camoufox";
     return default_backend == "camoufox" ? "camoufox" : "cloakbrowser";
 }
 std::string_view identity_family(std::string_view backend) {
@@ -29,6 +38,7 @@ std::vector<std::string> backends_needed(std::string_view default_backend, const
     std::vector<std::string> result{std::string(effective_backend({}, default_backend))};
     for (const auto &backend : stored) {
         std::string next(effective_backend(backend, default_backend));
+        if (next == "spidermonkey") next = "camoufox";
         if (std::find(result.begin(), result.end(), next) == result.end()) result.push_back(std::move(next));
     }
     return result;
@@ -48,6 +58,9 @@ void adopt_backends(Store &store, const Config &config) {
 namespace {
 std::unique_ptr<GenerationBackend> browser_gateway(std::string_view backend, const Config &config, Store &store) {
     if (backend == "camoufox") return std::make_unique<CamoufoxGateway>(config, store);
+#ifdef AIS2API_HAS_SPIDERMONKEY
+    if (backend == "spidermonkey") return std::make_unique<SpiderMonkeyGateway>(config, store);
+#endif
     return std::make_unique<BrowserGateway>(config, store);
 }
 } // namespace
