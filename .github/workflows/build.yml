@@ -109,6 +109,9 @@ jobs:
           python3 tests/cli_smoke.py --exe build/linux/install/bin/ais2api
           python3 tests/portable_smoke.py --exe build/linux/install/bin/ais2api
       - name: One-click launcher smoke without a browser download
+        env:
+          # The stand-in executable is a CloakBrowser one; a new configuration starts on Camoufox.
+          AIS2API_BROWSER_BACKEND: cloakbrowser
         run: |
           sh build/linux/install/start.sh --background --port 18460 --browser /usr/bin/true < /dev/null
           build/linux/install/bin/ais2api stop
@@ -181,6 +184,9 @@ jobs:
           python3 tests/cli_smoke.py --exe build/linux/install/bin/ais2api
           python3 tests/portable_smoke.py --exe build/linux/install/bin/ais2api
       - name: One-click launcher smoke without a browser download
+        env:
+          # The stand-in executable is a CloakBrowser one; a new configuration starts on Camoufox.
+          AIS2API_BROWSER_BACKEND: cloakbrowser
         run: |
           sh build/linux/install/start.sh --background --port 18460 --browser /usr/bin/true < /dev/null
           build/linux/install/bin/ais2api stop
@@ -256,6 +262,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Portable smoke failed' }
       - name: One-click launcher smoke without a browser download
         shell: cmd
+        env:
+          # The stand-in executable is a CloakBrowser one; a new configuration starts on Camoufox.
+          AIS2API_BROWSER_BACKEND: cloakbrowser
         run: |
           call build\windows\install\start.cmd --background --port 18460 --browser %SystemRoot%\System32\whoami.exe < NUL || exit /b 1
           build\windows\install\bin\ais2api.exe stop

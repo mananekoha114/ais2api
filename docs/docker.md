@@ -1,6 +1,6 @@
 # Docker 部署
 
-本文说明如何构建、运行和升级 ais2api 容器镜像。镜像以 Debian 13 为运行时，内置 Debian Chromium，不包含 CloakBrowser，提供 `linux/amd64` 与 `linux/arm64` 两种架构。
+本文说明如何构建、运行和升级 ais2api 容器镜像。镜像以 Debian 13 为运行时，提供 `linux/amd64` 与 `linux/arm64` 两种架构。新容器默认使用 Camoufox（Firefox 身份），第一次启动时下载到数据卷；镜像还内置 Debian Chromium，供已弃用的 CloakBrowser 后端使用，不包含 CloakBrowser。
 
 ## 构建
 
@@ -36,10 +36,11 @@ docker buildx build --platform linux/arm64 -t ais2api:arm64 --load .
 docker run -d --name ais2api \
   -p 18451:18451 \
   -v "$PWD/data:/data" \
+  --shm-size=1g \
   ais2api:local
 ```
 
-首次启动会在数据目录生成 `config.json`，并在容器日志中打印随机生成的管理密码：
+首次启动会在数据目录生成 `config.json`，把 Camoufox（约 1.3 GB）下载到 `data/runtime/camoufox/`，并在容器日志中打印随机生成的管理密码：
 
 ```sh
 docker logs ais2api 2>&1 | grep 'generated management password'
@@ -123,7 +124,23 @@ docker exec ais2api /app/bin/ais2api config reload --config /data/config.json
 
 ## 浏览器
 
-镜像内的浏览器是 Debian Chromium，路径 `/usr/bin/chromium`。程序支持其他 Chromium 构建，但 CloakBrowser 的指纹参数会被其他构建忽略；需要固定账号指纹时使用 CloakBrowser。挂载的 CloakBrowser 必须与容器架构一致。
+### Camoufox
+
+新容器默认使用 Camoufox，一个 Firefox 后端（见 [按账号选择后端](browser.md#按账号选择后端)）。它同时支持 amd64 和 arm64 镜像。
+
+- 镜像不含 Camoufox 本身（约 1.3 GB），只带运行它所需的系统包，包括 Xvfb。
+- 默认后端为 `camoufox`，或者有账号使用 Firefox 后端时，入口脚本会在启动服务前把 Camoufox 安装到 `/data/runtime/camoufox/`，并用本地页面验证一次。
+  - 第一次启动要下载约 1.3 GB，之后复用。
+  - 安装失败时服务照常启动，但不就绪；在容器里运行 `ais2api browser update camoufox --yes` 可以重试。
+- Firefox 需要较大的共享内存，请加上 `--shm-size=1g`（`compose.yaml` 已设置 `shm_size`）。
+
+### Chromium 与 CloakBrowser（已弃用）
+
+CloakBrowser 后端已弃用，将在以后的版本中移除。升级前创建的数据目录保持原来的后端：它的配置和账号不会被自动换成 Firefox 身份，`doctor` 和 Web 控制台会给出弃用提示。迁移方法见 [按账号选择后端](browser.md#按账号选择后端)；账号换成 Firefox 身份后重启容器，入口脚本会在那时安装 Camoufox。
+
+新容器要继续用这个后端，在第一次启动时加上 `-e AIS2API_BROWSER_BACKEND=cloakbrowser`。
+
+镜像内的 Chromium 是 Debian Chromium，路径 `/usr/bin/chromium`。程序支持其他 Chromium 构建，但 CloakBrowser 的指纹参数会被其他构建忽略；需要固定账号指纹时使用 CloakBrowser。挂载的 CloakBrowser 必须与容器架构一致。
 
 CloakBrowser 的二进制许可不允许再分发，公开镜像不能包含它。已有 CloakBrowser 时，把目录只读挂载进容器并指定可执行文件：
 
@@ -132,34 +149,12 @@ docker run -d --name ais2api \
   -p 18451:18451 \
   -v "$PWD/data:/data" \
   -v /opt/cloakbrowser:/opt/cloakbrowser:ro \
+  -e AIS2API_BROWSER_BACKEND=cloakbrowser \
   -e AIS2API_BROWSER_EXECUTABLE=/opt/cloakbrowser/chrome \
   ais2api:local
 ```
 
 浏览器必须从 CloakHQ 官方渠道获取。不要把自己构建的含 CloakBrowser 镜像上传到公共仓库。
-
-### Camoufox
-
-实验性的 Firefox 后端使用 Camoufox（见 [按账号选择后端](browser.md#按账号选择后端)）。
-
-- 镜像不含 Camoufox 本身（约 1.3 GB），只带运行它所需的系统包，包括 Xvfb。
-- 默认后端为 `camoufox`，或者有账号使用 Firefox 后端时，入口脚本会在启动服务前把 Camoufox 安装到 `/data/runtime/camoufox/`，并用本地页面验证一次。
-  - 第一次启动要下载约 1.3 GB，之后复用。
-  - 安装失败时服务照常启动，但不就绪；在容器里运行 `ais2api browser update camoufox --yes` 可以重试。
-- Firefox 需要较大的共享内存，请加上 `--shm-size=1g`。
-
-用 Camoufox 作为新账号的默认后端：
-
-```sh
-docker run -d --name ais2api \
-  -p 18451:18451 \
-  -v "$PWD/data:/data" \
-  --shm-size=1g \
-  -e AIS2API_BROWSER_BACKEND=camoufox \
-  ais2api:local
-```
-
-新配置的默认后端仍是 Debian Chromium。不设置环境变量也可以：在 Web 控制台把账号切换到 Firefox 后端，然后重启容器，入口脚本会在那时安装 Camoufox。Camoufox 同时支持 amd64 和 arm64 镜像。
 
 ## 发布镜像
 

@@ -1115,7 +1115,8 @@ json::object setup_cloakbrowser(Config &config, bool approved) {
 }
 } // namespace
 json::object setup_runtime(Config &config, bool approved, std::string_view backend) {
-    const auto backends = backend.empty() ? backends_needed(config.browser_backend, stored_backends(config.data_dir))
+    const auto accounts = stored_backends(config.data_dir);
+    const auto backends = backend.empty() ? backends_needed(config.browser_backend, accounts)
                                           : std::vector<std::string>{std::string(backend)};
     // The first backend's result is the answer; the others nest under their names.
     json::object result;
@@ -1127,6 +1128,11 @@ json::object setup_runtime(Config &config, bool approved, std::string_view backe
         prepared.emplace_back(name);
     }
     result["backends"] = std::move(prepared);
+    // CloakBrowser prepared on request alone is deprecated all the same.
+    auto deprecations = backend_deprecations(config.browser_backend, accounts);
+    if (deprecations.empty() && backend == "cloakbrowser")
+        deprecations.push_back(json::object{{"code", "cloakbrowser_backend"}, {"default_backend", false}, {"accounts", false}});
+    result["deprecations"] = std::move(deprecations);
     return result;
 }
 namespace {
@@ -1184,7 +1190,8 @@ json::object rollback_runtime(Config &config, const fs::path &program_directory,
 }
 json::object doctor(const Config &config, const fs::path &program_directory,
                     std::optional<std::vector<std::string>> stored) {
-    const auto backends = backends_needed(config.browser_backend, stored ? *stored : stored_backends(config.data_dir));
+    const auto accounts = stored ? *stored : stored_backends(config.data_dir);
+    const auto backends = backends_needed(config.browser_backend, accounts);
     const auto needs = [&](std::string_view backend) {
         return std::find(backends.begin(), backends.end(), backend) != backends.end();
     };
@@ -1200,6 +1207,7 @@ json::object doctor(const Config &config, const fs::path &program_directory,
             {"manifest_available", !manifest().empty()},
             {"browser_backend", config.browser_backend},
             {"backends_needed", std::move(needed)},
+            {"deprecations", backend_deprecations(config.browser_backend, accounts)},
             {"google_access", "not_checked"}};
     // Ready only when every backend the accounts need is.
     bool configured = true, exists = true;

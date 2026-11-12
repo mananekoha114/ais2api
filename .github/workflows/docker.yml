@@ -80,7 +80,10 @@ jobs:
           set -eu
           data="$RUNNER_TEMP/ais2api-data"
           mkdir -p "$data"
+          # A new configuration starts on Camoufox, which the entrypoint installs
+          # into the data volume. This smoke checks the Chromium the image carries.
           docker run --rm --entrypoint /app/bin/ais2api \
+            -e AIS2API_BROWSER_BACKEND=cloakbrowser \
             -v "$data:/data" "$IMAGE" \
             init --config /data/config.json --data-dir /data \
             --bind 0.0.0.0 --browser /usr/bin/chromium
@@ -88,7 +91,9 @@ jobs:
             -v "$data:/data" "$IMAGE" \
             doctor --config /data/config.json > "$RUNNER_TEMP/doctor.json"
           cat "$RUNNER_TEMP/doctor.json"
+          grep -q '"browser_backend":"cloakbrowser"' "$RUNNER_TEMP/doctor.json"
           grep -q '"browser_exists":true' "$RUNNER_TEMP/doctor.json"
+          grep -q '"code":"cloakbrowser_backend"' "$RUNNER_TEMP/doctor.json"
           docker run --rm --entrypoint /usr/bin/chromium "$IMAGE" \
             --no-sandbox --headless=new --disable-gpu --disable-dev-shm-usage \
             --dump-dom about:blank | grep -q '<html'

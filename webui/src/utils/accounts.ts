@@ -1,4 +1,4 @@
-import type { Account } from '../api/types'
+import type { Account, Deprecation } from '../api/types'
 import type { IconName } from '../icons'
 import { isIndefinite } from './format'
 
@@ -54,6 +54,17 @@ const backendNames: Record<string, string> = {
 export const backendLabel = (backend: string | undefined) => (backend ? backendNames[backend] ?? backend : '—')
 /** CloakBrowser presents Chrome; every other backend a Firefox identity. */
 export const backendIdentity = (backend: string) => (backend === 'cloakbrowser' ? 'chrome' : 'firefox')
+
+/** What to do about the deprecated CloakBrowser backend; empty when the installation no longer uses it. */
+export function cloakbrowserNotice(deprecations: Deprecation[] | undefined): string {
+  const entry = deprecations?.find((d) => d.code === 'cloakbrowser_backend')
+  if (!entry) return ''
+  const steps: string[] = []
+  if (entry.default_backend) steps.push('在“配置”中把浏览器后端改为 Camoufox，新账号才不会再用它')
+  if (entry.accounts)
+    steps.push('在账号的指纹对话框中把后端改为“自动”，或运行 ais2api accounts backend --all auto --yes（Google 会把换了身份的账号看作一台新设备）')
+  return `CloakBrowser 后端将在以后的版本中移除。${steps.join('；')}。`
+}
 
 /** Human-readable reason of a stored cooldown kind. */
 export const cooldownReason = (kind: string | undefined) => (kind ? cooldownKinds[kind] ?? kind : '—')

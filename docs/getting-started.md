@@ -26,7 +26,9 @@ ais2api/
 
 首次运行后，`bin/` 旁会生成 `config.json` 和 `data/`，程序所有状态都在这两处。
 
-> 可选的 `Browser-Local` 包内附锁定版本的 CloakBrowser，省去下载浏览器的步骤。它受 CloakBrowser 独立许可约束，仅供个人或内部使用，详见 [第三方说明](../THIRD_PARTY_NOTICES.md)。
+> 新安装默认使用 Camoufox（Firefox 身份），第一次运行 `setup` 时下载约 1.3 GB。CloakBrowser 后端已弃用，将在以后的版本中移除；已有的安装保持原来的后端，迁移方法见 [按账号选择后端](browser.md#按账号选择后端)。
+>
+> 可选的 `Browser-Local` 包内附锁定版本的 CloakBrowser，只对仍在使用 CloakBrowser 后端的安装有用，将随 CloakBrowser 一起移除。它受 CloakBrowser 独立许可约束，仅供个人或内部使用，详见 [第三方说明](../THIRD_PARTY_NOTICES.md)。
 
 ## 2. 一键启动
 

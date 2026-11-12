@@ -8,6 +8,7 @@ import { api, describeError } from '../api/client'
 import type { BackendEvents, BrowserDiagnostics, Capabilities, ConfigView, LogSource, Status } from '../api/types'
 import { refreshStatus } from '../stores/service'
 import { confirm, copyText, downloadFile, notify, notifyError } from '../stores/ui'
+import { cloakbrowserNotice } from '../utils/accounts'
 import { browserPhase, browserStatus, cookieRefreshLabel, modelDiscoveryLabel, proxyModeLabel } from '../utils/browser'
 import { formatBytes, formatDuration, formatTimestamp } from '../utils/format'
 
@@ -42,6 +43,7 @@ const loadError = ref('')
 const exporting = ref(false)
 const showRaw = ref(false)
 const stopping = ref(false)
+const deprecation = computed(() => cloakbrowserNotice(data.value?.status?.deprecations))
 
 async function load() {
   loading.value = true
@@ -132,6 +134,7 @@ const capabilityList = computed(() =>
       <FInfoBar v-if="loadError" severity="error" title="加载失败" :message="loadError" />
 
       <template v-if="data">
+        <FInfoBar v-if="deprecation" severity="warning" title="CloakBrowser 已弃用" :message="deprecation" />
         <FInfoBar
           v-if="data.google_verified === false"
           severity="info"

@@ -232,6 +232,10 @@ class PortableSmoke:
             expected = self.program / "browser-runtime" / self.platform / binary
             self.check(prefix + "_resolved_bundled_browser",
                        Path(configuration.get("browser_executable", "")).resolve() == expected.resolve())
+        # A new installation starts on Camoufox, unless the package carries CloakBrowser.
+        if "AIS2API_BROWSER_BACKEND" not in self.environment:
+            self.check(prefix + "_new_installation_backend",
+                       configuration.get("browser_backend") == ("cloakbrowser" if self.has_bundle else "camoufox"))
         self.check(prefix + "_offline_status", self.cli("status").get("running") is False)
         self.port = free_port()
         self.current = prefix + "_start"

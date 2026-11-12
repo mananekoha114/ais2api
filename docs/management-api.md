@@ -49,7 +49,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 | GET | `/auth/check` | 验证密码，返回 `password_change_required` |
 | POST | `/auth/password` | 修改管理密码，正文 `{"password": "..."}`，立即生效 |
 | GET | `/version`、`/capabilities` | 版本与能力 |
-| GET | `/status` | 服务状态、队列、正在生成的账号、`logging_healthy`、`pending_logs` |
+| GET | `/status` | 服务状态、队列、正在生成的账号、`logging_healthy`、`pending_logs`；`deprecations` 列出仍在使用、以后会移除的功能（目前只有 `cloakbrowser_backend`，见 [按账号选择后端](browser.md#按账号选择后端)） |
 | POST | `/service/stop` | 停止本地服务，返回 202 |
 
 ### 账号

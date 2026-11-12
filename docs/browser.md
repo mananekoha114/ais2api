@@ -36,11 +36,15 @@ CloakBrowser 的指纹作用于整个进程，因此切换到指纹不同的账�
 
 | 取值 | 身份 | 使用的浏览器 |
 |---|---|---|
-| `cloakbrowser` | Chrome | CloakBrowser |
+| `cloakbrowser` | Chrome | CloakBrowser（**已弃用**，将在以后的版本中移除） |
 | `auto` | Firefox | 由 ais2api 选择 Firefox 后端，目前即 Camoufox |
 | `camoufox` | Firefox | Camoufox |
 | `spidermonkey` | Firefox | 尚未提供 |
 
+- **CloakBrowser 已弃用**：
+  - 新建的配置默认使用 `camoufox`；已有的配置和账号保持原样，不会被自动换成另一种身份。
+  - 默认后端或任何账号仍是 `cloakbrowser` 时，`doctor`、`GET /status`、`setup` 的结果和诊断报告都带有 `deprecations`（代号 `cloakbrowser_backend`，`default_backend` 和 `accounts` 说明是哪一处在用），服务启动时写一条 `backend_deprecated` 日志，WebUI 的账号页和诊断页显示提示。
+  - 迁移：把 `browser_backend` 改为 `camoufox`，再运行 `ais2api accounts backend --all auto --yes` 把账号换成 Firefox 身份。Google 会把换了身份的账号看作一台新设备。
 - 新账号保存时取配置项 `browser_backend` 对应的值：`cloakbrowser` 保存为 `cloakbrowser`，`camoufox` 保存为 `auto`。升级前已有的账号在第一次启动时保存为当时实际使用的后端。之后修改 `browser_backend` 只影响新账号和 Cookie 导入的验证，不会把已有账号换成另一种身份。
 - 在 CloakBrowser 与 Firefox 之间切换必须显式操作并确认（命令行 `accounts backend`、管理 API 或 WebUI 的指纹对话框），因为 Google 会把新身份看作一台新设备。Firefox 后端之间可以直接切换，身份不变。两种身份都由同一个种子确定，切回时得到原来的身份。
 - 同一时间只有一个浏览器驻留：轮到另一个后端的账号时，先关闭当前浏览器，再启动另一个。

@@ -77,9 +77,9 @@ TEST_CASE("browser DevTools origins and site isolation keep Chromium defaults an
         for (auto key : {"browser_remote_allow_origins", "browser_site_isolation"})
             CHECK_THROWS_AS(cfg.patched({{key, invalid}}), Error);
 }
-TEST_CASE("browser backend defaults to CloakBrowser, accepts Camoufox and applies without a restart", "[config][admin][browser]") {
+TEST_CASE("a file without a browser backend stays on CloakBrowser, accepts Camoufox and applies without a restart", "[config][admin][browser]") {
     AdminDirectory dir;
-    // A file that names no backend; a new one starts on the build's backend.
+    // A file that names no backend is an older installation; a new one starts on Camoufox.
     atomic_write(dir.path / "config.json", R"({"version":1})");
     auto cfg = Config::load(dir.path / "config.json");
     CHECK(Config{}.browser_backend == "cloakbrowser");
@@ -260,20 +260,20 @@ TEST_CASE("new configurations start with the default management password", "[con
     CHECK_THROWS_AS(reloaded.patched({{"admin_key", "admin"}}), Error);
     CHECK(reloaded.patched({{"admin_key", "replacement-admin"}}).admin_key == "replacement-admin");
 }
-TEST_CASE("new configurations start with the build's browser backend", "[config]") {
+TEST_CASE("new configurations start on Camoufox in every build", "[config]") {
 #ifdef AIS2API_DEV_BUNDLE
     CHECK(build_mode() == "dev");
-    const std::string backend = "camoufox";
 #else
     CHECK(build_mode() == "release");
-    const std::string backend = "cloakbrowser";
 #endif
     AdminDirectory dir;
     auto fresh = Config::load(dir.path / "config.json");
-    CHECK(fresh.browser_backend == backend);
+    CHECK(fresh.browser_backend == "camoufox");
     fresh.save();
-    CHECK(Config::load(fresh.config_file).browser_backend == backend);
-    // A file that names no backend keeps CloakBrowser in every build.
+    CHECK(Config::load(fresh.config_file).browser_backend == "camoufox");
+    // The environment still starts a new installation on CloakBrowser.
+    CHECK(Config::load(dir.path / "other.json", {{"browser_backend", "cloakbrowser"}}).browser_backend == "cloakbrowser");
+    // A file that names no backend keeps CloakBrowser.
     atomic_write(fresh.config_file, R"({"version":1})");
     CHECK(Config::load(fresh.config_file).browser_backend == "cloakbrowser");
 }

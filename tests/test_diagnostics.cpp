@@ -34,6 +34,9 @@ DiagnosticsSources planted() {
                                      {"droppedProperties", json::array{"a", "b", "c"}}}}};
     sources.runtime = {{"build_mode", "release"}, {"browser_backend", "camoufox"}, {"browser_exists", true},
                        {"config_file", "C:/Users/PlantedUser/config.json"},
+                       {"deprecations", json::array{json::object{{"code", "cloakbrowser_backend"}, {"default_backend", false},
+                                                                 {"accounts", true}, {"note", "planted note"}},
+                                                    json::object{{"code", "planted_code"}}}},
                        {"data_directory", "C:/Users/PlantedUser/data"},
                        {"fpgen_model", {{"tag", "model-2/2026"}, {"source", "setup"}, {"state", "installed"},
                                         {"directory", "C:/Users/PlantedUser/data/runtime/fpgen"}}},
@@ -80,6 +83,8 @@ TEST_CASE("the diagnostics report holds allowlisted fields only", "[diagnostics]
     CHECK(report.at("config").at("proxy") == "socks5");
     CHECK(report.at("runtime").at("camoufox").at("bundle_state") == "installed");
     CHECK(report.at("runtime").at("fpgen_model").at("state") == "installed");
+    CHECK(report.at("runtime").at("deprecations") ==
+          json::array{json::object{{"code", "cloakbrowser_backend"}, {"default_backend", false}, {"accounts", true}}});
     CHECK(report.at("browser").at("identity").at("droppedProperties") == 3);
     CHECK(report.at("browser").at("browser").at("version") == "158.0.1-beta.41");
     CHECK(report.at("events").at("backends").at("camoufox").at("permission_denied").at("total") == 3);
