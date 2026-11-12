@@ -147,7 +147,9 @@ TEST_CASE("document.lastModified is the load time in the page's zone", "[spiderm
 
 TEST_CASE("The page names its signed-in account", "[spidermonkey]") {
     CHECK(page_email(R"(window.WIZ_global_data = {"S06Grb":"1","oPEP7c":"someone@example.com","W3Yyqf":"2"};)") == "someone@example.com");
-    CHECK(page_email(R"({"oPEP7c":"quote\"d@example.com"})") == "quote\"d@example.com");
+    // MSVC 14.44 cannot take a raw string holding \" as a macro argument.
+    constexpr std::string_view quoted = R"({"oPEP7c":"quote\"d@example.com"})";
+    CHECK(page_email(quoted) == "quote\"d@example.com");
     CHECK(page_email(R"({"oPEP7c":"unterminated)").empty());
     CHECK(page_email("<html></html>").empty());
 }
@@ -178,8 +180,8 @@ TEST_CASE("AI Studio's refusals and RPC failures are told apart", "[spidermonkey
 }
 
 TEST_CASE("The page counts the tokens of its prompt box", "[spidermonkey]") {
-    CHECK(count_tokens_body("models/gemini-3.1-flash-lite", "hi \"there\"") ==
-          R"(["models/gemini-3.1-flash-lite",[[[[null,"hi \"there\""]],"user"]]])");
+    constexpr std::string_view expected = R"(["models/gemini-3.1-flash-lite",[[[[null,"hi \"there\""]],"user"]]])";
+    CHECK(count_tokens_body("models/gemini-3.1-flash-lite", "hi \"there\"") == expected);
     CHECK(tier_header("plus") == "TIER0");
     CHECK(tier_header("pro") == "TIER1");
     CHECK(tier_header("ultra") == "TIER2");
