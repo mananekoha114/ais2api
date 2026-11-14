@@ -29,7 +29,7 @@
   - "自动"使用默认后端；就地重建会话后仍是 403（Code 7）这类和 WAA 有关的失败时，这次请求换到另一种 Firefox 后端重试，之后该账号 6 小时内留在新后端。
   - 手动指定后端时固定使用，不自动切换。
   - 不会在 CloakBrowser（Chrome 身份）和 Firefox 后端之间自动切换。
-  - 新账号的默认后端在 SpiderMonkey 原型有结果后决定。
+  - 新账号的默认后端在 P4 决定。SpiderMonkey 原型的对照实验没有完成（见下文“分阶段计划”），在此之前保持 Camoufox。
 - **模块边界**：新写的 SpiderMonkey WAA 运行时和 BiDi 客户端做成不依赖 `server`、`config`、`store` 的独立静态库。JS 宿主与对象结构表在构建时由 CMake 嵌入（与 `bridge.js` 相同），诊断信息显示其 SHA-256；运行时目录由调用方传入。这样以后的 Windows 桌面 App 和 Android App 可以直接使用。整个核心是否拆成库，在 App 立项时再定。
 - **并发**：第一版主线沿用"只常驻一个账号、请求排队"的调度方式。多账号并发在 SpiderMonkey 后端稳定后单独评估。
 
@@ -106,7 +106,10 @@
 
 - **复用参考项目代码**：直接使用 `internal/waa/dom.js`、`smhost.js`、对象结构表和 `mozjs/mozjs.cpp`，把 Go 部分翻译成 C++（`internal/waa` 约 1500 行，`internal/aistudio/runtime_go.go` 约 1000 行）。在 `THIRD_PARTY_NOTICES.md` 中保留 MIT 声明。复用时按本项目的维护习惯调整，并兼顾以后的桌面 App 与 Android App。
 - **编译**：参考项目的 Windows 静态库由 llvm-mingw 编译，C++ ABI 与 MSVC 不兼容，必须用 clang-cl 自己编译。
-- **网络指纹**：直接发出的受保护请求在 TLS 握手和 HTTP/2 帧特征上必须像 Firefox，否则请求头声称 Firefox、握手却是 OpenSSL。这是进主线的必要条件。具体实现（curl-impersonate 的 Firefox 模式、基于 BoringSSL/NSS 构造握手、是否支持 HTTP/3）在原型阶段调研后再定。原型阶段可以先用普通 libcurl，测试网络指纹是否为硬性条件。
+- **网络指纹**：直接发出的受保护请求在 TLS 握手和 HTTP/2 帧特征上必须像 Firefox，否则请求头声称 Firefox、握手却是 OpenSSL。这是进主线的必要条件。原型阶段先用普通 libcurl。
+  - P3 的调研见 [Firefox 网络指纹调研](reports/firefox-network-fingerprint-2026-11-12.md)：Windows 上 libcurl 用 Schannel，ClientHello 与 Firefox 差别很大；curl-impersonate 的 Firefox 配置与实测的 Camoufox 158 大体一致，差异在 FFDHE 组、HEADERS 的优先级权重和流级 WINDOW_UPDATE。
+  - Google 的相关域名都通过 `Alt-Svc` 声明 HTTP/3。经 HTTP 代理时 Firefox 只用 HTTP/2；不用代理时 Firefox 很可能改用 HTTP/3，所以也要模仿 QUIC 和 HTTP/3。
+  - 建议以 curl-impersonate（lexiforest 分支）为基础，各项参数按我们自己对 Firefox 的抓包设置，并用同样的方法验证；备选是 NSS 加 nghttp2。由维护者选定。
 - **Termux 与 Android App**：Termux 使用原生 NDK 版，不需要 proot。Android App 没有 Camoufox，只能使用 SpiderMonkey；是否用 GeckoView 兜底，在 Android App 立项时评估。
 
 ## 构建模式
@@ -158,7 +161,12 @@ P2 的各项已于 2026-11-08 实现（#19–#25），并按合并标准做了�
 - Windows：本机运行隐藏测试；
 - Linux x64 与 ARM64（含 Docker）、Termux ARM64：CI 的 `camoufox-runtime.yml` 用 `setup` 安装 Camoufox 并运行隐藏测试，全程只打开本地页面。
 
-接下来在 P3 开始前用真实账号统一验证。
+真实账号的统一验证于 2026-11-11 完成：两个测试账号的生成、工具调用、切换账号、身份不变和诊断报告都正常。
+
+P3 于 2026-11-12 完成原型，见 [原型报告](reports/spidermonkey-prototype-2026-11-12.md)：
+- 一个测试账号用 SpiderMonkey 后端生成 2 次都成功，进程工作集 75 MiB，没有浏览器进程；
+- 四格对照实验（proof 来源 × 发送方式）在第一轮遇到一次 403 后按停止条件中止，那一格同时存在几种差异，不能据此判断原因。通过率是否与 Camoufox 相当没有证明，对照实验移到 P4，在实现 Firefox 网络指纹之后进行；
+- 网络指纹的实现方案已调研，待维护者选定。
 
 每项工作单独开分支、提 PR 到 main，由维护者审核合并。
 
@@ -173,7 +181,7 @@ P2 的各项已于 2026-11-08 实现（#19–#25），并按合并标准做了�
 | 第一批 | Anthropic Messages 接口，以 Claude Code 能完整使用为验收标准：`/v1/messages` 流式与非流式、工具调用与工具结果、思考块及签名往返、图片输入，`/v1/messages/count_tokens` 使用上游 CountTokens；暂不支持 `context_management` |
 | 第二批 | 模型名思考强度后缀（如 `model(low)`）、`MODEL_MAPPING` 模型别名 |
 | 第三批 | 代理池：健康检查与账号固定出口 |
-| 待数据 | 根据 SpiderMonkey 原型中 Code 7 的实测行为，校准 `include/ais2api/retry_policy.hpp` 中 403 的处理 |
+| 待数据 | 根据 SpiderMonkey 后端 Code 7 的实测行为，校准 `include/ais2api/retry_policy.hpp` 中 403 的处理。P3 只得到一个出在混合组合上的数据点，继续等待 |
 
 ## 明确不做
 
@@ -185,8 +193,8 @@ P2 的各项已于 2026-11-08 实现（#19–#25），并按合并标准做了�
 
 | 事项 | 决定时机 |
 |---|---|
-| 新账号的默认后端 | SpiderMonkey 原型结果出来后 |
-| Firefox 网络指纹的实现方案 | SpiderMonkey 原型阶段调研后 |
+| 新账号的默认后端 | P4，对照实验完成后 |
+| Firefox 网络指纹的实现方案 | P3 已调研并给出建议，由维护者选定 |
 | 多账号并发 | SpiderMonkey 后端稳定后 |
 | 整个核心拆成库 | 桌面 App 或 Android App 立项时 |
 | Android App 的兜底方案（GeckoView） | Android App 立项时 |

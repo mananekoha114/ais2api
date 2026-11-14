@@ -44,10 +44,21 @@ Camoufox 后端的身份生成器（`src/fpgen.cpp`、`src/firefox_identity.cpp`
 
 移植部分的许可不因 ais2api 的许可选择而改变。Camoufox 浏览器本身（MPL 2.0）不纳入仓库和正式运行包：`setup` 从官方 GitHub Release 下载锁定版本，跳过自带的字体（保留 emoji 字体）和 uBlock Origin 后安装在数据目录中，其余文件保持原样。开发版运行包在 `bin/camoufox-runtime/` 中附带同一锁定版本，裁剪方式相同，其余文件同样未作修改；其源码见 [Camoufox 仓库](https://github.com/daijro/camoufox) 中与 `runtime-manifest.json` 所锁定版本同名的标签，MPL 2.0 全文与本项目的 [LICENSE](LICENSE) 相同。
 
+## WAA 运行时
+
+`waa/` 是 [AIStudio2API](https://github.com/Mag1cFall/AIStudio2API/tree/e38957a084c8928977e74a1d4faba80e5e852950)（MIT License，Copyright (c) 2026 Mag1cFall，[AIStudio2API-LICENSE.txt](licenses/AIStudio2API-LICENSE.txt)）中 `internal/waa` 的 C++ 移植，用于在进程内的 SpiderMonkey 里运行 Google 的 WAA 虚拟机：
+
+- `waa/third_party/aistudio2api/` 中的 `dom.js`、`smhost.js`、`firefox152.json.gz`、`mozjs/mozjs.cpp` 和 `mozjs/mozjs.h` 是该提交中的原文件，未作修改。
+- `waa/src/host_scripts.hpp` 中的 JavaScript 是其 `host.go` 和 `runtime.go` 里的脚本常量，逐字节相同。
+- `waa/src/` 的其余文件按其 Go 实现（`challenge.go`、`host.go`、`loop.go`、`realm.go`、`runtime.go`、`url.go`）用 C++ 重新编写。
+- `tools/spidermonkey/patches/0001-aistudio2api-embedding.patch` 是其 Firefox 分支的提交 [`e297ff009d`](https://github.com/Mag1cFall/firefox/commit/e297ff009d3b9afee0e223c02ae3271ef24d51b6)（MPL 2.0），应用于 SpiderMonkey 152.0.4。
+
+每个构建都会编译其中不需要 JavaScript 引擎的部分（challenge 解码、事件循环、文本解码）。虚拟机本身只在打开构建选项 `AIS2API_SPIDERMONKEY` 时编译；正式运行包目前不打开这个选项，也不包含 SpiderMonkey。Google 的 WAA 解释器和 challenge program 不纳入仓库。该许可不因 ais2api 的许可选择而改变。
+
 ## 原理参考
 
 [aistudio-api-termux](https://github.com/ReedSein/aistudio-api-termux/tree/84b50663fcae79058fe33e0e45b5c3452da7c461) 用于理解行为和私有协议事实。其本身采用 MIT 许可，版权归其贡献者；该许可不因 ais2api 的许可选择而改变。
 
 [AIStudio2API](https://github.com/Mag1cFall/AIStudio2API/tree/80847a7665c442a238918c957963217773f36291)（MIT License，Copyright (c) 2026 Mag1cFall）是 Camoufox 后端的参考。按账号语言与时区改写 Camoufox 配置的键（现位于 `src/firefox_identity.cpp`），以及 `src/camoufox.cpp` 中 `CAMOU_CONFIG_N` 的分段大小、BiDi 端点的读取方式和 Firefox 首选项清单，参照了其 `internal/camoufoxnative`（Go）的做法，由本项目用 C++ 重新编写；该许可不因 ais2api 的许可选择而改变。
 
-除上文“Firefox 身份生成”列出的移植代码和目录数据外，本仓库的 C++ 实现、网页桥接脚本及回归样例独立编写，不包含参考项目的 Python/JavaScript 实现文件或测试实现。本地 `.analysis/` 克隆、依赖 checkout 和生成文件不纳入 Git 提交。如果后续引入任何第三方源码，应逐文件保留其许可和版权声明，并更新本说明。
+除上文“Firefox 身份生成”和“WAA 运行时”列出的移植代码、原文件和目录数据外，本仓库的 C++ 实现、网页桥接脚本及回归样例独立编写，不包含参考项目的 Python/JavaScript 实现文件或测试实现。本地 `.analysis/` 克隆、依赖 checkout 和生成文件不纳入 Git 提交。如果后续引入任何第三方源码，应逐文件保留其许可和版权声明，并更新本说明。

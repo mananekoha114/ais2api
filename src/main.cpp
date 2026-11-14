@@ -121,7 +121,7 @@ void help() {
                  "  browser update [BACKEND] | browser rollback [BACKEND]\n"
                  "  accounts list | import (--file PATH | --stdin) [--name NAME]\n"
                  "  accounts select ID | remove ID | reset ID | probe (ID | all)\n"
-                 "  accounts backend (ID | --all) (cloakbrowser | auto | camoufox) [--yes]\n"
+                 "  accounts backend (ID | --all) (cloakbrowser | auto | camoufox | spidermonkey) [--yes]\n"
                  "  keys list (edit api_key in config.json to set or rotate)\n"
                  "  stats | diagnostics | models list | config show | config validate | config reload\n"
                  "  operations status ID\n\n"

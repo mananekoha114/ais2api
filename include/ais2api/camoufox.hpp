@@ -100,6 +100,12 @@ class CamoufoxGateway final : public GenerationBackend {
     void reset_session() override;
     void clear_template() override;
     bool release_idle() override;
+    // For tools/waa_experiment only: generate() in its two halves. The page's
+    // request ticket for the request's content, and the request sent by the
+    // page with a ticket from anywhere.
+    std::string experiment_ticket(const Request &request, const Account &account, std::stop_token cancel = {});
+    void experiment_send(const Request &request, const Account &account, std::string_view ticket, const EventSink &sink,
+                         std::stop_token cancel = {});
 
   private:
     struct Impl;

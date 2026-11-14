@@ -1291,7 +1291,9 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
             throw Error(400, "invalid_password", "Expected only a string password");
         command = {{"command", "admin.password"}, {"password", body.at("password")}};
     }
-    else if (get && path == "/version") result = {{"version", "0.1.0"}, {"build_mode", build_mode()}, {"management_api", "v1"}};
+    else if (get && path == "/version")
+        result = {{"version", "0.1.0"}, {"build_mode", build_mode()}, {"management_api", "v1"},
+                  {"backends", json::object{{"spidermonkey", spidermonkey_available()}}}};
     else if (get && path == "/capabilities") result = {
         {"api_version", "v1"}, {"accounts", true}, {"rotation", true}, {"stats", true},
         {"config", true}, {"keys", "config_and_managed"}, {"diagnostics", true},

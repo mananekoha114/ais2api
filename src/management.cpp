@@ -87,7 +87,7 @@ json::object fingerprint_view(Store& store, const Config& config, std::string_vi
             {"effective_locale", fingerprint.locale.empty() ? locale : fingerprint.locale},
             {"host_timezone", timezone}, {"host_locale", locale},
             {"backend", backend}, {"effective_backend", effective}, {"identity", identity_family(effective)},
-            {"firefox_identity_saved", firefox.has_value()}};
+            {"firefox_identity_saved", firefox.has_value()}, {"spidermonkey_available", spidermonkey_available()}};
 }
 json::object fingerprint_view(Store& store, const Config& config, std::string_view id) {
     return fingerprint_view(store, config, id, store.fingerprint(id));
@@ -96,8 +96,8 @@ std::string backend_value(const json::object& command) {
     const auto value = command.if_contains("backend");
     if (!value || !value->is_string() || !valid_account_backend(value->as_string()))
         throw Error(400, "invalid_backend", "backend must be cloakbrowser, auto, camoufox or spidermonkey");
-    if (value->as_string() == "spidermonkey")
-        throw Error(400, "backend_unavailable", "The SpiderMonkey backend is not available yet");
+    if (value->as_string() == "spidermonkey" && !spidermonkey_available())
+        throw Error(400, "backend_unavailable", "This build does not include the SpiderMonkey backend");
     return std::string(value->as_string());
 }
 bool identity_change_confirmed(const json::object& command) {

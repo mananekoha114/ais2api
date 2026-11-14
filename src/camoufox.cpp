@@ -1183,6 +1183,10 @@ struct CamoufoxGateway::Impl {
         result["trustedKey"] = trusted;
         return result;
     }
+    // The two halves of generate(): the page's request ticket for the
+    // request's content, and the request sent by the page with a ticket.
+    std::string ticket(const Request& request, std::stop_token token);
+    void send(const Request& request, const Account& account, std::string_view snapshot, const EventSink& sink, std::stop_token token);
 };
 
 CamoufoxGateway::CamoufoxGateway(const Config& config, Store& store) : impl_(std::make_unique<Impl>(config, store)) {}
@@ -1318,47 +1322,65 @@ json::array CamoufoxGateway::models(const Account& account, std::stop_token canc
     impl_->models_discovered = true;
     return result.as_array();
 }
-void CamoufoxGateway::generate(const Request& request, const Account& account, const EventSink& sink, std::stop_token cancel) {
-    std::lock_guard lock(impl_->mutex);
-    impl_->ensure_account(account, cancel, true);
-    impl_->phase = "snapshot_ticket";
-    auto wire = encode_request(request, impl_->base_template, "", impl_->timezone);
+std::string CamoufoxGateway::Impl::ticket(const Request& request, std::stop_token token) {
+    phase = "snapshot_ticket";
+    auto wire = encode_request(request, base_template, "", timezone);
     // Covers the bridge's bounded snapshot retries (3 x 9 s).
-    auto snapshot = impl_->eval("globalThis.__ais2bridge.snapshot(" + quote_js(browser_detail::wire_content_hash(wire)) + ")", cancel, 30s);
+    auto snapshot = eval("globalThis.__ais2bridge.snapshot(" + quote_js(browser_detail::wire_content_hash(wire)) + ")", token, 30s);
     if (!snapshot.is_string() || snapshot.as_string().empty()) incompatible("Snapshot service produced no request ticket");
-    json::array().swap(wire);
-    const auto chunk_bytes = std::min<std::size_t>(32768, impl_->config.limits.relay_bytes);
+    return std::string(snapshot.as_string());
+}
+void CamoufoxGateway::Impl::send(const Request& request, const Account& account, std::string_view snapshot, const EventSink& sink,
+                                 std::stop_token token) {
+    const auto chunk_bytes = std::min<std::size_t>(32768, config.limits.relay_bytes);
     if (!chunk_bytes) throw Error(500, "invalid_config", "Browser relay byte budget must be positive");
     try {
         browser_detail::GenerationIO io;
         io.encode = [&](std::string_view checkpoint) {
-            return json::serialize(encode_request(request, impl_->base_template, std::string_view(snapshot.as_string()), impl_->timezone, checkpoint));
+            return json::serialize(encode_request(request, base_template, snapshot, timezone, checkpoint));
         };
         io.start = [&](std::string_view body, const std::function<void()>& check) {
             check();
-            impl_->phase = "request_authorization";
-            const auto authorization = impl_->authorization(cancel);
-            impl_->phase = "generation_upload";
-            const auto upload = impl_->upload(body, cancel);
+            phase = "request_authorization";
+            const auto signature = authorization(token);
+            phase = "generation_upload";
+            const auto upload_id = upload(body, token);
             check();
-            impl_->phase = "generation_start";
-            impl_->eval("globalThis.__ais2bridge.start({upload:" + quote_js(upload) + ",authUser:" + quote_js(account.auth_user) +
-                            ",authorization:" + quote_js(authorization) + ",chunkBytes:" + std::to_string(chunk_bytes) + "})",
-                        cancel);
-            impl_->phase = "generation_read";
+            phase = "generation_start";
+            eval("globalThis.__ais2bridge.start({upload:" + quote_js(upload_id) + ",authUser:" + quote_js(account.auth_user) +
+                     ",authorization:" + quote_js(signature) + ",chunkBytes:" + std::to_string(chunk_bytes) + "})",
+                 token);
+            phase = "generation_read";
         };
         io.next = [&](std::uint64_t acknowledgment) {
-            return impl_->eval("globalThis.__ais2bridge.next(" + std::to_string(acknowledgment) + ",250)", cancel, 5s);
+            return eval("globalThis.__ais2bridge.next(" + std::to_string(acknowledgment) + ",250)", token, 5s);
         };
         io.completed = [&] {
-            impl_->phase = "generation_complete";
-            if (Clock::now() - impl_->cookies_saved_at >= 300s)
-                try { impl_->persist_cookies(account, {}); } catch (...) {}
+            phase = "generation_complete";
+            if (Clock::now() - cookies_saved_at >= 300s)
+                try { persist_cookies(account, {}); } catch (...) {}
         };
-        browser_detail::run_generation(request, impl_->config.limits, impl_->config.continuation_retry_enabled, io, sink, cancel);
+        browser_detail::run_generation(request, config.limits, config.continuation_retry_enabled, io, sink, token);
     } catch (...) {
-        try { impl_->eval("globalThis.__ais2bridge.abort()", {}, 3s); } catch (...) { impl_->close(); }
+        try { eval("globalThis.__ais2bridge.abort()", {}, 3s); } catch (...) { close(); }
         throw;
     }
+}
+void CamoufoxGateway::generate(const Request& request, const Account& account, const EventSink& sink, std::stop_token cancel) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->ensure_account(account, cancel, true);
+    const auto ticket = impl_->ticket(request, cancel);
+    impl_->send(request, account, ticket, sink, cancel);
+}
+std::string CamoufoxGateway::experiment_ticket(const Request& request, const Account& account, std::stop_token cancel) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->ensure_account(account, cancel, true);
+    return impl_->ticket(request, cancel);
+}
+void CamoufoxGateway::experiment_send(const Request& request, const Account& account, std::string_view ticket, const EventSink& sink,
+                                      std::stop_token cancel) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->ensure_account(account, cancel, true);
+    impl_->send(request, account, ticket, sink, cancel);
 }
 } // namespace ais2api

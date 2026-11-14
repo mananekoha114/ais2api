@@ -186,6 +186,21 @@ describe('browser fingerprint dialog', () => {
     expect(calls.at(-1)?.body).toEqual({ backend: 'auto', confirm_identity_change: false })
   })
 
+  it('offers the experimental SpiderMonkey backend only in a build that has it', async () => {
+    stored = { ...stored, backend: 'camoufox', effective_backend: 'camoufox', identity: 'firefox', firefox_identity_saved: true, spidermonkey_available: true }
+    await mountDialog()
+    const option = segment('浏览器后端', 'SpiderMonkey（实验性）')
+    expect(option.disabled).toBe(false)
+    option.click()
+    await flushPromises()
+    expect(body()).toContain('实验性原型')
+    expect(body()).toContain('Firefox 152')
+    expect(body()).not.toContain('Firefox 身份？')
+    button('保存').click()
+    await flushPromises()
+    expect(calls.at(-1)?.body).toEqual({ backend: 'spidermonkey', confirm_identity_change: false })
+  })
+
   it('shows the service error and stays open when saving fails', async () => {
     await mountDialog()
     segment('时区来源', '自定义').click()

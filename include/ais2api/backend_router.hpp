@@ -20,14 +20,18 @@ bool valid_account_backend(std::string_view backend);
 // What adopt_backends() stores for config.browser_backend: "cloakbrowser"
 // keeps the Chrome identity, "camoufox" becomes "auto".
 std::string_view adopted_backend(std::string_view default_backend);
-// The gateway that serves a stored backend: "auto" and, until it exists,
-// "spidermonkey" run on Camoufox; an empty or unknown value follows
-// `default_backend`.
+// Whether this build includes the SpiderMonkey backend (AIS2API_SPIDERMONKEY).
+bool spidermonkey_available();
+// The gateway that serves a stored backend: "auto" runs on Camoufox, and so
+// does "spidermonkey" in a build without that backend; an empty or unknown
+// value follows `default_backend`.
 std::string_view effective_backend(std::string_view stored, std::string_view default_backend);
 // "chrome" for CloakBrowser, "firefox" for every Firefox backend. Moving an
 // account between them gives Google a new device, so it needs confirmation.
 std::string_view identity_family(std::string_view backend);
-// The gateways new accounts and the stored ones need, the default first.
+// The runtimes setup installs for new accounts and the stored ones, the
+// default first. The SpiderMonkey backend is built in and serves the Firefox
+// identities Camoufox's setup provides, so it needs "camoufox".
 std::vector<std::string> backends_needed(std::string_view default_backend, const std::vector<std::string> &stored);
 // What this installation still uses that a later release removes, for
 // doctor, the service status and the diagnostics report. CloakBrowser gives

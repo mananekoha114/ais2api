@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Mana Nekoha (mananekoha114)
 // SPDX-License-Identifier: MPL-2.0
 #include "ais2api/backend.hpp"
+#include "ais2api/backend_router.hpp"
 #include "ais2api/region.hpp"
 #include "ais2api/runtime.hpp"
 #include "ais2api/store.hpp"
@@ -463,7 +464,8 @@ TEST_CASE("management HTTP exposes and edits per-account browser fingerprints", 
 
     // A Firefox identity is a new device to Google: the move needs confirming.
     CHECK(server.send(http::verb::patch, route, {{"backend", "camoufox"}}).result_int() == 409);
-    CHECK(server.send(http::verb::patch, route, {{"backend", "spidermonkey"}}).result_int() == 400);
+    // A build without the SpiderMonkey backend refuses it outright.
+    CHECK(server.send(http::verb::patch, route, {{"backend", "spidermonkey"}}).result_int() == (spidermonkey_available() ? 409 : 400));
     auto moved = server.send(http::verb::patch, route, {{"backend", "camoufox"}, {"confirm_identity_change", true}});
     REQUIRE(moved.result_int() == 200);
     CHECK(string_or(object(moved), "identity") == "firefox");

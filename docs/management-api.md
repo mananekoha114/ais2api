@@ -100,7 +100,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 
 `/keys/config` 的两个接口实际是一次配置修改，返回 `ConfigSaved`（`saved`、`applied`、`restart_required`）。存在待重启的配置时，新值只会写入待重启配置：`applied: false` 表示当前进程仍在使用旧密钥，重启后才切换。HTTP 200 本身不能说明已经生效。
 
-`backend` 可取 `cloakbrowser`、`auto`、`camoufox`；`spidermonkey` 尚未提供，返回 400 `backend_unavailable`。在 CloakBrowser 与 Firefox 后端之间切换会换成另一种身份，Google 会把它看作新设备，因此必须同时传 `confirm_identity_change: true`，否则返回 409 `identity_change_unconfirmed`；Firefox 后端之间可以直接切换。种子不变。账号列表中的 `backend` 是账号保存的后端。
+`backend` 可取 `cloakbrowser`、`auto`、`camoufox`、`spidermonkey`。`spidermonkey` 是实验性后端，只有开启 `AIS2API_SPIDERMONKEY` 编译的版本才有；其他版本返回 400 `backend_unavailable`。响应的 `spidermonkey_available` 说明当前版本是否包含它，`GET /version` 的 `backends.spidermonkey` 也是同一个值。在 CloakBrowser 与 Firefox 后端之间切换会换成另一种身份，Google 会把它看作新设备，因此必须同时传 `confirm_identity_change: true`，否则返回 409 `identity_change_unconfirmed`；Firefox 后端之间可以直接切换。种子不变。账号列表中的 `backend` 是账号保存的后端。
 
 ### 配置、统计与诊断
 

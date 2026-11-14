@@ -70,7 +70,10 @@ TEST_CASE("account backends map onto the gateways that serve them", "[router]") 
     CHECK(adopted_backend("cloakbrowser") == "cloakbrowser");
     CHECK(adopted_backend("camoufox") == "auto");
     CHECK(effective_backend("cloakbrowser", "camoufox") == "cloakbrowser");
-    for (auto stored : {"auto", "camoufox", "spidermonkey"}) CHECK(effective_backend(stored, "cloakbrowser") == "camoufox");
+    for (auto stored : {"auto", "camoufox"}) CHECK(effective_backend(stored, "cloakbrowser") == "camoufox");
+    // Without the engine compiled in, Camoufox stands in for it.
+    CHECK(effective_backend("spidermonkey", "cloakbrowser") == (spidermonkey_available() ? "spidermonkey" : "camoufox"));
+    CHECK(identity_family("spidermonkey") == "firefox");
     CHECK(effective_backend("", "camoufox") == "camoufox");
     CHECK(effective_backend("unknown", "cloakbrowser") == "cloakbrowser");
     CHECK(identity_family("cloakbrowser") == "chrome");
@@ -82,6 +85,8 @@ TEST_CASE("account backends map onto the gateways that serve them", "[router]") 
     CHECK(backends_needed("cloakbrowser", {}) == std::vector<std::string>{"cloakbrowser"});
     CHECK(backends_needed("cloakbrowser", {"", "cloakbrowser", "auto"}) == std::vector<std::string>{"cloakbrowser", "camoufox"});
     CHECK(backends_needed("camoufox", {"camoufox", "cloakbrowser"}) == std::vector<std::string>{"camoufox", "cloakbrowser"});
+    // The SpiderMonkey backend serves identities Camoufox's setup provides.
+    CHECK(backends_needed("cloakbrowser", {"spidermonkey"}) == std::vector<std::string>{"cloakbrowser", "camoufox"});
 }
 
 TEST_CASE("CloakBrowser is reported as deprecated wherever it is still used", "[router]") {
@@ -214,12 +219,19 @@ TEST_CASE("moving accounts between Chrome and Firefox identities needs confirmat
     for (const auto &fields : std::vector<json::object>{{{"backend", "firefox"}}, {{"backend", 1}},
                                                        {{"backend", "auto"}, {"confirm_identity_change", "yes"}}})
         CHECK_THROWS_AS(update(fields), Error);
-    try {
-        update({{"backend", "spidermonkey"}});
-        FAIL("expected an unavailable backend");
-    } catch (const Error &error) {
-        CHECK(error.status == 400);
-        CHECK(error.code == "backend_unavailable");
+    if (spidermonkey_available()) {
+        view = update({{"backend", "spidermonkey"}});
+        CHECK(string_or(view, "effective_backend") == "spidermonkey");
+        CHECK(string_or(view, "identity") == "firefox");
+        view = update({{"backend", "auto"}});
+    } else {
+        try {
+            update({{"backend", "spidermonkey"}});
+            FAIL("expected an unavailable backend");
+        } catch (const Error &error) {
+            CHECK(error.status == 400);
+            CHECK(error.code == "backend_unavailable");
+        }
     }
 
     // The bulk move is the explicit migration command.

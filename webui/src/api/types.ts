@@ -62,9 +62,11 @@ export interface FingerprintView {
   platform: string
   backend: AccountBackend
   /** Gateway that serves the account; auto runs on Camoufox. */
-  effective_backend: 'cloakbrowser' | 'camoufox'
+  effective_backend: 'cloakbrowser' | 'camoufox' | 'spidermonkey'
   identity: 'chrome' | 'firefox'
   firefox_identity_saved: boolean
+  /** Whether this build includes the experimental SpiderMonkey backend. */
+  spidermonkey_available?: boolean
   /** Stored overrides; empty means "follow this computer". */
   timezone: string
   locale: string

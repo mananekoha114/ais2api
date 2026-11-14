@@ -4,5 +4,15 @@
   "builtin-baseline": "664933b8d385dfc01f4e0cdff4c7c74e71f6a740",
   "dependencies": ["boost-asio", "boost-beast", "boost-json", "openssl", "sqlite3",
     {"name":"curl", "default-features":false, "features":["ssl"]},
-    {"name":"libarchive", "default-features":false}, "zstd", "catch2"]
+    {"name":"libarchive", "default-features":false}, "zstd", "catch2"],
+  "features": {
+    "spidermonkey": {
+      "description": "The experimental SpiderMonkey backend (AIS2API_SPIDERMONKEY)",
+      "dependencies": [
+        "ada-url",
+        "zlib",
+        {"name": "curl", "default-features": false, "features": ["http2", "brotli", "zstd"]}
+      ]
+    }
+  }
 }

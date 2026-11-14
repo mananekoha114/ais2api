@@ -14,3 +14,7 @@ LICENSE text eol=lf
 *.png binary
 *.jpg binary
 *.zip binary
+# Third-party files and patches are kept byte for byte.
+waa/third_party/** -text
+*.patch -text
+*.gz binary
