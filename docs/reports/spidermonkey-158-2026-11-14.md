@@ -1,6 +1,6 @@
 # SpiderMonkey 升级到 158.0.1（P4 第二项）
 
-日期：2026-11-14。[Firefox 后端迁移计划](../firefox-backends.md) P4 的第二项：SpiderMonkey 后端从 152.0.4 升到 158.0.1，与 Camoufox 后端声称同一个 Firefox 大版本。本文记录构建与引擎补丁、宿主和页面行为的移植、对象结构表的采集工具及核对结果，以及采集中的发现。这一项没有发实盘请求，线上验证等账号重新导入后再做。
+日期：2026-11-14。[Firefox 后端迁移计划](../firefox-backends.md) P4 的第二项：SpiderMonkey 后端从 152.0.4 升到 158.0.1，与 Camoufox 后端声称同一个 Firefox 大版本。本文记录构建与引擎补丁、宿主和页面行为的移植、对象结构表的采集工具及核对结果、采集中的发现，以及账号重新导入后的在线采集和线上验证。
 
 ## 结论
 
@@ -10,13 +10,15 @@
   - 可信的鼠标点击（Run、Rerun）；
   - 按真实时间线创建 WAA 程序；
   - 官网 BotGuard 包装层的计时指标。
-- **对象结构表暂用参考项目的 158 表**。采集工具已完成，用官方 Firefox 158.0.1 核对过：
-  - 接口和属性描述与官方版一致；
-  - 全局键顺序带有 Camoufox 的痕迹（见“发现”）。
+- **对象结构表换成了本项目自己采集的 Windows 与 Linux 表**（`waa/shapes/`），参考项目的表已删除：
+  - 页面部分来自测试账号的一次在线采集，只加载，不生成；
+  - 浏览器部分以官方 Firefox 158.0.1 为准；
+  - 去掉了 Camoufox 的痕迹（见“发现”）。
 
-  账号重新导入后，再换成自己采集的 Windows 与 Linux 表。
+  参考项目的表用官方 Firefox 158.0.1 核对过：接口和属性描述与官方版一致，但全局键顺序带有同样的 Camoufox 痕迹。
 - **Camoufox 158 没有把 `set*` 指纹接口暴露给页面**（计划的第 0 步）。
-- **离线测试全部通过**（预期失败的 1 个除外）。线上验证还没有做。
+- **线上验证通过**：用自己的表生成 1 次，返回 200；同时抓包，握手和请求头与 Camoufox 158 一致（已知差异除外）。
+- **离线测试全部通过**（预期失败的 1 个除外）。
 
 ## 构建与引擎补丁
 
@@ -49,8 +51,9 @@
 **逐字节取自参考项目 AIStudio2API（提交 `d94bf91c07`）**：
 
 - `dom.js`、`smhost.js`；
-- 接口层 `mozjs/mozjs.{cpp,h}`；
-- 对象结构表 `firefox158.json.gz`。
+- 接口层 `mozjs/mozjs.{cpp,h}`。
+
+参考项目的对象结构表 `firefox158.json.gz` 起初也照取，换成自己的表后已删除。
 
 `waa/src/host_scripts.hpp` 由 `scripts/waa-host-scripts.py` 从它的 Go 源码生成。新版带来：
 
@@ -144,10 +147,66 @@ Linux 表在 Windows 表上套用官方 Windows 版与官方 Linux 版的差异�
 
 把 Windows 试验表嵌入 SpiderMonkey 构建后，`[waa],[spidermonkey]` 的 49 个用例全部通过（5857 个断言）。试验后已换回参考表。
 
+### 自己的表
+
+账号重新导入后采集（2026-11-14 13:30 UTC 前后）：
+
+- **在线采集**：测试账号的 Camoufox 打开一次新对话页，只加载，不生成，没有遇到拒绝。
+  - 采到的全局键有 1052 个，与参考表一样多；
+  - 名字上只差页面库随机生成的 `closure_lm_<随机数>`，每次加载都会变。
+- **本地采集页**：同一身份的 Camoufox 重新采集一次，与之前的结果结构相同。
+- **合并结果**：
+
+  | 表 | 压缩后大小 | 合并报告 |
+  |---|---|---|
+  | `firefox158-windows.json.gz` | 182,424 字节 | `Event`、`Location` 移回官方顺序；`botguard` 保留为程序自己定义的全局量 |
+  | `firefox158-linux.json.gz` | 177,494 字节 | 去掉 WebGPU 相关的接口、全局量和 `navigator.gpu`；`Navigator` 接口改用 Linux 版的 |
+
+  两张表都通过 `check.py`。另外检查了不能出现的内容：本机用户名、账号 ID、账号的界面语言。
+- **嵌入方式**：Windows 嵌入 Windows 表，其他平台嵌入 Linux 表。Android 暂时也用 Linux 表。
+
+合并前对采集工具做了三处修正：
+
+- **页面的 `<html lang>`**：这个值跟着账号的界面语言走，现在合并时规范成固定的 `en-US`，与表里 navigator 的固定语言一致。
+- **加载计时里的重定向**：
+  - 原因：在线采集原来打开 `?authuser=N`，页面会跳转一次到 `/u/N/`，加载计时里因此留下了重定向；
+  - 为什么要改：SpiderMonkey 直接打开 `/u/N/`，没有跳转，运行时也不覆盖重定向的三个字段，保留下来会让时间线自相矛盾；
+  - 修正：合并时把这三个字段置 0，采集器也改为直接打开 `/u/N/`。
+- **数组的写法**：改成和参考表一样，只有元素全是基本类型或函数的数组才逐项记下，其余只记类名，`dom.js` 会把它解成空数组。原来逐项记下的话，`dom.js` 会解出一组假的 `Arguments` 对象。
+  - 受影响的只有页面的 `dataLayer` 和 `Aᶜstate`；
+  - 已有的在线采集按同一规则离线重新编码，没有为此再访问 Google。
+
+与参考表相比，剩下的差异都能解释：
+
+- **页面部分**：
+  - AI Studio 新部署带来的页面结构和构建标识变化，例如 `head` 的子元素个数、`_F_*` 全局量；
+  - `closure_lm_` 的随机名。
+- **页面加载完时的焦点元素**：我们的表里是一个 `HTMLElement`，参考表里是提示词输入框。无界面运行的 Camoufox 后端，页面上就是这样；`dom.js` 直接返回表里的值。影响很小，先记下观察。
+- **实例的默认值**：`FocusEvent.composed`、`MessageEvent.data` 取官方 Firefox 新建事件的值。
+- **html、head、body 的内容属性**：采集时不读。`dom.js` 自己计算 `innerHTML`、`outerHTML`、`textContent`；`innerText`、`outerText` 回退到 `HTMLElement` 的默认值（空串），和参考表的效果相同。
+
 ### 与计划的出入
 
 - **本地采集页没有跨源 iframe**：计划以为 AI Studio 页面上还有一个跨源 iframe，实际检查发现顶层的 `window.length` 是 1，只有同源的 bscframe。
 - **脚本改名**：计划里的 `run-official.py` 改叫 `run-local.py`，因为它能打开任何 Firefox 系浏览器，不只是官方版。
+
+## 线上验证
+
+2026-11-14 13:41 UTC，在自己的表嵌入后进行：测试账号、SpiderMonkey 后端、`gemini-3.1-flash-lite` 非流式生成 1 次，同时用 [`tools/netfp`](../../tools/netfp/README.md) 抓包。
+
+- 这次 Camoufox 没有生成，Camoufox 一侧用的是 [上一次实盘对照](firefox-network-stack-2026-11-14.md) 的抓包；
+- 原始抓包和密钥文件分析完即删除。
+
+| 项目 | 结果 |
+|---|---|
+| 生成 | 200，回复正常；耗时 7.1 秒（含加载页面），WAA 程序启动 1.6 秒。页面直接打开 `/u/N/`，没有跳转 |
+| TLS | JA4 `t13d1517h2_8daaf6152771_3cbfd9057e0d`，6 条连接都是完整握手，与 Camoufox 158 相同 |
+| 文档、bscframe、图片 | 请求头顺序、`priority` 和权重都与 Camoufox 158 相同。User-Agent 是 `rv:158`；图片的 `Accept` 带 `image/jxl`，权重 12 |
+| 页面 RPC | GetLoggingContext、GetAiStudioBenefitTier、Waa/Create、CountTokens 与 Camoufox 页面自己的 XHR 相同。GenerateContent 与按 CountTokens 推断的顺序相同，[网络指纹实现报告](firefox-network-stack-2026-11-14.md) 里请求头的修正因此在线上得到确认 |
+| 解释器脚本 | 解释器换了新版本，所以下载了一次：`www.google.com/js/bg/…`，`sec-fetch-dest=script`，不带 `priority`，权重 22。上次 Camoufox 用的是缓存，没有样本可以对照 |
+| 已知差异 | 流级 WINDOW_UPDATE；ECH GREASE 长度（186、218、250 字节，Firefox 是 282）；第一个 GetAiStudioBenefitTier 带 `x-goog-ext-519733851-bin` |
+
+Cookie 个数比上次 Camoufox 的抓包少 2 个，但两次是不同的导入，没法比较。
 
 ## 发现
 
@@ -160,7 +219,7 @@ Linux 表在 Windows 表上套用官方 Windows 版与官方 Linux 版的差异�
    - **现象**：新建的 iframe 窗口里，官方 Firefox 的 `Event`、`Location` 在接口中间各自的位置，Camoufox 却把它们排在末尾附近，接在 `Performance` 之后。页面脚本用 `Object.getOwnPropertyNames(window)` 就能看出来。
    - **来源在浏览器内部**：这个窗口除了采集脚本，没有别的脚本碰过，所以顺序变化不是页面脚本造成的。具体原因还没查，可能是 Camoufox 或 juggler 在新窗口上提前访问了这两个对象。
    - **参考表里也有**：参考项目的 158 表有同样的痕迹，新窗口里的 `Array`、`PageTransitionEvent` 也移了位置。这说明它也是用 Camoufox 一类的浏览器采集的。
-   - **两个后端暂时一致**：现在两个后端都带着这个痕迹；换成自己的表后，SpiderMonkey 一侧就没有了。
+   - **SpiderMonkey 一侧已经去掉**：换成自己的表后，SpiderMonkey 后端没有这个痕迹了，Camoufox 后端仍然有。
    - **修复另开一项**：Camoufox 后端本身怎么修，另开一项处理。
 3. **Camoufox 后端的 `bridge.js` 在页面上定义了可枚举的全局量 `__ais2bridge`**，页面脚本能看到它。CloakBrowser 时就是这样设计的，不是这次的改动。修复另开一项处理。
 4. **Linux 版 Firefox 158 默认不提供 WebGPU**：
@@ -172,28 +231,24 @@ Linux 表在 Windows 表上套用官方 Windows 版与官方 Linux 版的差异�
 | 构建 | 结果 |
 |---|---|
 | 普通构建，完整测试 | 494 个用例全部通过（19,510 个断言） |
-| SpiderMonkey 构建，完整测试 | 518 个用例，517 个通过，另 1 个是预期失败：流级 WINDOW_UPDATE，见 [网络指纹实现报告](firefox-network-stack-2026-11-14.md) |
+| SpiderMonkey 构建，完整测试，参考表 | 518 个用例，517 个通过，另 1 个是预期失败：流级 WINDOW_UPDATE，见 [网络指纹实现报告](firefox-network-stack-2026-11-14.md) |
 | SpiderMonkey 构建，嵌入 Windows 试验表，`[waa],[spidermonkey]` | 49 个用例全部通过 |
+| SpiderMonkey 构建，完整测试，自己的 Windows 表 | 518 个用例，517 个通过，另 1 个是同一个预期失败 |
 
 升级时还修好了一个偶发失败的测试：GOAWAY 测试的 HTTP/2 服务端在 GOAWAY 后立即关闭连接，客户端的最后几帧还没读完，Windows 因此重置连接，大约三次失败一次。现在服务端会等客户端先关闭。
 
 ## 后续
 
-1. **账号重新导入后，经同意**：
-   - 用测试账号在线采集一次，只加载，不生成，服务停止时运行；
-   - 用同一身份的 Camoufox 采集本地页；
-   - 合并出 `waa/shapes/firefox158-windows.json.gz` 和 `firefox158-linux.json.gz`；
-   - CMake 改为 Windows 嵌入 Windows 表，其他平台嵌入 Linux 表；
-   - 更新第三方说明。
-2. **线上验证**：SpiderMonkey 后端用 `gemini-3.1-flash-lite` 非流式生成 1 次，同时用 netfp 抓包。要确认的有：
-   - proof 被接受；
-   - 两个后端的 UA 都是 `rv:158`；
-   - 图片的 `Accept`、页面 RPC 的请求头。
-3. **另开的项**：Camoufox 的全局键顺序（发现 2），`bridge.js` 的全局量（发现 3）。
+1. **另开的项**：
+   - Camoufox 的全局键顺序（发现 2）；
+   - `bridge.js` 的全局量（发现 3）。
+2. **SpiderMonkey 的 Linux 版做好后**，用 Linux 表在 Linux 上跑一次测试和线上验证。
+3. **以后升级 Firefox 版本时**，按 [`tools/shape`](../../tools/shape/README.md) 的步骤重新采集。
 
 ## 资料
 
 - 构建配方：[`tools/spidermonkey/`](../../tools/spidermonkey/README.md)。
 - 采集工具：[`tools/shape/`](../../tools/shape/README.md)，以及 `tools/shape_collect.cpp`、`CamoufoxGateway::experiment_collect()`。
+- 对象结构表：`waa/shapes/`。
 - 参考项目的文件：`waa/third_party/aistudio2api/`。
 - 上一项：[Firefox 网络指纹实现（P4 第一步）](firefox-network-stack-2026-11-14.md)；原型：[SpiderMonkey 原型（P3）](spidermonkey-prototype-2026-11-12.md)。

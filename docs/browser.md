@@ -58,7 +58,7 @@ SpiderMonkey 后端不启动浏览器：ais2api 用 HTTP 加载 AI Studio 页面
 
 - **构建**：默认的构建和发布版不包含它。用 [`tools/spidermonkey`](../tools/spidermonkey/README.md) 的配方编出 SpiderMonkey 静态库，再以 `-DAIS2API_SPIDERMONKEY=ON -DAIS2API_SPIDERMONKEY_DIR=<产物目录>` 构建；可执行文件约大 32 MB。这样的构建默认同时开启 `AIS2API_CURL_IMPERSONATE`（见下文“网络层”），程序旁边多一个 `libcurl-impersonate.dll`，目前只支持 Windows x64。不包含它的版本中，保存为 `spidermonkey` 的账号由 Camoufox 服务。
 - **身份**：沿用账号在 Camoufox 后端下生成的 Firefox 身份（navigator、屏幕、窗口、语言、时区），和 Camoufox 一样声称 Firefox 158。还没有 Firefox 身份的账号要先用 Camoufox 服务一次，否则返回 503 `browser_not_configured`。
-- **对象结构表**：模拟页面 DOM 所用的表（见 [`tools/shape`](../tools/shape/README.md)）目前取自参考项目 AIStudio2API 的 `firefox158.json.gz`，已用官方 Firefox 158.0.1 核对过浏览器部分。之后换成本项目自己采集的 Windows 与 Linux 表。
+- **对象结构表**：模拟页面 DOM 所用的表在 `waa/shapes/`，是本项目用 [`tools/shape`](../tools/shape/README.md) 自己采集的。页面部分来自真实的 AI Studio 页面，浏览器部分以官方 Firefox 158.0.1 为准。Windows 构建嵌入 Windows 表，其他平台嵌入 Linux 表（Android 暂用 Linux 表）。
 - **网络层**：用 [curl-impersonate](https://github.com/lexiforest/curl-impersonate)（lexiforest 分支）的 libcurl，CMake 下载锁定版本并校验 SHA-256（`scripts/curl-impersonate.cmake`）。
   - **TLS 与 HTTP/2**：按实测的 Firefox（Camoufox 158）逐项设置，不使用 curl-impersonate 自带的 Firefox 预设。设置的项目有：
     - 加密套件、扩展顺序、密钥交换组、签名算法、ECH GREASE；
