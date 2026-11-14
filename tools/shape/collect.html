@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<title>shape</title>
+</head>
+<body>
+<iframe src="frame.html" style="display: none"></iframe>
+<script>
+// Runs collect.js once the frame has loaded, and posts the table back;
+// with ?manual, leaves that to whoever opened the page.
+if (!location.search.includes('manual')) addEventListener('load', () => setTimeout(() => {
+  fetch('collect.js')
+    .then(response => response.text())
+    .then(source => (0, eval)(source))
+    .catch(error => JSON.stringify({ error: String((error && error.stack) || error) }))
+    .then(body => fetch('result', { method: 'POST', body }));
+}, 1000));
+</script>
+</body>
+</html>

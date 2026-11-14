@@ -289,6 +289,12 @@ if(AIS2API_BUILD_WAA_EXPERIMENT)
   endif()
 endif()
 
+option(AIS2API_BUILD_SHAPE_COLLECTOR "Build the shape table collector for tools/shape (Camoufox)" OFF)
+if(AIS2API_BUILD_SHAPE_COLLECTOR)
+  add_executable(ais2api_shape_collect tools/shape_collect.cpp)
+  target_link_libraries(ais2api_shape_collect PRIVATE ais2api_core)
+endif()
+
 option(AIS2API_BUILD_REPLAY "Build the synthetic loopback HTTP replay tool" OFF)
 if(AIS2API_BUILD_REPLAY)
   add_executable(ais2api_replay tools/replay.cpp)

@@ -1383,4 +1383,42 @@ void CamoufoxGateway::experiment_send(const Request& request, const Account& acc
     impl_->ensure_account(account, cancel, true);
     impl_->send(request, account, ticket, sink, cancel);
 }
+std::string CamoufoxGateway::experiment_collect(const Account& account, const std::string& url, std::string_view script, bool with_cookies,
+                                                std::chrono::seconds settle, std::stop_token cancel) {
+    std::lock_guard lock(impl_->mutex);
+    auto& impl = *impl_;
+    try {
+        impl.ensure_browser(cancel, impl.identity_for(account, cancel));
+        impl.dispose_context(cancel);
+        impl.user_context = string_or(impl.bidi->call("browser.createUserContext", {}, cancel), "userContext");
+        if (impl.user_context.empty()) incompatible("Browser did not create an isolated context");
+        if (with_cookies) {
+            const auto* cookies = account.storage_state.if_contains("cookies");
+            if (!cookies || !cookies->is_array() || cookies->as_array().empty()) throw Error(401, "missing_cookies", "Account has no storage-state cookies");
+            impl.set_cookies(browser_detail::bidi_cookies(browser_detail::injected_cookies(cookies->as_array())), cancel);
+        }
+        impl.page = string_or(impl.bidi->call("browsingContext.create", {{"type", "tab"}, {"userContext", impl.user_context}}, cancel), "context");
+        if (impl.page.empty()) incompatible("Browser did not create a page");
+        impl.navigate(url, cancel);
+        // Only Window's own accessors, which no page-visible lazy global
+        // resolution follows.
+        const auto deadline = Clock::now() + 90s;
+        for (;;) {
+            const auto ready = impl.eval("(() => { try { return window.length > 0 && window[0].document.readyState === 'complete'; } catch { return false; } })()", cancel);
+            if (ready.is_bool() && ready.as_bool()) break;
+            if (Clock::now() > deadline) throw Error(504, "frame_timeout", "The page's first frame did not load");
+            pause(cancel, 500ms);
+        }
+        pause(cancel, std::chrono::duration_cast<std::chrono::milliseconds>(settle));
+        const auto host = impl.eval("location.host", cancel);
+        const auto expected = std::string_view(url).substr(url.find("//") + 2);
+        if (!host.is_string() || expected.substr(0, expected.find_first_of("/?#")) != host.as_string())
+            throw Error(401, "page_left", "The page left the requested host, as a sign-in redirect does");
+        auto result = impl.eval(std::string(script), cancel, 180s);
+        if (!result.is_string()) incompatible("The collection script did not return text");
+        impl.dispose_context(cancel);
+        impl.close();
+        return std::string(result.as_string());
+    } catch (...) { impl.close(); throw; }
+}
 } // namespace ais2api
