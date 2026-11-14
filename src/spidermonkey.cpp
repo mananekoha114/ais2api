@@ -22,6 +22,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <tuple>
 #include <openssl/evp.h>
 
 namespace ais2api {
@@ -45,7 +46,7 @@ constexpr auto vm_lifetime = 12h;
 constexpr auto count_tokens_delay = 2200ms;
 // The Firefox the prototype claims: the version of its SpiderMonkey and of
 // the shape table the host follows.
-constexpr std::string_view claimed_firefox = "152";
+constexpr std::string_view claimed_firefox = "158";
 // Firefox follows at most this many redirects in a row.
 constexpr int redirect_limit = 20;
 
@@ -91,6 +92,20 @@ unsigned retry_after(const browser_detail::HttpHeaders &headers) {
         return 0;
     return static_cast<unsigned>(std::min<unsigned long>(86400, std::stoul(value)));
 }
+std::chrono::milliseconds whole_milliseconds(std::chrono::microseconds duration) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(duration);
+}
+// Waits until `moment`; 499 when the token is requested first.
+void wait_until(std::chrono::system_clock::time_point moment, std::stop_token token) {
+    const auto left = moment - std::chrono::system_clock::now();
+    if (left > std::chrono::system_clock::duration::zero()) {
+        std::mutex mutex;
+        std::condition_variable_any wake;
+        std::unique_lock lock(mutex);
+        wake.wait_for(lock, token, left, [] { return false; });
+    }
+    check_cancel(token);
+}
 // The interpreter's name in the cache directory: its digest, which Waa/Create
 // sends as unpadded URL-safe Base64.
 bool cacheable_hash(std::string_view hash) {
@@ -122,6 +137,12 @@ struct SpiderMonkeyGateway::Impl {
         json::object globals;
         bool trusted_types = false;
         std::chrono::system_clock::time_point navigation_start, loaded;
+        // The page's PerformanceNavigationTiming and the legacy domLoading.
+        json::object navigation;
+        int dom_loading = 0;
+        // Where the trusted pointer and the focus are, for the page's
+        // programs in turn.
+        std::shared_ptr<waa::Pointer> pointer = std::make_shared<waa::Pointer>();
     };
     std::optional<Page> page;
     std::string tier = "unknown";
@@ -134,6 +155,14 @@ struct SpiderMonkeyGateway::Impl {
     std::string interpreter_hash;
     unsigned vms_started = 0;
 
+    // The program whose click on Run or Rerun the next GenerateContent
+    // answers, and that response while its body is open: the page replaces
+    // the element under the pointer when the response starts and ends.
+    waa::Runtime *running = nullptr, *answering = nullptr;
+    // The conversations each account's page ran, to run one again as Rerun.
+    sm::PageRuns page_runs;
+    std::mt19937_64 random{std::random_device{}()};
+
     // The CountTokens the page sends after Run.
     std::jthread follow_up;
 
@@ -141,6 +170,7 @@ struct SpiderMonkeyGateway::Impl {
     ~Impl() { close(); }
 
     void drop_page() noexcept {
+        running = answering = nullptr;
         // The program's loads use the session: they end before it does.
         vm.reset();
         page.reset();
@@ -251,7 +281,7 @@ struct SpiderMonkeyGateway::Impl {
         for (int redirect = 0;; ++redirect) {
             if (redirect > 10) incompatible("AI Studio redirected the page too often");
             // Firefox gives the top-level document its highest weight.
-            response = http->send({"GET", target, sm::document_headers(headers), std::nullopt, 42}, token, 30s, 16 << 20);
+            response = http->send({"GET", target, sm::document_headers(headers), std::nullopt, 42, true}, token, 30s, 16 << 20);
             if (response.status < 300 || response.status >= 400) break;
             const auto next = sm::resolve_location(target, browser_detail::header_value(response.headers, "location"));
             if (next.empty()) incompatible("AI Studio redirected the page nowhere");
@@ -266,6 +296,23 @@ struct SpiderMonkeyGateway::Impl {
         if (response.status != 200)
             throw Error(502, "upstream_error", "The AI Studio page returned HTTP " + std::to_string(response.status));
         loaded.loaded = std::chrono::system_clock::now();
+        const auto since_start = [&](std::chrono::system_clock::time_point moment) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(moment - loaded.navigation_start);
+        };
+        const auto &timing = response.timing;
+        sm::PageLoad load{.url = target,
+                          .protocol = response.protocol,
+                          .new_connection = timing.new_connection,
+                          .lookup = whole_milliseconds(timing.resolved),
+                          .connect = whole_milliseconds(timing.connected - timing.resolved),
+                          .tunnel = timing.tunneled > timing.connected ? whole_milliseconds(timing.tunneled - timing.connected)
+                                                                       : std::chrono::milliseconds(0),
+                          .end = since_start(loaded.loaded),
+                          .decoded = response.body.size()};
+        std::tie(loaded.navigation, loaded.dom_loading) = sm::navigation_timing(load, random);
+        // The page's subresources are not loaded here: the document's parsing
+        // follows from the body's end.
+        sm::document_timing(loaded.navigation, load.end, random);
         loaded.url = target;
         loaded.api_key = sm::page_api_key(response.body);
         if (loaded.api_key.empty()) incompatible("The AI Studio page carries no API key");
@@ -384,6 +431,9 @@ struct SpiderMonkeyGateway::Impl {
         profile.globals = page->globals;
         profile.trusted_types = page->trusted_types;
         profile.navigation_start = page->navigation_start;
+        profile.navigation = page->navigation;
+        profile.dom_loading = page->dom_loading;
+        options.pointer = page->pointer;
         profile.document = {{"cookie", sm::document_cookie(http->cookies())},
                             {"lastModified", sm::last_modified(page->loaded, profile.timezone)}};
         if (const auto *origins = session_state.if_contains("origins"); origins && origins->is_array())
@@ -423,6 +473,13 @@ struct SpiderMonkeyGateway::Impl {
             }
             return false;
         };
+        // The page's application starts its program once the load event is
+        // over.
+        if (const auto *end = page->navigation.if_contains("loadEventEnd"); end && end->is_int64()) {
+            phase = "page_load_event";
+            wait_until(page->navigation_start + std::chrono::milliseconds(end->as_int64()), token);
+            phase = "waa_start";
+        }
         const auto started = Clock::now();
         auto runtime = std::make_unique<waa::Runtime>(std::move(options), token);
         phase = "waa_settle";
@@ -528,9 +585,18 @@ struct SpiderMonkeyGateway::Impl {
     // the WAA program, and the request sent from the page with a proof.
     struct Content {
         std::string timezone, digest, model, prompt;
+        // When the account's page ran the conversation before: the number of
+        // its user turns. The page runs it again with Rerun, and the prompt
+        // box stays empty.
+        std::optional<int> rerun;
     };
     Content content_of(const Request &request) const;
+    // The same, with the conversation recorded as run by the account's page.
+    Content run_content(const Request &request, const Account &account);
     std::string prove(const Content &content, std::stop_token token);
+    // The page replaced the element under the pointer again as the response
+    // that answered a click ended.
+    void close_answer() noexcept;
     void send(const Request &request, const Account &account, const Content &content, std::string_view proof, const EventSink &sink,
               std::stop_token cancel);
 };
@@ -548,12 +614,37 @@ SpiderMonkeyGateway::Impl::Content SpiderMonkeyGateway::Impl::content_of(const R
     return content;
 }
 
+SpiderMonkeyGateway::Impl::Content SpiderMonkeyGateway::Impl::run_content(const Request &request, const Account &account) {
+    auto content = content_of(request);
+    if (page_runs.rerun(account.id, request)) {
+        content.rerun = sm::user_turns(request);
+        content.prompt.clear();
+    }
+    return content;
+}
+
+void SpiderMonkeyGateway::Impl::close_answer() noexcept {
+    if (auto *answered = std::exchange(answering, nullptr); answered && answered == vm.get()) answered->replaced();
+}
+
 std::string SpiderMonkeyGateway::Impl::prove(const Content &content, std::stop_token token) {
-    // The proof binds the request's text, typed into the prompt box and run.
+    // The proof binds the request's text, typed into the prompt box and run
+    // with a click on Run. A conversation the page ran before runs again with
+    // its last turn's Rerun, once the page has clicked; any other request
+    // follows a user action.
     phase = "waa_proof";
+    const bool run = !content.prompt.empty(), rerun = !run && content.rerun && page->pointer->clicked();
+    running = nullptr;
     std::string proof;
     try {
-        proof = vm->proof(content.digest, content.prompt, !content.prompt.empty(), token);
+        if (run) {
+            proof = vm->run_proof(content.digest, content.prompt, token);
+        } else if (rerun) {
+            proof = vm->rerun_proof(content.digest, *content.rerun, token);
+        } else {
+            vm->activate(token);
+            proof = vm->proof(content.digest, content.prompt, token);
+        }
     } catch (const Error &error) {
         // A program that failed is not used again.
         if (error.code != "cancelled") vm.reset();
@@ -563,6 +654,7 @@ std::string SpiderMonkeyGateway::Impl::prove(const Content &content, std::stop_t
         vm.reset();
         throw Error(502, "waa_proof_invalid", "The WAA program returned a malformed proof");
     }
+    if (run || rerun) running = vm.get();
     return proof;
 }
 
@@ -579,6 +671,14 @@ void SpiderMonkeyGateway::Impl::send(const Request &request, const Account &acco
         std::string error, error_body, benefit = "unknown";
     } transfer;
     bool counted = false;
+    // The click the first GenerateContent answers, if the program that made
+    // it is still the page's.
+    auto *clicked = std::exchange(running, nullptr);
+    if (clicked != vm.get()) clicked = nullptr;
+    struct CloseAnswer {
+        Impl &impl;
+        ~CloseAnswer() { impl.close_answer(); }
+    } close_answer_at_end{*this};
     browser_detail::GenerationIO io;
     io.encode = [&](std::string_view checkpoint) { return json::serialize(encode_request(request, {}, proof, content.timezone, checkpoint)); };
     io.start = [&](std::string_view body, const std::function<void()> &check) {
@@ -597,6 +697,11 @@ void SpiderMonkeyGateway::Impl::send(const Request &request, const Account &acco
         check();
         phase = "generation_start";
         transfer.exchange = http->open(std::move(upload), cancel, 60s);
+        // Run turned into Stop; Rerun removed the last turn.
+        if (auto *answered = std::exchange(clicked, nullptr)) {
+            answered->replaced();
+            answering = answered;
+        }
         transfer.status = transfer.exchange->status();
         transfer.retry_after = retry_after(transfer.exchange->headers());
         if (transfer.status < 200 || transfer.status >= 300) {
@@ -609,6 +714,7 @@ void SpiderMonkeyGateway::Impl::send(const Request &request, const Account &acco
                 transfer.error_body += *bytes;
             }
             transfer.exchange.reset();
+            close_answer();
             transfer.error = "upstream_http_" + std::to_string(transfer.status);
             transfer.done = true;
         }
@@ -629,6 +735,7 @@ void SpiderMonkeyGateway::Impl::send(const Request &request, const Account &acco
         if (!bytes) return state;
         if (bytes->empty()) {
             transfer.exchange.reset();
+            close_answer();
             transfer.done = true;
             state["done"] = true;
             return state;
@@ -648,7 +755,7 @@ void SpiderMonkeyGateway::generate(const Request &request, const Account &accoun
     std::lock_guard lock(impl_->mutex);
     auto &impl = *impl_;
     impl.bootstrap(account, request.model, true, cancel);
-    const auto content = impl.content_of(request);
+    const auto content = impl.run_content(request, account);
     const auto proof = impl.prove(content, cancel);
     impl.send(request, account, content, proof, sink, cancel);
 }

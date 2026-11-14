@@ -194,7 +194,7 @@ describe('browser fingerprint dialog', () => {
     option.click()
     await flushPromises()
     expect(body()).toContain('实验性原型')
-    expect(body()).toContain('Firefox 152')
+    expect(body()).toContain('Firefox 158')
     expect(body()).not.toContain('Firefox 身份？')
     button('保存').click()
     await flushPromises()

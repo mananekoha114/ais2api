@@ -47,7 +47,8 @@ class Agent {
     js::Value invoke(js::Handle function, js::Handle receiver, std::initializer_list<js::Value> arguments = {});
     js::Value evaluate(js::Handle global, std::string_view source, std::string_view name);
     // A new array of the top realm.
-    js::Value new_array(std::initializer_list<js::Value> items);
+    js::Value new_array(std::span<const js::Value> items);
+    js::Value new_array(std::initializer_list<js::Value> items) { return new_array(std::span<const js::Value>(items.begin(), items.size())); }
     // A new realm with the Firefox host installed; with `same`, in that
     // global's compartment.
     RealmHost &install_realm(std::string name, js::Handle same);
@@ -66,6 +67,10 @@ class Agent {
 
     RealmHost *top = nullptr;
     js::Handle array = 0;
+    // The top page's host functions: record a user click or key press, and
+    // dispatch trusted mouse and focus events (smhost.js's activate and
+    // mouseInput).
+    js::Handle activate = 0, mouse_input = 0;
 
   private:
     struct Native {

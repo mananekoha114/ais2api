@@ -148,9 +148,10 @@ class Context {
     bool closed_ = false;
 };
 
-// Camoufox's locale override for mozilla::intl on the calling thread: the
-// language, the region and navigator.language.
-void set_locale_override(std::string_view language, std::string_view region, std::string_view locale);
+// The default locale of mozilla::intl on the calling thread
+// (navigator.language); empty restores ICU's. Locales a script names itself
+// are left alone.
+void set_locale_override(std::string_view locale);
 // Milliseconds of a monotonic clock, to the microsecond.
 double now();
 } // namespace ais2api::waa::js

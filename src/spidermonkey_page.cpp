@@ -11,15 +11,16 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <cmath>
 #include <cstdio>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
 namespace ais2api::spidermonkey_detail {
 namespace {
-// A Firefox window's content area is this much lower than the window, as a
-// Camoufox page of the same identity reports.
-constexpr double firefox_chrome_height = 57;
+// A Firefox 158 window's content area is this much lower than the window, as
+// a Camoufox page of the same identity reports.
+constexpr double firefox_chrome_height = 85;
 
 [[noreturn]] void incompatible(std::string message) { throw Error(502, "browser_incompatible", std::move(message)); }
 // A JSON+protobuf response body as JSON: without the XSSI guard, and with the
@@ -276,6 +277,103 @@ std::string page_prompt(const Request &request) {
     return prompt;
 }
 
+namespace {
+// How many conversations PageRuns keeps.
+constexpr std::size_t page_run_limit = 1000;
+// The bytes of the new chat page's encoded body per decoded byte, as Firefox
+// 158 loaded it through the same proxy.
+constexpr double firefox_encoded_ratio = 0.1943;
+
+bool user_turn(const json::value &turn) {
+    if (!turn.is_object()) return false;
+    const auto role = string_or(turn.as_object(), "role");
+    return role.empty() || role == "user";
+}
+// 0 to n - 1, each as likely.
+int uniform(std::mt19937_64 &random, int n) { return std::uniform_int_distribution<int>(0, n - 1)(random); }
+// One of the values seen on the page, each as likely.
+int pick(std::mt19937_64 &random, std::initializer_list<int> values) {
+    return values.begin()[uniform(random, static_cast<int>(values.size()))];
+}
+// A rounded sample of the log-normal distribution with log mean mu and log
+// standard deviation sigma.
+int lognormal(std::mt19937_64 &random, double mu, double sigma) {
+    return static_cast<int>(std::lround(std::exp(mu + sigma * std::normal_distribution<double>()(random))));
+}
+int whole(std::chrono::milliseconds duration) { return static_cast<int>(duration.count()); }
+} // namespace
+
+bool PageRuns::rerun(std::string_view account_id, const Request &request) {
+    const auto *contents = request.gemini.if_contains("contents");
+    if (!contents || !contents->is_array() || contents->as_array().empty() || !user_turn(contents->as_array().back())) return false;
+    std::pair<std::string, std::string> key{std::string(account_id), sha256(json::serialize(*contents))};
+    if (entries_.contains(key)) return true;
+    entries_.insert(key);
+    order_.push_back(std::move(key));
+    if (order_.size() > page_run_limit) {
+        entries_.erase(order_.front());
+        order_.pop_front();
+    }
+    return false;
+}
+
+int user_turns(const Request &request) {
+    const auto *contents = request.gemini.if_contains("contents");
+    if (!contents || !contents->is_array()) return 0;
+    return static_cast<int>(std::count_if(contents->as_array().begin(), contents->as_array().end(), user_turn));
+}
+
+std::pair<json::object, int> navigation_timing(const PageLoad &load, std::mt19937_64 &random) {
+    const int fetch = uniform(random, 2);
+    int lookup = fetch, lookup_end = fetch, connect = fetch, connect_end = fetch;
+    int request = fetch + 2 + uniform(random, 12);
+    int response = std::max(request + 1, whole(load.end));
+    int headers = response;
+    if (load.new_connection) {
+        lookup = fetch + uniform(random, 14);
+        lookup_end = lookup + whole(load.lookup);
+        connect = lookup_end + uniform(random, 2);
+        connect_end = connect + whole(load.connect);
+        request = connect_end + 1 + uniform(random, 4);
+        headers = request;
+        if (load.tunnel.count() > 0) headers = std::max(request, connect_end + whole(load.tunnel));
+        response = std::max(response, headers);
+    }
+    const int encoded = static_cast<int>(std::lround(static_cast<double>(load.decoded) * firefox_encoded_ratio)) + uniform(random, 13) - 6;
+    json::object entry{{"name", load.url},
+                       {"startTime", 0},
+                       {"nextHopProtocol", load.protocol},
+                       {"fetchStart", fetch},
+                       {"domainLookupStart", lookup},
+                       {"domainLookupEnd", lookup_end},
+                       {"connectStart", connect},
+                       {"connectEnd", connect_end},
+                       {"secureConnectionStart", connect_end},
+                       {"requestStart", request},
+                       {"finalResponseHeadersStart", headers},
+                       {"responseStart", response},
+                       {"responseEnd", response},
+                       {"transferSize", encoded + 300},
+                       {"encodedBodySize", encoded},
+                       {"decodedBodySize", static_cast<std::int64_t>(load.decoded)}};
+    return {std::move(entry), response + pick(random, {0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 3})};
+}
+
+void document_timing(json::object &entry, std::chrono::milliseconds resources, std::mt19937_64 &random) {
+    const auto *end = entry.if_contains("responseEnd");
+    const int ready = std::max(end && end->is_int64() ? static_cast<int>(end->as_int64()) : 0, whole(resources));
+    const int interactive = ready + std::max(200, lognormal(random, 6.13, 0.62));
+    const int complete = interactive + lognormal(random, 6.96, 0.48);
+    const int load_end = complete + pick(random, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1});
+    entry["domInteractive"] = interactive;
+    entry["domContentLoadedEventStart"] = interactive;
+    entry["domContentLoadedEventEnd"] = interactive + pick(random, {0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 4});
+    entry["domComplete"] = complete;
+    entry["loadEventStart"] = complete;
+    entry["loadEventEnd"] = load_end;
+    entry["duration"] = load_end;
+}
+
 std::string last_modified(std::chrono::system_clock::time_point time, std::string_view timezone) {
     using namespace std::chrono;
     const auto instant = floor<seconds>(time);
@@ -316,9 +414,12 @@ HostIdentity host_identity(const json::object &config) {
         if (!profile.screen.contains(name)) profile.screen[name] = 0;
     profile.navigator["doNotTrack"] = "unspecified";
     profile.navigator["globalPrivacyControl"] = false;
-    // The page fills the window: no sidebar, and Firefox's own toolbars above.
-    if (const auto width = number_of(profile.window, "outerWidth")) profile.window["innerWidth"] = *width;
-    if (const auto height = number_of(profile.window, "outerHeight")) profile.window["innerHeight"] = *height - firefox_chrome_height;
+    // Without the identity's own values, the page fills the window: no
+    // sidebar, and Firefox's own toolbars above.
+    if (const auto width = number_of(profile.window, "outerWidth"); width && !profile.window.contains("innerWidth"))
+        profile.window["innerWidth"] = *width;
+    if (const auto height = number_of(profile.window, "outerHeight"); height && !profile.window.contains("innerHeight"))
+        profile.window["innerHeight"] = *height - firefox_chrome_height;
     profile.locale = string_or(config, "navigator.language");
     if (profile.locale.empty()) profile.locale = "en-US";
     profile.timezone = string_or(config, "timezone");
@@ -451,7 +552,8 @@ Headers frame_headers(const PageHeaders &page, std::string_view url) {
 }
 
 Headers image_headers(const PageHeaders &page, std::string_view url) {
-    auto headers = leading(page, "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5");
+    // Firefox 158 lists JPEG XL (Camoufox 158, 2026-11-14).
+    auto headers = leading(page, "image/avif,image/jxl,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5");
     headers.insert(headers.end(), {{"Referer", referer()}, {"Cookie", ""}, {"Sec-Fetch-Dest", "image"}, {"Sec-Fetch-Mode", "no-cors"},
                                    {"Sec-Fetch-Site", std::string(fetch_site(url))}, {"Priority", "u=5, i"}, {"TE", "trailers"}});
     return headers;
