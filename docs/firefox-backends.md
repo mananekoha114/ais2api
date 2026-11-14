@@ -118,7 +118,8 @@
   - **实现方式**：
     - 构建选项 `AIS2API_CURL_IMPERSONATE`，开启 SpiderMonkey 时默认开启；
     - 目前链接预编译的 Windows x64 DLL，因为它的静态库里 BoringSSL 没有加符号前缀，会与程序静态链接的 OpenSSL 冲突；
-    - 自己编译 curl-impersonate 时一起解决：加符号前缀以便静态链接、补上 Firefox 在每个 HEADERS 之后发的流级 WINDOW_UPDATE、支持 Linux 和 Android。和 SpiderMonkey 静态库仓库一起做。
+    - 预编译版不恢复 TLS 会话：BoringSSL 恢复会话时的 ClientHello 与 Firefox 不同；
+    - 自己编译 curl-impersonate 时一起解决：加符号前缀以便静态链接、补上 Firefox 在每个 HEADERS 之后发的流级 WINDOW_UPDATE、恢复会话时像 Firefox 一样去掉 session_ticket、按 NSS 的方式计算 ECH GREASE 长度、支持 Linux 和 Android。和 SpiderMonkey 静态库仓库一起做。
 - **Termux 与 Android App**：Termux 使用原生 NDK 版，不需要 proot。Android App 没有 Camoufox，只能使用 SpiderMonkey；是否用 GeckoView 兜底，在 Android App 立项时评估。
 
 ## 构建模式
@@ -180,7 +181,12 @@ P3 于 2026-11-12 完成原型，见 [原型报告](reports/spidermonkey-prototy
 P4 第一步（Firefox 网络指纹）于 2026-11-14 实现：
 - SpiderMonkey 构建改用 curl-impersonate，TLS 与 HTTP/2 参数按实测的 Camoufox 158 逐项设置；
 - 离线测试 `[firefox-http][fingerprint]` 在本地抓取 ClientHello 和 HTTP/2 帧逐项比较，JA4、SETTINGS、连接级 WINDOW_UPDATE、权重、伪首部顺序和 Cookie 分头都与实测一致；流级 WINDOW_UPDATE 是已知差异；
-- 实盘对照：当天两个测试账号的登录都已失效（Camoufox 返回 401 `session_expired`），重新导入后再做。
+- 实盘对照（同一测试账号，Camoufox 和 SpiderMonkey 各生成 1 次，都成功）：握手和连接层与 Camoufox 一致；
+- 抓包后修正：
+  - 不再恢复 TLS 会话；
+  - RPC 请求头的顺序、`Priority` 和 `Content-Length` 的位置，改成和网页自己的 XHR 一致；
+  - 图片请求的权重改为 12。
+- 剩下的差异和后续建议见 [网络指纹实现报告](reports/firefox-network-stack-2026-11-14.md)。
 
 每项工作单独开分支、提 PR 到 main，由维护者审核合并。
 

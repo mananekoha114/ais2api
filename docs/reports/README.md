@@ -6,6 +6,7 @@
 
 | 日期 | 报告 | 内容 |
 |---|---|---|
+| 2026-11-14 | [Firefox 网络指纹实现（P4 第一步）](firefox-network-stack-2026-11-14.md) | curl-impersonate 的接入与参数、离线指纹测试、与 Camoufox 并排的实盘抓包、抓包后的修正与剩下的差异 |
 | 2026-11-12 | [SpiderMonkey 原型（P3）](spidermonkey-prototype-2026-11-12.md) | 嵌入 SpiderMonkey 运行 WAA 的真实账号验证、资源占用、四格对照实验的中止与分析、已知差异与 P4 遗留事项 |
 | 2026-11-12 | [Firefox 网络指纹调研](firefox-network-fingerprint-2026-11-12.md) | Camoufox 的 TLS 与 HTTP/2 实测基准、libcurl 原型的差距、HTTP/3，以及四种实现方案的比较与建议 |
 | 2026-11-06 | [Camoufox 原型（P1）](camoufox-prototype-2026-11-06.md) | WebDriver BiDi 后端在 Windows 上的真实账号验证、无界面与有界面模式的资源对比、发现的问题与遗留事项 |
