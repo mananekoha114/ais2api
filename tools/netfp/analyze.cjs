@@ -210,6 +210,21 @@ function h2Frames(stream) {
   return frames;
 }
 
+// The client's PING acknowledgements answer the real server's PINGs; Node
+// treats an unsolicited acknowledgement as a connection error and stops
+// decoding, so the replay leaves PING frames out.
+function withoutPings(stream) {
+  const parts = [stream.subarray(0, 24)];
+  let p = 24;
+  while (p + 9 <= stream.length) {
+    const length = stream.readUIntBE(p, 3);
+    if (p + 9 + length > stream.length) break;
+    if (stream[p + 3] !== 0x6) parts.push(stream.subarray(p, p + 9 + length));
+    p += 9 + length;
+  }
+  return Buffer.concat(parts);
+}
+
 // The request headers, decoded by Node's own HTTP/2 server from the replayed
 // client bytes; HPACK state follows the stream as it was sent.
 function decodeHeaders(stream) {
@@ -232,7 +247,7 @@ function decodeHeaders(stream) {
     });
     server.on('sessionError', () => {});
     server.listen(0, '127.0.0.1', () => {
-      const socket = net.connect(server.address().port, '127.0.0.1', () => socket.end(stream));
+      const socket = net.connect(server.address().port, '127.0.0.1', () => socket.end(withoutPings(stream)));
       socket.on('data', () => {});
       socket.on('error', () => {});
       socket.on('close', () => setTimeout(() => { server.close(); resolve(requests); }, 200));
