@@ -39,11 +39,17 @@ BUILDINFO.json         版本、源码包与补丁的摘要、工具链、各文
 ```bat
 cmake -S . -B build/windows-sm -G Ninja -DCMAKE_BUILD_TYPE=Release ^
   -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static ^
-  -DAIS2API_SPIDERMONKEY=ON -DAIS2API_SPIDERMONKEY_DIR=E:/sm/dist/windows-x64
+  -DAIS2API_SPIDERMONKEY=ON -DAIS2API_SPIDERMONKEY_DIR=<产物目录>
 cmake --build build/windows-sm
 ```
 
 CMake 会核对 `BUILDINFO.json` 里接口层两个文件的 SHA-256 与仓库中 `waa/third_party/aistudio2api/mozjs/` 的是否一致。
+
+这样的构建默认同时开启 `AIS2API_CURL_IMPERSONATE`，即 SpiderMonkey 后端的网络层，见 [SpiderMonkey 后端](../../docs/browser.md#spidermonkey-后端实验性原型)：
+
+- 配置时下载 `scripts/curl-impersonate.cmake` 锁定的 curl-impersonate 并校验 SHA-256；
+- 构建后把 `libcurl-impersonate.dll` 复制到程序旁边；
+- 不能联网时，用 `-DAIS2API_CURL_IMPERSONATE_DIR=<已解压的包>` 指定本地的包。
 
 ## 说明
 
