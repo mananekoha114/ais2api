@@ -311,11 +311,14 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build/vcpkg-cache | Out-Null
+          # The developer shell points VCPKG_ROOT at Visual Studio's own vcpkg,
+          # so read it first, as scripts/build.ps1 does.
+          $vcpkg = $env:VCPKG_ROOT
           . ./scripts/build-common.ps1
           Enter-BuildTools
-          Initialize-Vcpkg $PWD.Path $env:VCPKG_ROOT
+          Initialize-Vcpkg $PWD.Path $vcpkg
           Invoke-Checked cmake.exe @('-S', '.', '-B', 'build/impersonate', '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',
-            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake", "-DVCPKG_TARGET_TRIPLET=$env:VCPKG_TRIPLET",
+            "-DCMAKE_TOOLCHAIN_FILE=$vcpkg/scripts/buildsystems/vcpkg.cmake", "-DVCPKG_TARGET_TRIPLET=$env:VCPKG_TRIPLET",
             '-DAIS2API_CURL_IMPERSONATE=ON', '-DAIS2API_BUILD_WEBUI=OFF')
           Invoke-Checked cmake.exe @('--build', 'build/impersonate', '--target', 'ais2api_tests', '--parallel', "$env:NUMBER_OF_PROCESSORS")
           Invoke-Checked build/impersonate/ais2api_tests.exe @('[firefox-http],[setup][download]')
