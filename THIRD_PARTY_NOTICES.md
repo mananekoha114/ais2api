@@ -55,6 +55,27 @@ Camoufox 后端的身份生成器（`src/fpgen.cpp`、`src/firefox_identity.cpp`
 
 每个构建都会编译其中不需要 JavaScript 引擎的部分（challenge 解码、事件循环、文本解码）。虚拟机本身只在打开构建选项 `AIS2API_SPIDERMONKEY` 时编译；正式运行包目前不打开这个选项，也不包含 SpiderMonkey。Google 的 WAA 解释器和 challenge program 不纳入仓库。该许可不因 ais2api 的许可选择而改变。
 
+## SpiderMonkey 后端的网络层
+
+打开构建选项 `AIS2API_CURL_IMPERSONATE`（打开 `AIS2API_SPIDERMONKEY` 时默认打开）的构建，用 [curl-impersonate](https://github.com/lexiforest/curl-impersonate)（lexiforest 分支，MIT License，Copyright (c) 2026 curl_cffi developers）代替 vcpkg 的 libcurl。
+
+- **使用的文件**：CMake 从其 GitHub Release 下载 `scripts/curl-impersonate.cmake` 锁定的版本，按其中的 SHA-256 校验，只链接其中的 `libcurl-impersonate.dll`。该 DLL 放在程序旁边，不作修改。
+- **DLL 内含的组件**（随附的许可文件各自给出版权声明）：
+
+  | 组件 | 许可 |
+  |---|---|
+  | curl | curl license |
+  | BoringSSL | Apache License 2.0 |
+  | nghttp2、nghttp3、ngtcp2 | MIT License |
+  | c-ares | MIT License |
+  | Brotli | MIT License |
+  | Zstandard | BSD License |
+  | zlib | zlib License |
+
+- **许可文件**：Release 附带的 `LICENSE` 与 `LICENSE_*` 随这类构建安装到 `share/doc/ais2api/licenses/curl-impersonate/`。
+- **正式运行包**：目前不打开这个选项，也不包含该 DLL。
+- 这些许可不因 ais2api 的许可选择而改变。
+
 ## 原理参考
 
 [aistudio-api-termux](https://github.com/ReedSein/aistudio-api-termux/tree/84b50663fcae79058fe33e0e45b5c3452da7c461) 用于理解行为和私有协议事实。其本身采用 MIT 许可，版权归其贡献者；该许可不因 ais2api 的许可选择而改变。
