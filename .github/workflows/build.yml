@@ -281,3 +281,41 @@ jobs:
           path: build/windows/packages/*.zip*
           if-no-files-found: error
           retention-days: 28
+
+  # The SpiderMonkey backend's network layer, built with curl-impersonate and
+  # checked against Firefox's TLS and HTTP/2 fingerprints on loopback. It
+  # reuses the Windows job's dependency cache and does not save one.
+  windows-curl-impersonate:
+    name: Windows / curl-impersonate network tests
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\build\vcpkg-cache
+      VCPKG_ROOT: ${{ github.workspace }}\build\deps\vcpkg
+      VCPKG_TRIPLET: x64-windows-static-release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Compute dependency cache key
+        id: deps
+        shell: bash
+        run: echo "scope=windows-msvc-$VCPKG_TRIPLET-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      - name: Restore dependency cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: build/vcpkg-cache
+          key: ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-
+            ${{ steps.deps.outputs.scope }}-
+      - name: Build and run the network tests
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build/vcpkg-cache | Out-Null
+          . ./scripts/build-common.ps1
+          Enter-BuildTools
+          Initialize-Vcpkg $PWD.Path $env:VCPKG_ROOT
+          Invoke-Checked cmake.exe @('-S', '.', '-B', 'build/impersonate', '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake", "-DVCPKG_TARGET_TRIPLET=$env:VCPKG_TRIPLET",
+            '-DAIS2API_CURL_IMPERSONATE=ON', '-DAIS2API_BUILD_WEBUI=OFF')
+          Invoke-Checked cmake.exe @('--build', 'build/impersonate', '--target', 'ais2api_tests', '--parallel', "$env:NUMBER_OF_PROCESSORS")
+          Invoke-Checked build/impersonate/ais2api_tests.exe @('[firefox-http],[setup][download]')
