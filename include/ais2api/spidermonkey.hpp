@@ -110,8 +110,8 @@ HostIdentity host_identity(const json::object &config);
 // The experimental SpiderMonkey backend (browser_backend "spidermonkey"):
 // Google's WAA virtual machine runs in this process and requests go out over
 // HTTP, with no browser. An account uses the Firefox identity it was given
-// under the Camoufox backend. The prototype claims Firefox 152 and sends with
-// plain libcurl.
+// under the Camoufox backend. The prototype claims Firefox 152; a build with
+// curl-impersonate sends with Firefox's TLS and HTTP/2 fingerprints.
 class SpiderMonkeyGateway final : public GenerationBackend {
   public:
     SpiderMonkeyGateway(const Config &config, Store &store);

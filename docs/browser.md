@@ -56,12 +56,20 @@ CloakBrowser 的指纹作用于整个进程，因此切换到指纹不同的账�
 
 SpiderMonkey 后端不启动浏览器：ais2api 用 HTTP 加载 AI Studio 页面并发出页面自己的请求，Google 的 WAA（BotGuard）程序在进程内嵌的 SpiderMonkey 152 中运行，生成每次请求的 proof。它是 [Firefox 后端迁移计划](firefox-backends.md) P3 阶段的原型，只建议用于测试账号。
 
-- **构建**：默认的构建和发布版不包含它。用 [`tools/spidermonkey`](../tools/spidermonkey/README.md) 的配方编出 SpiderMonkey 静态库，再以 `-DAIS2API_SPIDERMONKEY=ON -DAIS2API_SPIDERMONKEY_DIR=<产物目录>` 构建；可执行文件约大 32 MB。不包含它的版本中，保存为 `spidermonkey` 的账号由 Camoufox 服务。
+- **构建**：默认的构建和发布版不包含它。用 [`tools/spidermonkey`](../tools/spidermonkey/README.md) 的配方编出 SpiderMonkey 静态库，再以 `-DAIS2API_SPIDERMONKEY=ON -DAIS2API_SPIDERMONKEY_DIR=<产物目录>` 构建；可执行文件约大 32 MB。这样的构建默认同时开启 `AIS2API_CURL_IMPERSONATE`（见下文“网络层”），程序旁边多一个 `libcurl-impersonate.dll`，目前只支持 Windows x64。不包含它的版本中，保存为 `spidermonkey` 的账号由 Camoufox 服务。
 - **身份**：沿用账号在 Camoufox 后端下生成的 Firefox 身份（navigator、屏幕、窗口、语言、时区），User-Agent 改为声称 Firefox 152。还没有 Firefox 身份的账号要先用 Camoufox 服务一次，否则返回 503 `browser_not_configured`。同一账号在 Camoufox（158）和 SpiderMonkey（152）之间切换，在 Google 看来是浏览器版本倒退。
-- **网络层**：原型用普通 libcurl（开启 HTTP/2）。请求头按 Firefox 的名称和顺序发出，但 TLS 与 HTTP/2 的特征是 libcurl 的（Windows 上是 Schannel），不是 Firefox 的。实现 Firefox 网络指纹是 P4 的工作。
+- **网络层**：用 [curl-impersonate](https://github.com/lexiforest/curl-impersonate)（lexiforest 分支）的 libcurl，CMake 下载锁定版本并校验 SHA-256（`scripts/curl-impersonate.cmake`）。
+  - **TLS 与 HTTP/2**：按实测的 Firefox（Camoufox 158）逐项设置，包括加密套件、扩展顺序、密钥交换组、签名算法、ECH GREASE、HTTP/2 SETTINGS、连接级 WINDOW_UPDATE、伪首部顺序，以及每个请求 HEADERS 帧上的权重（页面文档 42，其余 22）；不使用 curl-impersonate 自带的 Firefox 预设。
+  - **请求头**：按 Firefox 的名称和顺序发出，每个 Cookie 单独一个头。
+  - **离线测试**：`ais2api_tests "[firefox-http][fingerprint]"` 在本地抓取 ClientHello 和 HTTP/2 帧，与实测值逐项比较，其中包括 JA4。
+  - **已知差异**：
+    - Firefox 在每个 HEADERS 之后发一个流级 WINDOW_UPDATE，预编译的 curl-impersonate 不发；
+    - BoringSSL 与 Firefox 的 NSS 在细节上可能不同；
+    - 不经代理时 Firefox 会改用 HTTP/3，这个后端始终用 HTTP/2。
+  - **单独开启**：`AIS2API_CURL_IMPERSONATE` 也可以不带 SpiderMonkey 开启，便于测试网络层。开启后整个程序（包括 `setup` 的下载）都用这份 libcurl，证书用系统的证书库验证。
 - **流程**：第一次请求时加载页面（跳转到登录页时返回 401 `session_expired`），调用 `GetLoggingContext` 和 `GetAiStudioBenefitTier`，再调用 `Waa/Create`、取得解释器（按摘要缓存在 `<data_dir>/runtime/waa-interpreters/`）并启动程序。之后每次生成先在宿主页面里填入提示词并点击 Run 取得 proof，再发送 `GenerateContent`，约 2.2 秒后像页面一样发出一次 `CountTokens`。程序运行 12 小时后在下一次请求时按页面的方式续期。`GetLoggingContext` 返回 `[7,"Region not supported."]` 时报 403 `region_blocked`。
 - **其他接口**：`models` 直接调用 `ListModels`；`probe` 只加载页面，页面数据中有账号邮箱时核对它；Cookie 导入始终由默认后端验证。`reset_session` 丢弃页面和程序、保留连接；空闲释放时关闭全部。
-- **诊断**：`backend` 为 `spidermonkey`，另有 `pageLoaded`、`vm`（运行时长、解释器摘要前 12 位）、`vmsStarted`、`host`（嵌入的宿主脚本与对象结构表的 SHA-256、SpiderMonkey 版本）、`claimedFirefox` 和 `network: "libcurl"`。
+- **诊断**：`backend` 为 `spidermonkey`，另有 `pageLoaded`、`vm`（运行时长、解释器摘要前 12 位）、`vmsStarted`、`host`（嵌入的宿主脚本与对象结构表的 SHA-256、SpiderMonkey 版本）、`claimedFirefox`、`network`（用 curl-impersonate 时为 `curl-impersonate`，否则为 `libcurl`）和 `networkStack`（libcurl、TLS 库和 nghttp2 的版本）。
 
 ## Cookie 写回
 

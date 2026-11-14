@@ -98,7 +98,7 @@ json::object browser_part(const json::object &diagnostics) {
                             "modelDiscovery", "chunkBytes", "cookieRefresh", "bridgeSource", "bridgeSha256"});
     // The SpiderMonkey backend: its page and program, the host files' and
     // the interpreter's digests (Google's public file), and its network marker.
-    copy(out, diagnostics, {"pageLoaded", "vmsStarted", "claimedFirefox", "network", "benefitTier"});
+    copy(out, diagnostics, {"pageLoaded", "vmsStarted", "claimedFirefox", "network", "networkStack", "benefitTier"});
     if (auto vm = object_at(diagnostics, "vm")) {
         json::object part;
         copy(part, *vm, {"ageSeconds", "interpreter"});

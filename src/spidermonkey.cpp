@@ -250,7 +250,8 @@ struct SpiderMonkeyGateway::Impl {
         // that ends there is a sign-in.
         for (int redirect = 0;; ++redirect) {
             if (redirect > 10) incompatible("AI Studio redirected the page too often");
-            response = http->send({"GET", target, sm::document_headers(headers), std::nullopt}, token, 30s, 16 << 20);
+            // Firefox gives the top-level document its highest weight.
+            response = http->send({"GET", target, sm::document_headers(headers), std::nullopt, 42}, token, 30s, 16 << 20);
             if (response.status < 300 || response.status >= 400) break;
             const auto next = sm::resolve_location(target, browser_detail::header_value(response.headers, "location"));
             if (next.empty()) incompatible("AI Studio redirected the page nowhere");
@@ -704,8 +705,10 @@ json::object SpiderMonkeyGateway::diagnostics() {
     return {{"status", impl.last_status}, {"phase", impl.phase}, {"backend", "spidermonkey"},
             {"running", impl.vm != nullptr}, {"pageLoaded", impl.page.has_value()}, {"vm", std::move(vm)},
             {"vmsStarted", impl.vms_started}, {"claimedFirefox", claimed_firefox}, {"host", waa::host_versions()},
-            // The prototype's requests are libcurl's, not Firefox's, below HTTP.
-            {"network", "libcurl"}, {"benefitTier", impl.fresh_tier()},
+            // Below HTTP, requests carry Firefox's fingerprints only in a
+            // build with curl-impersonate.
+            {"network", HttpSession::firefox_fingerprint() ? "curl-impersonate" : "libcurl"},
+            {"networkStack", HttpSession::network_stack()}, {"benefitTier", impl.fresh_tier()},
             {"modelDiscovery", impl.models_discovered ? "live_rpc" : "not_loaded"}, {"cookieRefresh", impl.cookie_refresh},
             {"proxy", json::object{{"mode", impl.config.proxy.empty() ? "none" : "direct"}}}, {"identity", std::move(identity)}};
 }

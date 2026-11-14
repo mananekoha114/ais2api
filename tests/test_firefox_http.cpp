@@ -253,6 +253,17 @@ TEST_CASE("A session sends exactly the headers it was given", "[firefox-http]") 
     // Setting the same cookies again is no change.
     CHECK_FALSE(session.take_cookie_change());
 
+    SECTION("an empty Content-Length header stands for the body's length, where it is placed") {
+        HttpRequest placed;
+        placed.method = "POST";
+        placed.url = server.url("/placed");
+        placed.headers = {{"Content-Type", "application/json+protobuf"}, {"Content-Length", ""}, {"Origin", "https://aistudio.google.com"}};
+        placed.body = "[4,5]";
+        CHECK(session.send(placed).body == "echo:[4,5]");
+        CHECK(server.request(2).lines() == std::vector<std::string>{"Host: 127.0.0.1:" + std::to_string(server.port),
+                                                                    "Content-Type: application/json+protobuf", "Content-Length: 5",
+                                                                    "Origin: https://aistudio.google.com"});
+    }
     SECTION("without cookies for the host the Cookie header is left out, and a bare POST has no content type") {
         HttpSession empty(options());
         HttpRequest bare;
