@@ -217,21 +217,31 @@ TEST_CASE("Requests carry Firefox's headers in Firefox's order", "[spidermonkey]
     CHECK(value(image, "Priority") == "u=5, i");
     CHECK(value(script_headers(page, "https://www.google.com/js/bg/x.js"), "Sec-Fetch-Dest") == "script");
 
+    // The page's grpc-web XHRs as Firefox sends them (Camoufox 158,
+    // 2026-11-14): no Priority, and the body's length before Origin.
     RpcContext rpc{"page-key", "2", "SAPISIDHASH 1_a"};
-    CHECK(names(rpc_headers(page, rpc)) == "User-Agent,Accept,Accept-Language,Accept-Encoding,Referer,Content-Type,X-Goog-Api-Key,"
-                                           "X-Goog-AuthUser,X-User-Agent,Authorization,Origin,Cookie,Sec-Fetch-Dest,Sec-Fetch-Mode,"
-                                           "Sec-Fetch-Site,Priority,TE");
+    const auto plain = rpc_headers(page, rpc);
+    CHECK(names(plain) == "User-Agent,Accept,Accept-Language,Accept-Encoding,Referer,X-Goog-Api-Key,X-Goog-AuthUser,Authorization,"
+                          "Content-Type,X-User-Agent,Content-Length,Origin,Cookie,Sec-Fetch-Dest,Sec-Fetch-Mode,Sec-Fetch-Site,TE");
+    CHECK(value(plain, "Content-Length").empty());
+    CHECK(value(plain, "Accept") == "*/*");
     rpc.visit_id = "v1_x";
     rpc.extension = "CAE=";
     rpc.tier = "TIER1";
-    rpc.priority = "u=0";
     const auto generate = rpc_headers(page, rpc);
-    CHECK(names(generate) == "User-Agent,Accept,Accept-Language,Accept-Encoding,Referer,Content-Type,X-Goog-Api-Key,X-Goog-AuthUser,"
-                             "X-User-Agent,Authorization,X-AIStudio-Visit-Id,X-Goog-Ext-519733851-Bin,X-AIStudio-G1-Tier,Origin,Cookie,"
-                             "Sec-Fetch-Dest,Sec-Fetch-Mode,Sec-Fetch-Site,Priority,TE");
+    CHECK(names(generate) == "User-Agent,Accept,Accept-Language,Accept-Encoding,Referer,X-AIStudio-G1-Tier,X-AIStudio-Visit-Id,"
+                             "X-Goog-Ext-519733851-Bin,X-Goog-Api-Key,X-Goog-AuthUser,Authorization,Content-Type,X-User-Agent,"
+                             "Content-Length,Origin,Cookie,Sec-Fetch-Dest,Sec-Fetch-Mode,Sec-Fetch-Site,TE");
     CHECK(value(generate, "X-Goog-AuthUser") == "2");
-    CHECK(value(generate, "Priority") == "u=0");
+    CHECK(value(generate, "X-AIStudio-G1-Tier") == "TIER1");
     CHECK(value(generate, "Content-Type") == "application/json+protobuf");
+
+    // Waa/Create puts Authorization before X-Goog-AuthUser and takes no
+    // page values.
+    const auto waa = waa_headers(page, rpc);
+    CHECK(names(waa) == "User-Agent,Accept,Accept-Language,Accept-Encoding,Referer,X-Goog-Api-Key,Authorization,X-Goog-AuthUser,"
+                        "Content-Type,X-User-Agent,Content-Length,Origin,Cookie,Sec-Fetch-Dest,Sec-Fetch-Mode,Sec-Fetch-Site,TE");
+    CHECK(value(waa, "X-Goog-Api-Key") == "page-key");
 }
 
 TEST_CASE("An identity's configuration becomes the host's values", "[spidermonkey]") {

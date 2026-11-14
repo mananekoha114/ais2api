@@ -328,7 +328,7 @@ struct SpiderMonkeyGateway::Impl {
         for (auto &item : refresh) body.emplace_back(std::move(item));
         auto context = rpc_context(false);
         context.api_key = std::string(waa_api_key);
-        HttpRequest request{"POST", std::string(waa_create_url), sm::rpc_headers(headers, context), json::serialize(body)};
+        HttpRequest request{"POST", std::string(waa_create_url), sm::waa_headers(headers, context), json::serialize(body)};
         const auto response = http->send(std::move(request), token, 30s, 8 << 20);
         if (auto failure = sm::page_rpc_failure("Waa/Create", response.status, response.body)) throw *failure;
         return waa::parse_challenge(response.body);
@@ -401,7 +401,9 @@ struct SpiderMonkeyGateway::Impl {
         const auto page_headers = headers;
         options.load_image = [session, page_headers](std::string_view url, std::stop_token stop) {
             try {
-                const auto response = session->send({"GET", std::string(url), sm::image_headers(page_headers, url), std::nullopt}, stop, 30s, 4 << 20);
+                // Firefox weighs an image of urgency 5 at 12.
+                const auto response =
+                    session->send({"GET", std::string(url), sm::image_headers(page_headers, url), std::nullopt, 12}, stop, 30s, 4 << 20);
                 return response.status == 200 && browser_detail::header_value(response.headers, "content-type").starts_with("image/") &&
                        !response.body.empty();
             } catch (const std::exception &) {
@@ -491,7 +493,8 @@ struct SpiderMonkeyGateway::Impl {
     }
 
     // The CountTokens request the page sends for its prompt box once Run was
-    // clicked, in the background; its answer is not needed.
+    // clicked, in the background, with the benefit tier as GenerateContent's;
+    // its answer is not needed.
     void schedule_count_tokens(std::string body, const sm::RpcContext &context) {
         if (follow_up.joinable()) {
             follow_up.request_stop();
@@ -588,11 +591,8 @@ void SpiderMonkeyGateway::Impl::send(const Request &request, const Account &acco
         context.tier = std::string(sm::tier_header(transfer.benefit));
         if (!counted && !content.prompt.empty() && !content.model.empty()) {
             counted = true;
-            auto companion = context;
-            companion.tier.clear();
-            schedule_count_tokens(sm::count_tokens_body(content.model, content.prompt), companion);
+            schedule_count_tokens(sm::count_tokens_body(content.model, content.prompt), context);
         }
-        context.priority = "u=0";
         HttpRequest upload{"POST", std::string(maker_suite) + "GenerateContent", sm::rpc_headers(headers, context), std::string(body)};
         check();
         phase = "generation_start";

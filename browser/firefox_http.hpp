@@ -40,7 +40,8 @@ struct HttpRequest {
     HttpHeaders headers;
     std::optional<std::string> body;
     // The HTTP/2 priority weight of the request's stream. Firefox gives the
-    // top-level document 42 and a script, XHR or fetch of normal priority 22.
+    // top-level document 42, a script, XHR or fetch of normal priority 22 and
+    // an image of urgency 5 12.
     int weight = 22;
 };
 struct HttpResponse {

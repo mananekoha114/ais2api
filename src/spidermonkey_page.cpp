@@ -464,16 +464,37 @@ Headers script_headers(const PageHeaders &page, std::string_view url) {
     return headers;
 }
 
+namespace {
+// What Firefox adds after a grpc-web XHR's own headers. The XHRs carry no
+// Priority header; the empty Content-Length becomes the body's length.
+void rpc_trailing(Headers &headers) {
+    headers.insert(headers.end(), {{"Content-Length", ""}, {"Origin", std::string(origin)}, {"Cookie", ""}, {"Sec-Fetch-Dest", "empty"},
+                                   {"Sec-Fetch-Mode", "cors"}, {"Sec-Fetch-Site", "same-site"}, {"TE", "trailers"}});
+}
+} // namespace
+
+// The orders are the page's own XHRs' in Firefox, as captured from Camoufox
+// 158 (docs/reports/firefox-network-stack-2026-11-14.md).
 Headers rpc_headers(const PageHeaders &page, const RpcContext &rpc) {
     auto headers = leading(page, "*/*");
-    headers.insert(headers.end(), {{"Referer", referer()}, {"Content-Type", "application/json+protobuf"}, {"X-Goog-Api-Key", rpc.api_key},
-                                   {"X-Goog-AuthUser", rpc.auth_user}, {"X-User-Agent", "grpc-web-javascript/0.1"}});
-    if (!rpc.authorization.empty()) headers.emplace_back("Authorization", rpc.authorization);
+    headers.emplace_back("Referer", referer());
+    if (!rpc.tier.empty()) headers.emplace_back("X-AIStudio-G1-Tier", rpc.tier);
     if (!rpc.visit_id.empty()) headers.emplace_back("X-AIStudio-Visit-Id", rpc.visit_id);
     if (!rpc.extension.empty()) headers.emplace_back("X-Goog-Ext-519733851-Bin", rpc.extension);
-    if (!rpc.tier.empty()) headers.emplace_back("X-AIStudio-G1-Tier", rpc.tier);
-    headers.insert(headers.end(), {{"Origin", std::string(origin)}, {"Cookie", ""}, {"Sec-Fetch-Dest", "empty"}, {"Sec-Fetch-Mode", "cors"},
-                                   {"Sec-Fetch-Site", "same-site"}, {"Priority", rpc.priority}, {"TE", "trailers"}});
+    headers.insert(headers.end(), {{"X-Goog-Api-Key", rpc.api_key}, {"X-Goog-AuthUser", rpc.auth_user}});
+    if (!rpc.authorization.empty()) headers.emplace_back("Authorization", rpc.authorization);
+    headers.insert(headers.end(), {{"Content-Type", "application/json+protobuf"}, {"X-User-Agent", "grpc-web-javascript/0.1"}});
+    rpc_trailing(headers);
+    return headers;
+}
+
+Headers waa_headers(const PageHeaders &page, const RpcContext &rpc) {
+    auto headers = leading(page, "*/*");
+    headers.insert(headers.end(), {{"Referer", referer()}, {"X-Goog-Api-Key", rpc.api_key}});
+    if (!rpc.authorization.empty()) headers.emplace_back("Authorization", rpc.authorization);
+    headers.insert(headers.end(), {{"X-Goog-AuthUser", rpc.auth_user}, {"Content-Type", "application/json+protobuf"},
+                                   {"X-User-Agent", "grpc-web-javascript/0.1"}});
+    rpc_trailing(headers);
     return headers;
 }
 } // namespace ais2api::spidermonkey_detail

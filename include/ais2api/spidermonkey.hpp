@@ -93,9 +93,12 @@ struct RpcContext {
     std::string api_key, auth_user = "0", authorization;
     // Empty ones are left out.
     std::string visit_id, extension, tier;
-    std::string priority = "u=4";
 };
+// A MakerSuite RPC.
 Headers rpc_headers(const PageHeaders &page, const RpcContext &rpc);
+// Waa/Create, whose headers the page sets in an order of their own; it takes
+// no visit ID, extension or tier.
+Headers waa_headers(const PageHeaders &page, const RpcContext &rpc);
 
 struct HostIdentity {
     waa::Profile profile; // without the page's URL, globals and document
