@@ -73,8 +73,19 @@
   2. 对比新旧启动器中已移植的逻辑和 `properties.json`。如果与版本相关的输出变了（例如 WebGL 扩展列表、新增或删除的配置项），在 `firefox_identity::launch()` 中为已保存的身份加迁移，不重新生成。
   3. 运行隐藏测试 `[.fpgen-model]`，并用 `check-identities` 与新启动器对比；再运行 `[.camoufox-runtime]`。
   4. 用 `fetch` 下载不裁剪的完整版，运行 `[.camoufox-fonts]`，确认 `setup` 裁剪后的渲染与完整版相同。
-- **对象结构表**：自己编写采集工具，在真实浏览器页面中导出与参考项目 `firefox152.json.gz` 相同格式的数据（全局对象自有键及顺序、接口与属性描述、原生函数标记、Window 原型链与取值）。以同版本的 Mozilla 官方 Firefox 为准，按 Windows 和 Linux 分别采集；Camoufox 只用于对比，找出它与官方版不一致之处。每次升级还要人工检查 `dom.js` 中与版本相关的行为。
+  5. 用 [`tools/netfp`](../tools/netfp/README.md) 抓一次新版本的 ClientHello、HTTP/2 帧和请求头，与下面三处比较，有变化时一并更新：
+     - `src/firefox_http.cpp` 的参数表；
+     - `tests/test_firefox_fingerprint.cpp` 的期望值；
+     - `src/spidermonkey_page.cpp` 的请求头。
+- **对象结构表**：用自己的采集工具 [`tools/shape`](../tools/shape/README.md) 导出与参考项目相同格式的数据（全局对象自有键及顺序、接口与属性描述、原生函数标记、Window 原型链与取值）。分工如下：
+  - **页面部分**：由账号的 Camoufox 在真实 AI Studio 页面上采集，只加载、不生成；
+  - **浏览器部分**：以同版本的 Mozilla 官方 Firefox 在本地页面上的采集为准；
+  - **Camoufox 的痕迹**：Camoufox 与官方版在同一本地页面上的差异，合并时去掉；
+  - **Linux 表**：在 Windows 表上套用官方 Windows 版与 Linux 版的差异。
+
+  每次升级还要人工检查 `dom.js` 中与版本相关的行为。
 - **SpiderMonkey 静态库**：放在单独的公开仓库（例如 `mananekoha114/ais2api-spidermonkey`），保存我们的嵌入补丁（第一版来自参考项目针对 152.0.4 的补丁，之后由我们维护），用 GitHub Actions 编译 windows-x64（clang-cl，兼容 MSVC）、linux-x64、linux-arm64、android-arm64（NDK）。主仓库像 `runtime-manifest.json` 一样用 SHA-256 锁定。
+- **curl-impersonate**：`scripts/curl-impersonate.cmake` 锁定版本和 SHA-256。升级后运行 `[firefox-http][fingerprint]`，并按上面第 5 步重新抓包比较。
 
 ## Camoufox 后端
 
@@ -109,7 +120,12 @@
 - **网络指纹**：直接发出的受保护请求在 TLS 握手和 HTTP/2 帧特征上必须像 Firefox，否则请求头声称 Firefox、握手却是 OpenSSL。这是进主线的必要条件。原型阶段先用普通 libcurl。
   - P3 的调研见 [Firefox 网络指纹调研](reports/firefox-network-fingerprint-2026-11-12.md)：Windows 上 libcurl 用 Schannel，ClientHello 与 Firefox 差别很大；curl-impersonate 的 Firefox 配置与实测的 Camoufox 158 大体一致，差异在 FFDHE 组、HEADERS 的优先级权重和流级 WINDOW_UPDATE。
   - Google 的相关域名都通过 `Alt-Svc` 声明 HTTP/3。经 HTTP 代理时 Firefox 只用 HTTP/2；不用代理时 Firefox 很可能改用 HTTP/3，所以也要模仿 QUIC 和 HTTP/3。
-  - 建议以 curl-impersonate（lexiforest 分支）为基础，各项参数按我们自己对 Firefox 的抓包设置，并用同样的方法验证；备选是 NSS 加 nghttp2。由维护者选定。
+  - **2026-11-14 维护者选定 curl-impersonate**（lexiforest 分支），各项参数按我们自己对 Firefox 的抓包设置，并用同样的方法验证；备选是 NSS 加 nghttp2。
+  - **实现方式**：
+    - 构建选项 `AIS2API_CURL_IMPERSONATE`，开启 SpiderMonkey 时默认开启；
+    - 目前链接预编译的 Windows x64 DLL，因为它的静态库里 BoringSSL 没有加符号前缀，会与程序静态链接的 OpenSSL 冲突；
+    - 预编译版不恢复 TLS 会话：BoringSSL 恢复会话时的 ClientHello 与 Firefox 不同；
+    - 自己编译 curl-impersonate 时一起解决：加符号前缀以便静态链接、补上 Firefox 在每个 HEADERS 之后发的流级 WINDOW_UPDATE、恢复会话时像 Firefox 一样去掉 session_ticket、按 NSS 的方式计算 ECH GREASE 长度、支持 Linux 和 Android。和 SpiderMonkey 静态库仓库一起做。
 - **Termux 与 Android App**：Termux 使用原生 NDK 版，不需要 proot。Android App 没有 Camoufox，只能使用 SpiderMonkey；是否用 GeckoView 兜底，在 Android App 立项时评估。
 
 ## 构建模式
@@ -166,7 +182,28 @@ P2 的各项已于 2026-11-08 实现（#19–#25），并按合并标准做了�
 P3 于 2026-11-12 完成原型，见 [原型报告](reports/spidermonkey-prototype-2026-11-12.md)：
 - 一个测试账号用 SpiderMonkey 后端生成 2 次都成功，进程工作集 75 MiB，没有浏览器进程；
 - 四格对照实验（proof 来源 × 发送方式）在第一轮遇到一次 403 后按停止条件中止，那一格同时存在几种差异，不能据此判断原因。通过率是否与 Camoufox 相当没有证明，对照实验移到 P4，在实现 Firefox 网络指纹之后进行；
-- 网络指纹的实现方案已调研，待维护者选定。
+- 网络指纹的实现方案已调研，维护者 2026-11-14 选定 curl-impersonate。
+
+P4 第一步（Firefox 网络指纹）于 2026-11-14 实现：
+- SpiderMonkey 构建改用 curl-impersonate，TLS 与 HTTP/2 参数按实测的 Camoufox 158 逐项设置；
+- 离线测试 `[firefox-http][fingerprint]` 在本地抓取 ClientHello 和 HTTP/2 帧逐项比较，JA4、SETTINGS、连接级 WINDOW_UPDATE、权重、伪首部顺序和 Cookie 分头都与实测一致；流级 WINDOW_UPDATE 是已知差异；
+- 实盘对照（同一测试账号，Camoufox 和 SpiderMonkey 各生成 1 次，都成功）：握手和连接层与 Camoufox 一致；
+- 抓包后修正：
+  - 不再恢复 TLS 会话；
+  - RPC 请求头的顺序、`Priority` 和 `Content-Length` 的位置，改成和网页自己的 XHR 一致；
+  - 图片请求的权重改为 12。
+- 剩下的差异和后续建议见 [网络指纹实现报告](reports/firefox-network-stack-2026-11-14.md)。
+
+P4 第二项（SpiderMonkey 升到 158）于 2026-11-14 实现，详见 [升级报告](reports/spidermonkey-158-2026-11-14.md)：
+- **版本**：SpiderMonkey 升到 158.0.1，与 Camoufox 158.0.1-beta.41 声称同一大版本，不再有版本倒退。
+- **引擎补丁**：由本项目移植并维护，语言区域只覆盖默认区域。
+- **参考项目的文件**：宿主脚本和接口层按参考项目的 158 版重新取用。
+- **页面行为**：移植了可信的鼠标点击（Run、Rerun）、按真实时间线创建 WAA 程序，以及官网 BotGuard 包装层的计时指标（只记录，不上报）。参考项目新增的遥测和子资源加载没有移植。
+- **对象结构表**：换成了自己采集的 Windows 与 Linux 表（`waa/shapes/`）。页面部分来自测试账号的一次在线采集（只加载、不生成），浏览器部分以官方 Firefox 158.0.1 为准。参考项目的表已删除：它的接口和属性描述与官方版一致，但全局键顺序带有下面说的 Camoufox 痕迹。
+- **线上验证**：用自己的表生成 1 次，返回 200。同时抓包：握手、文档、图片和页面 RPC 的请求头都与 Camoufox 158 一致，第一步里修正过的请求头也在线上得到确认；剩下的是已知差异。
+- **采集中的发现**：
+  - 同一本地页面上，Camoufox 与官方 Firefox 只在全局键顺序上不同：新窗口里 `Event`、`Location` 提前解析，页面脚本能看出来。参考项目的表里也有这个痕迹；
+  - Linux 版 Firefox 158 默认不提供 WebGPU。
 
 每项工作单独开分支、提 PR 到 main，由维护者审核合并。
 
@@ -194,7 +231,6 @@ P3 于 2026-11-12 完成原型，见 [原型报告](reports/spidermonkey-prototy
 | 事项 | 决定时机 |
 |---|---|
 | 新账号的默认后端 | P4，对照实验完成后 |
-| Firefox 网络指纹的实现方案 | P3 已调研并给出建议，由维护者选定 |
 | 多账号并发 | SpiderMonkey 后端稳定后 |
 | 整个核心拆成库 | 桌面 App 或 Android App 立项时 |
 | Android App 的兜底方案（GeckoView） | Android App 立项时 |

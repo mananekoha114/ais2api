@@ -253,6 +253,17 @@ TEST_CASE("A session sends exactly the headers it was given", "[firefox-http]") 
     // Setting the same cookies again is no change.
     CHECK_FALSE(session.take_cookie_change());
 
+    SECTION("an empty Content-Length header stands for the body's length, where it is placed") {
+        HttpRequest placed;
+        placed.method = "POST";
+        placed.url = server.url("/placed");
+        placed.headers = {{"Content-Type", "application/json+protobuf"}, {"Content-Length", ""}, {"Origin", "https://aistudio.google.com"}};
+        placed.body = "[4,5]";
+        CHECK(session.send(placed).body == "echo:[4,5]");
+        CHECK(server.request(2).lines() == std::vector<std::string>{"Host: 127.0.0.1:" + std::to_string(server.port),
+                                                                    "Content-Type: application/json+protobuf", "Content-Length: 5",
+                                                                    "Origin: https://aistudio.google.com"});
+    }
     SECTION("without cookies for the host the Cookie header is left out, and a bare POST has no content type") {
         HttpSession empty(options());
         HttpRequest bare;
@@ -405,4 +416,22 @@ TEST_CASE("Encoded responses are decoded", "[firefox-http]") {
     request.headers = {{"Accept-Encoding", codings}};
     CHECK(session.send(request).body == "hello");
     CHECK(server.request(0).lines().back() == "Accept-Encoding: " + codings);
+}
+
+TEST_CASE("A response tells how its connection came about", "[firefox-http]") {
+    Server server([](const Server::Request &, tcp::socket &socket) { Server::reply(socket, "200 OK", "", "ok"); });
+    HttpSession session(options());
+    HttpRequest request;
+    request.url = server.url("/");
+    // Without a proxy there is no tunnel to trace.
+    request.trace_tunnel = true;
+    const auto first = session.send(request);
+    CHECK(first.protocol == "http/1.1");
+    CHECK(first.timing.new_connection);
+    CHECK(first.timing.connected >= first.timing.resolved);
+    CHECK(first.timing.tunneled.count() == 0);
+    // The connection is kept and used again.
+    const auto second = session.send(request);
+    CHECK(second.body == "ok");
+    CHECK_FALSE(second.timing.new_connection);
 }

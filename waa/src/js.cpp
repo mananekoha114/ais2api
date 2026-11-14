@@ -185,9 +185,7 @@ void Context::release(const Value &value) {
     if (value.kind == Kind::handle) release(value.handle);
 }
 
-void set_locale_override(std::string_view language, std::string_view region, std::string_view locale) {
-    mz_set_camou_locale(std::string(language).c_str(), std::string(region).c_str(), std::string(locale).c_str());
-}
+void set_locale_override(std::string_view locale) { mz_set_camou_locale(std::string(locale).c_str()); }
 double now() { return mz_now(); }
 
 // Runs the native function a script called. The shim is compiled without

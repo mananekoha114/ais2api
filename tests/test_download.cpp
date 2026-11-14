@@ -6,11 +6,10 @@
 
 #include "ais2api/download.hpp"
 #include "ais2api/runtime.hpp"
+#include "tls_fixture.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
-#include <openssl/pem.h>
-#include <openssl/x509v3.h>
 #include <atomic>
 #include <fstream>
 #include <iostream>
@@ -33,32 +32,7 @@ struct DownloadFixture {
     const std::string body=std::string(4*1024*1024,'x');
     DownloadFixture() {
         fs::create_directories(root);
-        std::unique_ptr<EVP_PKEY_CTX,decltype(&EVP_PKEY_CTX_free)> keygen(EVP_PKEY_CTX_new_id(EVP_PKEY_RSA,nullptr),EVP_PKEY_CTX_free);
-        if(!keygen || EVP_PKEY_keygen_init(keygen.get())<=0 || EVP_PKEY_CTX_set_rsa_keygen_bits(keygen.get(),2048)<=0)
-            throw std::runtime_error("fixture key generation failed");
-        EVP_PKEY *raw=nullptr;
-        if(EVP_PKEY_keygen(keygen.get(),&raw)<=0) throw std::runtime_error("fixture key generation failed");
-        std::unique_ptr<EVP_PKEY,decltype(&EVP_PKEY_free)> key(raw,EVP_PKEY_free);
-        std::unique_ptr<X509,decltype(&X509_free)> cert(X509_new(),X509_free);
-        X509_set_version(cert.get(),2); ASN1_INTEGER_set(X509_get_serialNumber(cert.get()),1);
-        X509_gmtime_adj(X509_getm_notBefore(cert.get()),-60);
-        X509_gmtime_adj(X509_getm_notAfter(cert.get()),3600);
-        X509_set_pubkey(cert.get(),key.get());
-        auto *name=X509_get_subject_name(cert.get());
-        X509_NAME_add_entry_by_txt(name,"CN",MBSTRING_ASC,reinterpret_cast<const unsigned char *>("localhost"),-1,-1,0);
-        X509_set_issuer_name(cert.get(),name);
-        auto extension=[&](int nid,const char *value){
-            auto *ext=X509V3_EXT_conf_nid(nullptr,nullptr,nid,const_cast<char *>(value));
-            if(!ext) throw std::runtime_error("fixture extension failed");
-            X509_add_ext(cert.get(),ext,-1); X509_EXTENSION_free(ext);
-        };
-        extension(NID_basic_constraints,"critical,CA:TRUE");
-        extension(NID_subject_alt_name,"DNS:localhost,IP:127.0.0.1");
-        if(!X509_sign(cert.get(),key.get(),EVP_sha256())) throw std::runtime_error("fixture signing failed");
-        auto pem=[](BIO *bio){char *text=nullptr;auto size=BIO_get_mem_data(bio,&text);return std::string(text,static_cast<std::size_t>(size));};
-        std::unique_ptr<BIO,decltype(&BIO_free)> certbio(BIO_new(BIO_s_mem()),BIO_free), keybio(BIO_new(BIO_s_mem()),BIO_free);
-        PEM_write_bio_X509(certbio.get(),cert.get()); PEM_write_bio_PrivateKey(keybio.get(),key.get(),nullptr,nullptr,0,nullptr,nullptr);
-        auto certpem=pem(certbio.get()),keypem=pem(keybio.get());
+        const auto [certpem,keypem]=test::self_signed_localhost();
         atomic_write(root/"ca.pem",certpem);
         tls.use_certificate_chain(boost::asio::buffer(certpem));
         tls.use_private_key(boost::asio::buffer(keypem),boost::asio::ssl::context::pem);

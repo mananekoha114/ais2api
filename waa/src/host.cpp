@@ -7,7 +7,6 @@
 #include "host.hpp"
 #include "host_scripts.hpp"
 #include "text.hpp"
-#include <cctype>
 #include <random>
 #include <zlib.h>
 
@@ -112,13 +111,7 @@ json::object host_versions() {
 Agent::Agent(EventLoop &loop, Profile profile, Loader load_image, Loader load_frame, std::stop_token closing)
     : loop_(loop), profile_(std::move(profile)), load_image_(std::move(load_image)), load_frame_(std::move(load_frame)),
       closing_(std::move(closing)), timezone_(profile_.timezone.empty() ? "UTC" : profile_.timezone) {
-    // The account's language as Camoufox gives it to mozilla::intl: the
-    // language in lower case, the region in upper case, and the whole tag.
-    const auto dash = profile_.locale.find('-');
-    std::string language = profile_.locale.substr(0, dash), region = dash == std::string::npos ? "" : profile_.locale.substr(dash + 1);
-    for (auto &character : language) character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
-    for (auto &character : region) character = static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
-    js::set_locale_override(language, region, profile_.locale);
+    js::set_locale_override(profile_.locale);
     context_ = std::make_unique<js::Context>(1u << 30, profile_.locale);
 }
 
@@ -163,13 +156,13 @@ Value Agent::evaluate(Handle global, std::string_view source, std::string_view n
     return context_->evaluate(global, source, name, 1);
 }
 
-Value Agent::new_array(std::initializer_list<Value> items) {
+Value Agent::new_array(std::span<const Value> items) {
     ++depth_;
     struct Leave {
         Agent &agent;
         ~Leave() { --agent.depth_; }
     } leave{*this};
-    return context_->call(array, 0, std::span<const Value>(items.begin(), items.size()));
+    return context_->call(array, 0, items);
 }
 
 void Agent::release(const js::Exception &exception) { context_->release(exception.value); }
@@ -318,6 +311,7 @@ json::object Agent::realm_profile(std::string_view realm) const {
             const auto height = profile_.window.if_contains("innerHeight");
             values["visualViewport"] = json::object{{"width", *width}, {"height", height ? *height : json::value()}};
         }
+        if (!profile_.navigation.empty()) values["performance.navigationEntry"] = profile_.navigation;
     } else {
         for (const auto name : frame_window_names)
             if (const auto value = profile_.window.if_contains(name)) window[name] = *value;
@@ -327,6 +321,7 @@ json::object Agent::realm_profile(std::string_view realm) const {
         if (!document.empty()) values["document"] = std::move(document);
     }
     json::object result{{"hasFocus", profile_.has_focus}, {"window", std::move(window)}, {"values", std::move(values)}};
+    if (is_top && !profile_.navigation.empty()) result["domLoading"] = profile_.dom_loading;
     if (is_top && !profile_.globals.empty()) result["globals"] = profile_.globals;
     if (!profile_.local_storage.empty()) {
         json::object storage;
@@ -381,6 +376,8 @@ void Agent::install_agent(Handle result) {
     shared_ = handle_of(context.get(result, "shared"));
     track_ = handle_of(context.get(result, "track"));
     notify_ = handle_of(context.get(result, "notify"));
+    activate = handle_of(context.get(result, "activate"));
+    mouse_input = handle_of(context.get(result, "mouseInput"));
     context.set_microtask_reporter(handle_of(context.get(result, "reportMicrotask")));
     const Held registry{context, handle_of(context.get(shared_, "registry"))};
     context.set_trusted_types(handle_of(context.get(registry.handle, "trusted")), profile_.trusted_types);

@@ -52,7 +52,7 @@ struct Engine : Thread {
     js::Handle global = 0;
     explicit Engine(std::string_view timezone = "UTC") {
         run([&] {
-            js::set_locale_override("en", "US", "en-US");
+            js::set_locale_override("en-US");
             context = std::make_unique<js::Context>(64u << 20, "en-US");
             loop.cleanup = [this] { context.reset(); };
             global = context->new_global(0, timezone);
@@ -71,7 +71,7 @@ waa::Profile page_profile() {
     profile.locale = "en-US";
     profile.timezone = "Asia/Tokyo";
     profile.window = {{"innerWidth", 1280}, {"innerHeight", 720}, {"outerWidth", 1296}, {"outerHeight", 808}, {"devicePixelRatio", 1.25}};
-    profile.navigator = {{"userAgent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0"},
+    profile.navigator = {{"userAgent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:158.0) Gecko/20100101 Firefox/158.0"},
                          {"hardwareConcurrency", 8}};
     profile.screen = {{"width", 1920}, {"height", 1080}};
     return profile;
@@ -136,7 +136,21 @@ constexpr std::string_view interpreter = R"js(
 globalThis.standIn = {
   a(program, ready, flag, unused, callback, signals, stored, second, loggers) {
     globalThis.started = JSON.stringify([program, flag, typeof callback, signals, stored === undefined ? null : stored, second, loggers.length]);
+    if (program === 'log') {
+      globalThis.log = [];
+      for (const type of ['pointerover', 'pointerout', 'pointermove', 'pointerdown', 'pointerup', 'mouseover', 'mouseout', 'mousemove',
+                          'mousedown', 'mouseup', 'click', 'focusin', 'focusout'])
+        document.addEventListener(type, event => log.push(event.type + (event.isTrusted ? '' : '!')), true);
+    }
+    if (program === 'metrics') {
+      callback(5, true, false, 1);
+      loggers[0]('x', 7);
+      loggers[1](3);
+      loggers[2](9);
+      loggers[3]('n', 2);
+    }
     const snapshot = (deliver, options) => {
+      if (program === 'log') return deliver(log.splice(0).join() + '|' + navigator.userActivation.hasBeenActive);
       const box = document.querySelector('ms-prompt-box');
       const bound = options[0] === undefined ? 'unbound' : options[0].content;
       const reply = () => deliver('!' + bound + '|' + (box ? box.querySelector('textarea').value : 'no box') + '|' + (globalThis.clicks || 0));
@@ -277,6 +291,16 @@ TEST_CASE("A realm has its own time zone, and the context its locale", "[waa][sp
     CHECK(engine.text("(1234.5).toLocaleString()") == "1,234.5");
 }
 
+TEST_CASE("The account's locale is the default, and other locales stay themselves", "[waa][spidermonkey]") {
+    auto profile = page_profile();
+    profile.locale = "de-DE";
+    Page page(std::move(profile));
+    CHECK(page.text("Intl.DateTimeFormat().resolvedOptions().locale") == "de-DE");
+    CHECK(page.text("(1234.5).toLocaleString()") == "1.234,5");
+    CHECK(page.text("const locale = new Intl.Locale('fr-FR'); [locale.language, locale.region, locale.baseName].join()") == "fr,FR,fr-FR");
+    CHECK(page.text("new Intl.NumberFormat('en-US').format(1234.5)") == "1,234.5");
+}
+
 TEST_CASE("The host looks like a Firefox page", "[waa][spidermonkey]") {
     Page page;
     CHECK(page.text("[typeof window, typeof document, typeof navigator, window === globalThis, window.top === window].join()") ==
@@ -284,7 +308,7 @@ TEST_CASE("The host looks like a Firefox page", "[waa][spidermonkey]") {
     CHECK(page.text("location.href") == "https://aistudio.google.com/prompts/new_chat?model=test#top");
     CHECK(page.text("[location.origin, location.pathname, location.search, location.hash].join(' ')") ==
           "https://aistudio.google.com /prompts/new_chat ?model=test #top");
-    CHECK(page.text("navigator.userAgent") == "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0");
+    CHECK(page.text("navigator.userAgent") == "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:158.0) Gecko/20100101 Firefox/158.0");
     CHECK(page.text("[navigator.hardwareConcurrency, screen.width, screen.height, innerWidth, innerHeight, devicePixelRatio].join()") ==
           "8,1920,1080,1280,720,1.25");
     CHECK(page.text("Intl.DateTimeFormat().resolvedOptions().timeZone") == "Asia/Tokyo");
@@ -367,9 +391,9 @@ TEST_CASE("A runtime starts the program and binds proofs to the page", "[waa][sp
     runtime.settle();
     // The prompt is typed and Run clicked before the snapshot; a textarea
     // reads CRLF as LF.
-    CHECK(runtime.proof("digest-1", "line one\r\nline two", true) == "!digest-1|line one\nline two|1");
+    CHECK(runtime.run_proof("digest-1", "line one\r\nline two") == "!digest-1|line one\nline two|1");
     // The box was cleared in between; without Run nothing is clicked.
-    CHECK(runtime.proof("digest-2", "second", false) == "!digest-2|second|1");
+    CHECK(runtime.proof("digest-2", "second") == "!digest-2|second|1");
     CHECK(runtime.refresh_snapshot() == "!unbound||1");
 }
 
@@ -431,7 +455,7 @@ TEST_CASE("A runtime gives up when its caller cancels", "[waa][spidermonkey]") {
             std::this_thread::sleep_for(100ms);
             source.request_stop();
         });
-        CHECK_THAT(error_of([&] { runtime.proof("digest", "prompt", true, source.get_token()); }), ContainsSubstring("499 cancelled"));
+        CHECK_THAT(error_of([&] { runtime.run_proof("digest", "prompt", source.get_token()); }), ContainsSubstring("499 cancelled"));
         // A later answer finds its own request.
     }
     SECTION("an interpreter that never returns") {
@@ -450,8 +474,63 @@ TEST_CASE("A runtime gives up when its caller cancels", "[waa][spidermonkey]") {
 
 TEST_CASE("A snapshot may answer in a later task", "[waa][spidermonkey]") {
     waa::Runtime runtime(options_for("slow"));
-    CHECK(runtime.proof("digest", "prompt", true) == "!digest|prompt|1");
-    CHECK(runtime.proof("digest", "again", true) == "!digest|again|2");
+    CHECK(runtime.run_proof("digest", "prompt") == "!digest|prompt|1");
+    CHECK(runtime.run_proof("digest", "again") == "!digest|again|2");
+}
+
+TEST_CASE("Run and Rerun are clicked with trusted mouse events", "[waa][spidermonkey]") {
+    auto pointer = std::make_shared<waa::Pointer>();
+    auto options = options_for("log");
+    options.pointer = pointer;
+    waa::Runtime runtime(std::move(options));
+    // Nothing happened on the page yet; a user action activates it.
+    CHECK(runtime.proof("digest", "") == "|false");
+    runtime.activate();
+    CHECK(runtime.proof("digest", "") == "|true");
+    CHECK_FALSE(pointer->clicked());
+    CHECK(runtime.run_proof("digest", "prompt") ==
+          "pointerover,pointermove,mouseover,mousemove,pointerdown,mousedown,focusout,focusin,pointerup,mouseup,click|true");
+    CHECK(pointer->clicked());
+    // Run turned into Stop under the pointer; then Rerun on the second turn,
+    // after the pointer rested on the turn.
+    runtime.replaced();
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(runtime.rerun_proof("digest", 2) ==
+          "pointerover,mouseover,"
+          "pointerout,pointerover,pointermove,mouseout,mouseover,mousemove,"
+          "pointerout,pointerover,pointermove,mouseout,mouseover,mousemove,"
+          "pointerdown,mousedown,focusout,focusin,pointerup,mouseup,click|true");
+    CHECK(std::chrono::steady_clock::now() - started >= 1100ms);
+    // Rerun removed the last turn under the pointer; over the conversation,
+    // nothing more is replaced.
+    runtime.replaced();
+    CHECK(runtime.proof("digest", "") == "pointerover,mouseover|true");
+    runtime.replaced();
+    CHECK(runtime.proof("digest", "") == "|true");
+}
+
+TEST_CASE("A runtime keeps what the page's BotGuard wrapper records", "[waa][spidermonkey]") {
+    const auto text = [](const std::vector<waa::Metric> &metrics) {
+        std::vector<std::string> lines;
+        for (const auto &metric : metrics) lines.push_back(metric.metric + " " + metric.label + " " + std::to_string(static_cast<long long>(metric.value)));
+        return lines;
+    };
+    waa::Runtime runtime(options_for("metrics"));
+    auto taken = text(runtime.take_metrics());
+    // The initialisation is counted and timed until the snapshot function
+    // arrives; the time varies.
+    REQUIRE(taken.size() == 8);
+    CHECK(taken[7].starts_with("el t "));
+    taken.pop_back();
+    CHECK(taken == std::vector<std::string>{"ec t 1", "ec h 1", "el h 5", "el x 7", "cec 3 1", "od/p  9", "od/n n 2"});
+    CHECK(runtime.take_metrics().empty());
+    // A snapshot is counted, timed and measured.
+    const auto snapshot = runtime.refresh_snapshot();
+    taken = text(runtime.take_metrics());
+    REQUIRE(taken.size() == 3);
+    CHECK(taken[0] == "ec n 1");
+    CHECK(taken[1].starts_with("el n "));
+    CHECK(taken[2] == "frs  " + std::to_string(snapshot.size()));
 }
 
 TEST_CASE("The embedded host files are identified for diagnostics", "[waa][spidermonkey]") {
@@ -460,6 +539,6 @@ TEST_CASE("The embedded host files are identified for diagnostics", "[waa][spide
         REQUIRE(versions.contains(name));
         CHECK(versions.at(name).as_string().size() == 64);
     }
-    CHECK(versions.at("spidermonkey").as_string() == "152.0.4");
+    CHECK(versions.at("spidermonkey").as_string() == "158.0.1");
 }
 #endif

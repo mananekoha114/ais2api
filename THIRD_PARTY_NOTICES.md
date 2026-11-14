@@ -46,14 +46,37 @@ Camoufox 后端的身份生成器（`src/fpgen.cpp`、`src/firefox_identity.cpp`
 
 ## WAA 运行时
 
-`waa/` 是 [AIStudio2API](https://github.com/Mag1cFall/AIStudio2API/tree/e38957a084c8928977e74a1d4faba80e5e852950)（MIT License，Copyright (c) 2026 Mag1cFall，[AIStudio2API-LICENSE.txt](licenses/AIStudio2API-LICENSE.txt)）中 `internal/waa` 的 C++ 移植，用于在进程内的 SpiderMonkey 里运行 Google 的 WAA 虚拟机：
+`waa/` 是 [AIStudio2API](https://github.com/Mag1cFall/AIStudio2API/tree/d94bf91c071e921ba2d0d8c6d14fef4faae2a469)（MIT License，Copyright (c) 2026 Mag1cFall，[AIStudio2API-LICENSE.txt](licenses/AIStudio2API-LICENSE.txt)）中 `internal/waa` 的 C++ 移植，用于在进程内的 SpiderMonkey 里运行 Google 的 WAA 虚拟机：
 
-- `waa/third_party/aistudio2api/` 中的 `dom.js`、`smhost.js`、`firefox152.json.gz`、`mozjs/mozjs.cpp` 和 `mozjs/mozjs.h` 是该提交中的原文件，未作修改。
+- `waa/third_party/aistudio2api/` 中的 `dom.js`、`smhost.js`、`mozjs/mozjs.cpp` 和 `mozjs/mozjs.h` 是该提交中的原文件，未作修改。
+- `waa/shapes/` 中的对象结构表由本项目用 `tools/shape` 自己采集，沿用其表的格式。
 - `waa/src/host_scripts.hpp` 中的 JavaScript 是其 `host.go` 和 `runtime.go` 里的脚本常量，逐字节相同。
 - `waa/src/` 的其余文件按其 Go 实现（`challenge.go`、`host.go`、`loop.go`、`realm.go`、`runtime.go`、`url.go`）用 C++ 重新编写。
-- `tools/spidermonkey/patches/0001-aistudio2api-embedding.patch` 是其 Firefox 分支的提交 [`e297ff009d`](https://github.com/Mag1cFall/firefox/commit/e297ff009d3b9afee0e223c02ae3271ef24d51b6)（MPL 2.0），应用于 SpiderMonkey 152.0.4。
+- SpiderMonkey 后端的 `src/spidermonkey.cpp` 和 `src/spidermonkey_page.cpp` 按其 `internal/aistudio` 中的 `runtime_go.go`、`navigation_timing.go` 和 `page_runs.go` 用 C++ 重新编写。
+- `tools/spidermonkey/patches/0001-aistudio2api-embedding.patch` 源自其 Firefox 分支的提交 [`e297ff009d`](https://github.com/Mag1cFall/firefox/commit/e297ff009d3b9afee0e223c02ae3271ef24d51b6)（MPL 2.0），由本项目移植到 SpiderMonkey 158.0.1；语言区域部分改为只替换默认区域。
 
 每个构建都会编译其中不需要 JavaScript 引擎的部分（challenge 解码、事件循环、文本解码）。虚拟机本身只在打开构建选项 `AIS2API_SPIDERMONKEY` 时编译；正式运行包目前不打开这个选项，也不包含 SpiderMonkey。Google 的 WAA 解释器和 challenge program 不纳入仓库。该许可不因 ais2api 的许可选择而改变。
+
+## SpiderMonkey 后端的网络层
+
+打开构建选项 `AIS2API_CURL_IMPERSONATE`（打开 `AIS2API_SPIDERMONKEY` 时默认打开）的构建，用 [curl-impersonate](https://github.com/lexiforest/curl-impersonate)（lexiforest 分支，MIT License，Copyright (c) 2026 curl_cffi developers）代替 vcpkg 的 libcurl。
+
+- **使用的文件**：CMake 从其 GitHub Release 下载 `scripts/curl-impersonate.cmake` 锁定的版本，按其中的 SHA-256 校验，只链接其中的 `libcurl-impersonate.dll`。该 DLL 放在程序旁边，不作修改。
+- **DLL 内含的组件**（随附的许可文件各自给出版权声明）：
+
+  | 组件 | 许可 |
+  |---|---|
+  | curl | curl license |
+  | BoringSSL | Apache License 2.0 |
+  | nghttp2、nghttp3、ngtcp2 | MIT License |
+  | c-ares | MIT License |
+  | Brotli | MIT License |
+  | Zstandard | BSD License |
+  | zlib | zlib License |
+
+- **许可文件**：Release 附带的 `LICENSE` 与 `LICENSE_*` 随这类构建安装到 `share/doc/ais2api/licenses/curl-impersonate/`。
+- **正式运行包**：目前不打开这个选项，也不包含该 DLL。
+- 这些许可不因 ais2api 的许可选择而改变。
 
 ## 原理参考
 

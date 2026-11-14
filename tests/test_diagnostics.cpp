@@ -106,8 +106,8 @@ TEST_CASE("the diagnostics report holds allowlisted fields only", "[diagnostics]
 TEST_CASE("the SpiderMonkey backend's state is reported without its identity", "[diagnostics]") {
     auto sources = planted();
     sources.browser = {{"backend", "spidermonkey"}, {"status", "gateway_ready"}, {"phase", "ready"}, {"running", true},
-                       {"pageLoaded", true}, {"vmsStarted", 2}, {"claimedFirefox", "152"}, {"network", "libcurl"},
-                       {"benefitTier", "free"}, {"vm", {{"ageSeconds", 30}, {"interpreter", "abcdefABCDEF"}, {"program", "planted program"}}},
+                       {"pageLoaded", true}, {"vmsStarted", 2}, {"claimedFirefox", "152"}, {"network", "curl-impersonate"},
+                       {"networkStack", "libcurl/8.23.0-IMPERSONATE BoringSSL nghttp2/1.63.0"}, {"benefitTier", "free"}, {"vm", {{"ageSeconds", 30}, {"interpreter", "abcdefABCDEF"}, {"program", "planted program"}}},
                        {"host", {{"dom", "d1"}, {"host", "h1"}, {"shape", "s1"}, {"spidermonkey", "152.0.4"}, {"path", "C:/Users/PlantedUser"}}},
                        {"identity", {{"platform", "linux"}, {"userAgent", "Mozilla/5.0 PlantedAgent"}}}};
     const auto report = safe_report(sources);
@@ -117,7 +117,8 @@ TEST_CASE("the SpiderMonkey backend's state is reported without its identity", "
         CHECK(text.find(secret) == std::string::npos);
     }
     const auto &browser = report.at("browser");
-    CHECK(browser.at("network") == "libcurl");
+    CHECK(browser.at("network") == "curl-impersonate");
+    CHECK(browser.at("networkStack") == "libcurl/8.23.0-IMPERSONATE BoringSSL nghttp2/1.63.0");
     CHECK(browser.at("claimedFirefox") == "152");
     CHECK(browser.at("vmsStarted") == 2);
     CHECK(browser.at("vm").as_object() == json::object{{"ageSeconds", 30}, {"interpreter", "abcdefABCDEF"}});

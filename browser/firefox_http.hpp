@@ -6,15 +6,19 @@
 
 // The HTTP side of a page that is not there: one account's connections,
 // cookies and request headers, for the backend that talks to Google without
-// a browser. The transport is plain libcurl; its TLS and HTTP/2 fingerprints
-// are libcurl's, not Firefox's.
+// a browser. Built with AIS2API_CURL_IMPERSONATE, the transport is
+// curl-impersonate's libcurl, set to Firefox's TLS ClientHello and HTTP/2
+// framing; otherwise it is plain libcurl, with libcurl's fingerprints.
 #pragma once
 #include "ais2api/common.hpp"
 #include <memory>
 
 namespace ais2api::browser_detail {
-// The Cookie header a request to `url` carries, from cookies in the account
-// store's shape; empty without any. Expired cookies are left out.
+// The cookies a request to `url` carries, as name=value pairs in the order of
+// the Cookie header, from cookies in the account store's shape. Expired
+// cookies are left out.
+std::vector<std::string> cookie_pairs(const json::array &stored, std::string_view url, std::int64_t now = unix_seconds());
+// The Cookie header a request to `url` carries; empty without any cookies.
 std::string cookie_header(const json::array &stored, std::string_view url, std::int64_t now = unix_seconds());
 // Applies one Set-Cookie header of a response from `url`. Returns whether the
 // cookies changed.
@@ -29,14 +33,38 @@ struct HttpRequest {
     std::string url;
     // Sent in this order, with nothing added but Host and, without one here,
     // Content-Length. A Cookie header with an empty value stands for the
-    // session's cookies and is left out when there are none.
+    // session's cookies and is left out when there are none; with Firefox's
+    // fingerprints, an https request carries each cookie in a header of its
+    // own, as Firefox does over HTTP/2. A Content-Length header with an empty
+    // value stands for the body's length, so that it can be placed.
     HttpHeaders headers;
     std::optional<std::string> body;
+    // The HTTP/2 priority weight of the request's stream. Firefox gives the
+    // top-level document 42, a script, XHR or fetch of normal priority 22 and
+    // an image of urgency 5 12.
+    int weight = 22;
+    // Through a proxy, records when the proxy answered the CONNECT of a new
+    // connection (libcurl's verbose trace, which costs a little).
+    bool trace_tunnel = false;
+};
+// How a response's connection came about, by libcurl's timers.
+struct HttpTiming {
+    // Whether the request opened a connection rather than reusing one; only
+    // then are the stages below its own.
+    bool new_connection = false;
+    // From the request's start: the name resolved, the TCP connection (to the
+    // proxy, when there is one) made and, with HttpRequest::trace_tunnel, the
+    // proxy's answer to CONNECT received. Zero for a stage that did not
+    // happen.
+    std::chrono::microseconds resolved{}, connected{}, tunneled{};
 };
 struct HttpResponse {
     long status = 0;
     HttpHeaders headers;
     std::string body;
+    // The protocol's ALPN name: "h2", "http/1.1" or "h3".
+    std::string protocol;
+    HttpTiming timing;
 };
 
 // A response as it arrives. Destroying it abandons the transfer.
@@ -81,6 +109,10 @@ class HttpSession {
     bool take_cookie_change();
     // The content codings this build decodes, as Firefox lists them.
     static std::string accept_encoding();
+    // Whether requests carry Firefox's TLS and HTTP/2 fingerprints.
+    static bool firefox_fingerprint();
+    // The libcurl, TLS library and HTTP/2 library this build sends with.
+    static std::string network_stack();
 
     // The implementation, which the exchanges of a session share with it.
     struct Impl;

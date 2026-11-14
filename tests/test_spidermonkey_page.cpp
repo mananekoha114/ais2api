@@ -131,6 +131,92 @@ TEST_CASE("The prompt box holds the text of the last user turn", "[spidermonkey]
     CHECK(page_prompt(Request{}).empty());
 }
 
+TEST_CASE("An account's page runs a conversation again with Rerun", "[spidermonkey]") {
+    const auto two_turns = request_with(R"([{"role":"user","parts":[{"text":"first"}]},{"role":"model","parts":[{"text":"reply"}]},
+                                            {"role":"user","parts":[{"text":"second"}]}])");
+    PageRuns runs;
+    CHECK_FALSE(runs.rerun("account-a", two_turns));
+    CHECK(runs.rerun("account-a", two_turns));
+    // Another account's page never ran it.
+    CHECK_FALSE(runs.rerun("account-b", two_turns));
+    // A different conversation is a new run.
+    CHECK_FALSE(runs.rerun("account-a", request_with(R"([{"role":"user","parts":[{"text":"other"}]}])")));
+    // A model turn last is not run on the page, nor remembered.
+    const auto prefill = request_with(R"([{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"text":"prefill"}]}])");
+    CHECK_FALSE(runs.rerun("account-a", prefill));
+    CHECK_FALSE(runs.rerun("account-a", prefill));
+    CHECK_FALSE(runs.rerun("account-a", Request{}));
+    CHECK(user_turns(two_turns) == 2);
+    CHECK(user_turns(request_with(R"([{"parts":[{"text":"no role"}]}])")) == 1);
+    CHECK(user_turns(Request{}) == 0);
+    // Past 1000 conversations, the oldest is forgotten.
+    for (int index = 0; index < 1000; ++index) runs.rerun("account-c", request_with(R"([{"role":"user","parts":[{"text":"q)" + std::to_string(index) + R"("}]}])"));
+    CHECK_FALSE(runs.rerun("account-a", two_turns));
+}
+
+TEST_CASE("The page's navigation timing follows the measured load", "[spidermonkey]") {
+    using namespace std::chrono_literals;
+    const auto number = [](const json::object &entry, std::string_view name) { return entry.at(name).as_int64(); };
+    std::mt19937_64 random(7);
+    for (int round = 0; round < 200; ++round) {
+        PageLoad load{.url = "https://aistudio.google.com/prompts/new_chat",
+                      .protocol = "h2",
+                      .new_connection = true,
+                      .lookup = 3ms,
+                      .connect = 20ms,
+                      .tunnel = 150ms,
+                      .end = 900ms,
+                      .decoded = 100000};
+        auto [entry, dom_loading] = navigation_timing(load, random);
+        CHECK(entry.at("name") == "https://aistudio.google.com/prompts/new_chat");
+        CHECK(entry.at("nextHopProtocol") == "h2");
+        CHECK(number(entry, "startTime") == 0);
+        const auto fetch = number(entry, "fetchStart");
+        CHECK((fetch == 0 || fetch == 1));
+        CHECK(number(entry, "domainLookupStart") >= fetch);
+        CHECK(number(entry, "domainLookupEnd") == number(entry, "domainLookupStart") + 3);
+        CHECK(number(entry, "connectStart") - number(entry, "domainLookupEnd") <= 1);
+        CHECK(number(entry, "connectEnd") == number(entry, "connectStart") + 20);
+        CHECK(number(entry, "secureConnectionStart") == number(entry, "connectEnd"));
+        const auto request = number(entry, "requestStart");
+        CHECK(request - number(entry, "connectEnd") >= 1);
+        CHECK(request - number(entry, "connectEnd") <= 4);
+        // The proxy's answer to CONNECT shows before the response headers.
+        CHECK(number(entry, "finalResponseHeadersStart") == std::max<std::int64_t>(request, number(entry, "connectEnd") + 150));
+        CHECK(number(entry, "responseStart") == 900);
+        CHECK(number(entry, "responseEnd") == 900);
+        CHECK(std::abs(number(entry, "encodedBodySize") - 19430) <= 6);
+        CHECK(number(entry, "transferSize") == number(entry, "encodedBodySize") + 300);
+        CHECK(number(entry, "decodedBodySize") == 100000);
+        CHECK(dom_loading >= 900);
+        CHECK(dom_loading <= 903);
+
+        document_timing(entry, 1200ms, random);
+        const auto interactive = number(entry, "domInteractive");
+        CHECK(interactive >= 1400);
+        CHECK(number(entry, "domContentLoadedEventStart") == interactive);
+        CHECK(number(entry, "domContentLoadedEventEnd") - interactive >= 0);
+        CHECK(number(entry, "domContentLoadedEventEnd") - interactive <= 4);
+        CHECK(number(entry, "domComplete") > interactive);
+        CHECK(number(entry, "loadEventStart") == number(entry, "domComplete"));
+        CHECK(number(entry, "loadEventEnd") - number(entry, "loadEventStart") <= 1);
+        CHECK(number(entry, "duration") == number(entry, "loadEventEnd"));
+    }
+    // A reused connection: no lookup or connect, and the request soon after
+    // the fetch.
+    PageLoad reused{.url = "https://aistudio.google.com/", .protocol = "h2", .end = 5ms, .decoded = 10};
+    const auto [entry, dom_loading] = navigation_timing(reused, random);
+    const auto fetch = number(entry, "fetchStart");
+    for (const std::string_view name : {"domainLookupStart", "domainLookupEnd", "connectStart", "connectEnd", "secureConnectionStart"})
+        CHECK(number(entry, name) == fetch);
+    CHECK(number(entry, "requestStart") - fetch >= 2);
+    CHECK(number(entry, "requestStart") - fetch <= 13);
+    // A response faster than the request reads one millisecond later.
+    CHECK(number(entry, "responseEnd") == std::max<std::int64_t>(5, number(entry, "requestStart") + 1));
+    CHECK(number(entry, "finalResponseHeadersStart") == number(entry, "responseEnd"));
+    CHECK(dom_loading >= number(entry, "responseEnd"));
+}
+
 TEST_CASE("document.lastModified is the load time in the page's zone", "[spidermonkey]") {
     using namespace std::chrono;
     // 2026-03-04 05:06:07 UTC.
@@ -215,23 +301,34 @@ TEST_CASE("Requests carry Firefox's headers in Firefox's order", "[spidermonkey]
     const auto image = image_headers(page, "https://aistudio.google.com/generate_204");
     CHECK(value(image, "Sec-Fetch-Site") == "same-origin");
     CHECK(value(image, "Priority") == "u=5, i");
+    CHECK(value(image, "Accept") == "image/avif,image/jxl,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5");
     CHECK(value(script_headers(page, "https://www.google.com/js/bg/x.js"), "Sec-Fetch-Dest") == "script");
 
+    // The page's grpc-web XHRs as Firefox sends them (Camoufox 158,
+    // 2026-11-14): no Priority, and the body's length before Origin.
     RpcContext rpc{"page-key", "2", "SAPISIDHASH 1_a"};
-    CHECK(names(rpc_headers(page, rpc)) == "User-Agent,Accept,Accept-Language,Accept-Encoding,Referer,Content-Type,X-Goog-Api-Key,"
-                                           "X-Goog-AuthUser,X-User-Agent,Authorization,Origin,Cookie,Sec-Fetch-Dest,Sec-Fetch-Mode,"
-                                           "Sec-Fetch-Site,Priority,TE");
+    const auto plain = rpc_headers(page, rpc);
+    CHECK(names(plain) == "User-Agent,Accept,Accept-Language,Accept-Encoding,Referer,X-Goog-Api-Key,X-Goog-AuthUser,Authorization,"
+                          "Content-Type,X-User-Agent,Content-Length,Origin,Cookie,Sec-Fetch-Dest,Sec-Fetch-Mode,Sec-Fetch-Site,TE");
+    CHECK(value(plain, "Content-Length").empty());
+    CHECK(value(plain, "Accept") == "*/*");
     rpc.visit_id = "v1_x";
     rpc.extension = "CAE=";
     rpc.tier = "TIER1";
-    rpc.priority = "u=0";
     const auto generate = rpc_headers(page, rpc);
-    CHECK(names(generate) == "User-Agent,Accept,Accept-Language,Accept-Encoding,Referer,Content-Type,X-Goog-Api-Key,X-Goog-AuthUser,"
-                             "X-User-Agent,Authorization,X-AIStudio-Visit-Id,X-Goog-Ext-519733851-Bin,X-AIStudio-G1-Tier,Origin,Cookie,"
-                             "Sec-Fetch-Dest,Sec-Fetch-Mode,Sec-Fetch-Site,Priority,TE");
+    CHECK(names(generate) == "User-Agent,Accept,Accept-Language,Accept-Encoding,Referer,X-AIStudio-G1-Tier,X-AIStudio-Visit-Id,"
+                             "X-Goog-Ext-519733851-Bin,X-Goog-Api-Key,X-Goog-AuthUser,Authorization,Content-Type,X-User-Agent,"
+                             "Content-Length,Origin,Cookie,Sec-Fetch-Dest,Sec-Fetch-Mode,Sec-Fetch-Site,TE");
     CHECK(value(generate, "X-Goog-AuthUser") == "2");
-    CHECK(value(generate, "Priority") == "u=0");
+    CHECK(value(generate, "X-AIStudio-G1-Tier") == "TIER1");
     CHECK(value(generate, "Content-Type") == "application/json+protobuf");
+
+    // Waa/Create puts Authorization before X-Goog-AuthUser and takes no
+    // page values.
+    const auto waa = waa_headers(page, rpc);
+    CHECK(names(waa) == "User-Agent,Accept,Accept-Language,Accept-Encoding,Referer,X-Goog-Api-Key,Authorization,X-Goog-AuthUser,"
+                        "Content-Type,X-User-Agent,Content-Length,Origin,Cookie,Sec-Fetch-Dest,Sec-Fetch-Mode,Sec-Fetch-Site,TE");
+    CHECK(value(waa, "X-Goog-Api-Key") == "page-key");
 }
 
 TEST_CASE("An identity's configuration becomes the host's values", "[spidermonkey]") {
@@ -251,7 +348,10 @@ TEST_CASE("An identity's configuration becomes the host's values", "[spidermonke
                                                  {"globalPrivacyControl", false}});
     CHECK(host.profile.screen == json::object{{"width", 1920}, {"height", 1080}, {"availLeft", 12}, {"availTop", 0}});
     CHECK(host.profile.window == json::object{{"outerWidth", 1600}, {"outerHeight", 900}, {"devicePixelRatio", 1.5},
-                                              {"innerWidth", 1600.0}, {"innerHeight", 843.0}});
+                                              {"innerWidth", 1600.0}, {"innerHeight", 815.0}});
+    // The identity's own inner size stands.
+    const auto sized = host_identity({{"window.outerWidth", 1600}, {"window.outerHeight", 900}, {"window.innerWidth", 1584}, {"window.innerHeight", 790}});
+    CHECK(sized.profile.window == json::object{{"outerWidth", 1600}, {"outerHeight", 900}, {"innerWidth", 1584}, {"innerHeight", 790}});
 
     const auto bare = host_identity({});
     CHECK(bare.profile.locale == "en-US");
