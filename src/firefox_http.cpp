@@ -166,6 +166,10 @@ void apply_firefox(CURL *easy) {
     set(easy, CURLOPT_SSL_ENABLE_ALPN, 1L, "ALPN");
     set(easy, CURLOPT_SSL_ENABLE_ALPS, 0L, "ALPS setting");
     set(easy, CURLOPT_SSL_ENABLE_TICKET, 1L, "session tickets");
+    // Firefox resumes a TLS 1.3 session without the session_ticket extension;
+    // BoringSSL keeps it beside pre_shared_key, a ClientHello no Firefox
+    // sends. Without resumption every connection sends the full handshake's.
+    set(easy, CURLOPT_SSL_SESSIONID_CACHE, 0L, "session resumption setting");
     set(easy, CURLOPT_TLS_SIGNED_CERT_TIMESTAMPS, 1L, "certificate timestamps");
     set(easy, CURLOPT_TLS_STATUS_REQUEST, 1L, "status request");
     set(easy, CURLOPT_ECH, firefox::ech, "encrypted client hello");

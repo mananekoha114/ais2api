@@ -198,6 +198,22 @@ ClientHello parse_client_hello(std::string_view handshake) {
     return hello;
 }
 
+// TLS records of the handshake type until the ClientHello is whole.
+std::string read_client_hello(tcp::socket &socket) {
+    std::string handshake;
+    while (handshake.size() < 4 || handshake.size() < 4 + (static_cast<std::size_t>(static_cast<unsigned char>(handshake[1])) << 16 |
+                                                                static_cast<unsigned char>(handshake[2]) << 8 |
+                                                                static_cast<unsigned char>(handshake[3]))) {
+        std::array<unsigned char, 5> header{};
+        asio::read(socket, asio::buffer(header));
+        if (header[0] != 0x16) throw std::runtime_error("not a TLS handshake record");
+        std::string record(static_cast<std::size_t>(header[3]) << 8 | header[4], '\0');
+        asio::read(socket, asio::buffer(record));
+        handshake += record;
+    }
+    return handshake;
+}
+
 // The ClientHello a session sends to a loopback server that answers nothing.
 ClientHello capture_client_hello() {
     asio::io_context io;
@@ -208,17 +224,7 @@ ClientHello capture_client_hello() {
         try {
             tcp::socket socket(io);
             acceptor.accept(socket);
-            // TLS records of the handshake type until the ClientHello is whole.
-            while (handshake.size() < 4 || handshake.size() < 4 + (static_cast<std::size_t>(static_cast<unsigned char>(handshake[1])) << 16 |
-                                                                        static_cast<unsigned char>(handshake[2]) << 8 |
-                                                                        static_cast<unsigned char>(handshake[3]))) {
-                std::array<unsigned char, 5> header{};
-                asio::read(socket, asio::buffer(header));
-                if (header[0] != 0x16) throw std::runtime_error("not a TLS handshake record");
-                std::string record(static_cast<std::size_t>(header[3]) << 8 | header[4], '\0');
-                asio::read(socket, asio::buffer(record));
-                handshake += record;
-            }
+            handshake = read_client_hello(socket);
         } catch (const std::exception &error) {
             failure = error.what();
         }
@@ -237,7 +243,7 @@ struct Frame {
     std::uint32_t stream = 0;
     std::string payload;
 };
-constexpr unsigned frame_data = 0, frame_headers = 1, frame_settings = 4, frame_window_update = 8;
+constexpr unsigned frame_data = 0, frame_headers = 1, frame_settings = 4, frame_goaway = 7, frame_window_update = 8;
 constexpr unsigned flag_end_stream = 0x1, flag_ack = 0x1, flag_end_headers = 0x4, flag_padded = 0x8, flag_priority = 0x20;
 
 std::string frame(unsigned type, unsigned flags, std::uint32_t stream, std::string_view payload) {
@@ -249,6 +255,8 @@ std::string frame(unsigned type, unsigned flags, std::uint32_t stream, std::stri
 
 // A loopback HTTP/2 server over TLS that answers every request with an empty
 // 200 and records the frames the client sends, until the client goes away.
+// Asked to, it instead closes the connection after the first answer and
+// records the ClientHello of the next one, which it does not answer.
 struct Http2Server {
     test::SelfSigned certificate = test::self_signed_localhost();
     fs::path ca_file = fs::temp_directory_path() / ("ais2api-h2-" + random_hex(8) + ".pem");
@@ -256,12 +264,13 @@ struct Http2Server {
     asio::ssl::context tls{asio::ssl::context::tls_server};
     tcp::acceptor acceptor{io, {asio::ip::address_v4::loopback(), 0}};
     unsigned short port = acceptor.local_endpoint().port();
+    bool close_after_answer = false;
     std::mutex mutex;
     std::vector<Frame> frames;
-    std::string failure;
+    std::string second_hello, failure;
     std::jthread thread;
 
-    Http2Server() {
+    explicit Http2Server(bool close_after_first_answer = false) : close_after_answer(close_after_first_answer) {
         atomic_write(ca_file, certificate.certificate);
         tls.use_certificate_chain(asio::buffer(certificate.certificate));
         tls.use_private_key(asio::buffer(certificate.key), asio::ssl::context::pem);
@@ -323,8 +332,22 @@ struct Http2Server {
                 if (received.type == frame_settings && !(received.flags & flag_ack))
                     asio::write(stream, asio::buffer(frame(frame_settings, flag_ack, 0, {})));
                 // An indexed ":status: 200" ends each request's stream.
-                if ((received.type == frame_headers || received.type == frame_data) && (received.flags & flag_end_stream))
+                if ((received.type == frame_headers || received.type == frame_data) && (received.flags & flag_end_stream)) {
                     asio::write(stream, asio::buffer(frame(frame_headers, flag_end_headers | flag_end_stream, received.stream, "\x88")));
+                    if (close_after_answer) {
+                        const std::string last{static_cast<char>(received.stream >> 24), static_cast<char>(received.stream >> 16),
+                                               static_cast<char>(received.stream >> 8), static_cast<char>(received.stream)};
+                        asio::write(stream, asio::buffer(frame(frame_goaway, 0, 0, last + std::string(4, '\0'))));
+                        SSL_shutdown(stream.native_handle());
+                        stream.next_layer().close();
+                        tcp::socket next(io);
+                        acceptor.accept(next);
+                        auto hello = read_client_hello(next);
+                        std::lock_guard lock(mutex);
+                        second_hello = std::move(hello);
+                        return;
+                    }
+                }
             }
         } catch (const std::exception &error) {
             std::lock_guard lock(mutex);
@@ -506,6 +529,24 @@ TEST_CASE("HTTP/2 requests carry Firefox's priorities and header order", "[firef
     CHECK(names_of(rpc) == std::vector<std::string>{":method", ":path", ":authority", ":scheme", "user-agent", "accept", "content-type",
                                                     "content-length", "origin", "cookie", "cookie", "sec-fetch-dest", "te"});
     CHECK(rpc.fields[7].second == "2");
+}
+
+// Firefox resumes a TLS 1.3 session without the session_ticket extension, so
+// that its ClientHello still has 17 extensions. BoringSSL keeps it next to
+// pre_shared_key, which makes a JA4 that no Firefox sends; so the session
+// never resumes and every connection opens with the full handshake's.
+TEST_CASE("A new connection opens with a full handshake's ClientHello", "[firefox-http][fingerprint]") {
+    Http2Server server(true);
+    {
+        HttpSession session(server.options());
+        REQUIRE(session.send({"GET", server.url("/first"), {}, std::nullopt}, {}, 10s).status == 200);
+        CHECK_THROWS_AS(session.send({"GET", server.url("/second"), {}, std::nullopt}, {}, 10s), Error);
+    }
+    server.finish();
+    REQUIRE_FALSE(server.second_hello.empty());
+    const auto hello = parse_client_hello(server.second_hello);
+    CHECK(hello.extensions == firefox_extensions);
+    CHECK(hello.ja4() == firefox_ja4);
 }
 
 // Firefox opens each stream's window to 12 MiB with a WINDOW_UPDATE right
