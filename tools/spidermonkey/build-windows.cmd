@@ -34,5 +34,9 @@ rem Only the system's own directories: tools on the user's PATH must not take
 rem the place of the ones the build bootstraps.
 set "PATH=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem;%SystemRoot%\System32\WindowsPowerShell\v1.0"
 for %%D in ("%HOME%" "%TEMP%" "%MOZBUILD_STATE_PATH%") do if not exist "%%~D" mkdir "%%~D"
-call "%MOZILLABUILD%msys2\msys2_shell.cmd" -no-start -defterm -full-path -c "sh \"$(cygpath -u '%~dp0build-windows.sh')\" '%WORK%'"
+rem msys2_shell.cmd parses its own arguments and breaks on quotes nested in
+rem the command, so the shell starts here (CHERE_INVOKING) and runs the
+rem script by a relative path.
+cd /d "%~dp0"
+call "%MOZILLABUILD%msys2\msys2_shell.cmd" -no-start -defterm -full-path -c "sh ./build-windows.sh '%WORK%'"
 exit /b %ERRORLEVEL%

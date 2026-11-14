@@ -1,6 +1,10 @@
+Subject: [PATCH] Use the static C runtime for a standalone js build on Windows
+
+ais2api links SpiderMonkey into a program built with /MT.
+
 --- a/python/mozbuild/mozbuild/frontend/emitter.py
 +++ b/python/mozbuild/mozbuild/frontend/emitter.py
-@@ -1332,8 +1332,11 @@
+@@ -1425,8 +1425,11 @@
              context.config.substs.get("OS_ARCH") == "WINNT"
              and context.config.substs.get("CC_TYPE") == "clang-cl"
          ):
