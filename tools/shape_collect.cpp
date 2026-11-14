@@ -74,7 +74,10 @@ int run(const Options &options) {
     const auto account = store.account(options.account);
     CamoufoxGateway camoufox(config, store);
     const bool live = options.local.empty();
-    const auto url = live ? "https://aistudio.google.com/prompts/new_chat?authuser=" + account.auth_user : options.local;
+    // The account's page as the SpiderMonkey backend opens it, with no redirect.
+    const auto url = live ? "https://aistudio.google.com" + (account.auth_user == "0" ? std::string() : "/u/" + account.auth_user) +
+                                "/prompts/new_chat"
+                          : options.local;
     const auto table = camoufox.experiment_collect(account, url, script, live, std::chrono::seconds(options.settle));
     std::ofstream out(options.out, std::ios::binary | std::ios::trunc);
     if (!out || !(out << table)) throw Error(500, "io_error", "Cannot write the output file");

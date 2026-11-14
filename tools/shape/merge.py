@@ -272,6 +272,14 @@ def normalize(table, official, page_url, report):
                 set_values(singles['location']['values'], page_location)
             if 'document' in singles:
                 set_values(singles['document']['values'], {'URL': page_url, 'documentURI': page_url, 'referrer': ''})
+            # The page's language follows the account's settings.
+            if 'document.documentElement' in singles:
+                set_values(singles['document.documentElement']['values'], {'lang': NAVIGATOR['language']})
+            # The backend opens the account's /u/N/ page itself, with no
+            # redirect; a collector that went through one leaves it here.
+            if 'performance.navigationEntry' in singles:
+                set_values(singles['performance.navigationEntry']['values'],
+                           {'redirectCount': 0, 'redirectStart': 0, 'redirectEnd': 0})
         for path in ('localStorage', 'sessionStorage'):
             if path in singles:
                 set_values(singles[path]['values'], {'length': 0})

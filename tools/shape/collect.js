@@ -188,7 +188,7 @@
     }
   }
 
-  const encode = (value, depth = 0) => {
+  const encode = value => {
     if (value === undefined) return { t: 'u' };
     if (value === null) return { t: 'null' };
     switch (typeof value) {
@@ -202,8 +202,12 @@
     // Objects, and document.all, whose typeof is 'undefined'.
     const path = refs.get(value);
     if (path) return { t: 'ref', v: path };
-    if (depth < 3 && tryOr(false, () => Array.isArray(value))) {
-      return { t: 'a', v: tryOr([], () => Array.from(value, item => encode(item, depth + 1))) };
+    // As in AIStudio2API's tables, an array is listed only when it holds
+    // nothing but primitives and functions; dom.js makes any other array an
+    // empty one.
+    if (tryOr(false, () => Array.isArray(value))) {
+      const items = tryOr(null, () => Array.from(value, item => (isObject(item) && typeof item !== 'function' ? null : encode(item))));
+      if (items && !items.includes(null)) return { t: 'a', v: items };
     }
     return { t: 'o', c: classOf(value), k: interfaceOf(value) };
   };
