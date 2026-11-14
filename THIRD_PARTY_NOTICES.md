@@ -48,7 +48,8 @@ Camoufox 后端的身份生成器（`src/fpgen.cpp`、`src/firefox_identity.cpp`
 
 `waa/` 是 [AIStudio2API](https://github.com/Mag1cFall/AIStudio2API/tree/d94bf91c071e921ba2d0d8c6d14fef4faae2a469)（MIT License，Copyright (c) 2026 Mag1cFall，[AIStudio2API-LICENSE.txt](licenses/AIStudio2API-LICENSE.txt)）中 `internal/waa` 的 C++ 移植，用于在进程内的 SpiderMonkey 里运行 Google 的 WAA 虚拟机：
 
-- `waa/third_party/aistudio2api/` 中的 `dom.js`、`smhost.js`、`firefox158.json.gz`、`mozjs/mozjs.cpp` 和 `mozjs/mozjs.h` 是该提交中的原文件，未作修改。
+- `waa/third_party/aistudio2api/` 中的 `dom.js`、`smhost.js`、`mozjs/mozjs.cpp` 和 `mozjs/mozjs.h` 是该提交中的原文件，未作修改。
+- `waa/shapes/` 中的对象结构表由本项目用 `tools/shape` 自己采集，沿用其表的格式。
 - `waa/src/host_scripts.hpp` 中的 JavaScript 是其 `host.go` 和 `runtime.go` 里的脚本常量，逐字节相同。
 - `waa/src/` 的其余文件按其 Go 实现（`challenge.go`、`host.go`、`loop.go`、`realm.go`、`runtime.go`、`url.go`）用 C++ 重新编写。
 - SpiderMonkey 后端的 `src/spidermonkey.cpp` 和 `src/spidermonkey_page.cpp` 按其 `internal/aistudio` 中的 `runtime_go.go`、`navigation_timing.go` 和 `page_runs.go` 用 C++ 重新编写。

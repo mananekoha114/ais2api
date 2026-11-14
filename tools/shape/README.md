@@ -8,7 +8,7 @@ SpiderMonkey 后端用 `waa/third_party/aistudio2api/dom.js` 和 `smhost.js` 模
 - 媒体查询的结果；
 - 哪些成员返回 Promise。
 
-这里的工具在真实浏览器里采集这张表，并合并成仓库里的 `.json.gz`。表的格式沿用参考项目 AIStudio2API；它没有公开采集工具，这里的格式说明是按 `dom.js`/`smhost.js` 的读取方式整理出来的，并用它的表逐项核对过。
+这里的工具在真实浏览器里采集这张表，并合并成仓库里的 `waa/shapes/firefox<版本>-{windows,linux}.json.gz`。Windows 构建嵌入 Windows 表，其他平台嵌入 Linux 表（`waa/CMakeLists.txt`）。表的格式沿用参考项目 AIStudio2API；它没有公开采集工具，这里的格式说明是按 `dom.js`/`smhost.js` 的读取方式整理出来的，并用它的表逐项核对过。
 
 | 文件 | 作用 |
 |---|---|
@@ -46,10 +46,10 @@ SpiderMonkey 后端用 `waa/third_party/aistudio2api/dom.js` 和 `smhost.js` 模
 | `t` | 含义 |
 |---|---|
 | `u`、`null`、`s`、`b`、`n`、`bigint`、`sym` | 基本类型。`n` 的 NaN、±Infinity、-0 写成字符串 |
-| `a` | 数组 |
+| `a` | 只含基本类型和函数的数组 |
 | `ref` | 指向单例的路径，如 `top.window`、`frame.document.body` |
 | `f` | 函数：名字和是否原生 |
-| `o` | 对象：只记 `Object.prototype.toString` 的类名 `c` 和所属接口 `k`，不记内容 |
+| `o` | 对象：只记 `Object.prototype.toString` 的类名 `c` 和所属接口 `k`，不记内容。含有对象的数组也这样记，`dom.js` 把它解成空数组 |
 | `throw` | 读取时抛出的错误 |
 
 各部分的内容：
@@ -85,7 +85,7 @@ SpiderMonkey 后端用 `waa/third_party/aistudio2api/dom.js` 和 `smhost.js` 模
 - 已连接的 `html`/`head`/`body` 不读 `innerHTML`、`outerHTML`、`innerText`、`outerText`、`textContent`；
 - 对象只记类名。
 
-在线采集只加载一次 AI Studio 的新对话页，不生成，不点击，不预加载 `bridge.js` 或任何脚本。
+在线采集只加载一次账号的 AI Studio 新对话页（与 SpiderMonkey 后端打开的地址相同：`/prompts/new_chat`，authuser 不为 0 时是 `/u/N/prompts/new_chat`），不生成，不点击，不预加载 `bridge.js` 或任何脚本。
 
 ## 采集步骤
 
@@ -147,7 +147,8 @@ python -I tools/shape/check.py firefox<版本>-linux.json.gz --forbid <本机用
   - 屏幕、窗口的尺寸和位置，`devicePixelRatio`；
   - 媒体查询；
   - 时间戳；
-  - 页面地址，规范成 `/prompts/new_chat`，去掉 `/u/N/`；
+  - 页面地址，规范成 `/prompts/new_chat`，去掉 `/u/N/`；加载计时里的重定向置 0（后端直接打开 `/u/N/`）；
+  - 页面的 `<html lang>`，它跟着账号的界面语言走；
   - Cookie 与存储；
   - 错误对象的文件名与调用栈。
 - **Linux 表**：在 Windows 表上套用官方 Windows 版与官方 Linux 版之间的差异。

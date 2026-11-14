@@ -6,15 +6,13 @@
 |---|---|---|
 | `dom.js` | `internal/waa/dom.js` | `6467229f4c82a2d076631a03ce639b80b56674e55984709a0447c066087af86c` |
 | `smhost.js` | `internal/waa/smhost.js` | `6c3e76a07996774b75983102bc7e8b01c3e8aea4b661dddacf4f64b118cf0edd` |
-| `firefox158.json.gz` | `internal/waa/firefox158.json.gz` | `24198009095ea660791dac56a0934d3079eaf760ce676b4cae217ac99e6f0522` |
 | `mozjs/mozjs.cpp` | `internal/waa/mozjs/mozjs.cpp` | `ba33500b3b7a00c612cdc276c62dea17b4f1a8ada81dba00204332d513847be9` |
 | `mozjs/mozjs.h` | `internal/waa/mozjs/mozjs.h` | `a3b917d3854c5d1e3b4211132a86a963036f3dcb9a7e6a864e8f54b452524993` |
 
 各文件的用途：
 
 - `dom.js`：Firefox 形状的 DOM 宿主，在每个 Realm 里安装。
-- `smhost.js`：宿主与 C++ 原生函数之间的接口。
-- `firefox158.json.gz`：参考项目从 Firefox 158 采集的对象结构表，运行时解压。本项目自己的采集工具做好后改用自己采集的表。
+- `smhost.js`：宿主与 C++ 原生函数之间的接口。`dom.js` 读取的对象结构表不在这里，是本项目自己采集的，见 [`waa/shapes`](../../shapes) 和 [`tools/shape`](../../../tools/shape/README.md)。
 - `mozjs/mozjs.cpp`、`mozjs/mozjs.h`：SpiderMonkey 的 C 接口层。它与 SpiderMonkey 一起由 [`tools/spidermonkey`](../../../tools/spidermonkey/README.md) 用 clang-cl 编译成静态库；本项目的 C++ 只通过 `mozjs.h` 的 C 接口调用它。接口层回调的宿主函数 `mzGoNative` 由 `waa/src/js.cpp` 定义。
 
 更新时整组替换，并同步更新本表、`waa/src/host_scripts.hpp` 和 `THIRD_PARTY_NOTICES.md` 中的提交号。`host_scripts.hpp` 是上游 `host.go`、`runtime.go` 中的脚本常量，由脚本从上游源码生成（只读取源码，不运行）：
