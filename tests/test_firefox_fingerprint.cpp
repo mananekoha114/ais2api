@@ -290,8 +290,10 @@ struct Http2Server {
     ~Http2Server() {
         // A connection of its own wakes a server still waiting for one.
         boost::system::error_code ignored_error;
+        // Closed at once, so that a server reading from it stops too.
         tcp::socket wake(io);
         wake.connect({asio::ip::address_v4::loopback(), port}, ignored_error);
+        wake.close(ignored_error);
         thread = {};
         std::error_code ignored;
         fs::remove(ca_file, ignored);
@@ -313,10 +315,20 @@ struct Http2Server {
             asio::read(stream, asio::buffer(preface));
             if (preface != "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n") throw std::runtime_error("no HTTP/2 preface");
             asio::write(stream, asio::buffer(frame(frame_settings, 0, 0, {})));
+            bool going_away = false;
             for (;;) {
                 std::array<unsigned char, 9> header{};
                 boost::system::error_code closed;
                 asio::read(stream, asio::buffer(header), closed);
+                if (closed && going_away) {
+                    // The client's next connection.
+                    tcp::socket next(io);
+                    acceptor.accept(next);
+                    auto hello = read_client_hello(next);
+                    std::lock_guard lock(mutex);
+                    second_hello = std::move(hello);
+                    return;
+                }
                 if (closed) return;
                 Frame received;
                 received.type = header[3];
@@ -334,18 +346,15 @@ struct Http2Server {
                 // An indexed ":status: 200" ends each request's stream.
                 if ((received.type == frame_headers || received.type == frame_data) && (received.flags & flag_end_stream)) {
                     asio::write(stream, asio::buffer(frame(frame_headers, flag_end_headers | flag_end_stream, received.stream, "\x88")));
-                    if (close_after_answer) {
+                    // GOAWAY after the answer; the client closes the connection
+                    // once it has read it. Closing it here instead, with the
+                    // client's last frames unread, resets it, and the client
+                    // may lose the answer.
+                    if (close_after_answer && !going_away) {
                         const std::string last{static_cast<char>(received.stream >> 24), static_cast<char>(received.stream >> 16),
                                                static_cast<char>(received.stream >> 8), static_cast<char>(received.stream)};
                         asio::write(stream, asio::buffer(frame(frame_goaway, 0, 0, last + std::string(4, '\0'))));
-                        SSL_shutdown(stream.native_handle());
-                        stream.next_layer().close();
-                        tcp::socket next(io);
-                        acceptor.accept(next);
-                        auto hello = read_client_hello(next);
-                        std::lock_guard lock(mutex);
-                        second_hello = std::move(hello);
-                        return;
+                        going_away = true;
                     }
                 }
             }
