@@ -314,6 +314,13 @@ struct Transfer {
     std::deque<std::string> chunks;
     std::size_t consumed = 0; // of the first chunk
     std::size_t buffered = 0;
+    std::string protocol;
+    HttpTiming timing;
+
+    // The session's thread only: when the transfer started, and when the
+    // first response head arrived (through a proxy, its answer to CONNECT).
+    Clock::time_point started{};
+    std::optional<Clock::time_point> first_head;
 
     ~Transfer() {
         if (easy) curl_easy_cleanup(easy);
@@ -325,6 +332,29 @@ struct Transfer {
     }
     static std::size_t on_body(char *data, std::size_t size, std::size_t count, void *self) {
         return static_cast<Transfer *>(self)->body(std::string_view(data, size * count));
+    }
+    static int on_trace(CURL *, curl_infotype type, char *, std::size_t, void *self) {
+        auto &transfer = *static_cast<Transfer *>(self);
+        if (type == CURLINFO_HEADER_IN && !transfer.first_head) transfer.first_head = Clock::now();
+        return 0;
+    }
+    // Reads the connection's timers once the transfer is over; on the
+    // session's thread.
+    void measure() {
+        curl_off_t resolved = 0, connected = 0;
+        long connects = 0, version = 0;
+        curl_easy_getinfo(easy, CURLINFO_NAMELOOKUP_TIME_T, &resolved);
+        curl_easy_getinfo(easy, CURLINFO_CONNECT_TIME_T, &connected);
+        curl_easy_getinfo(easy, CURLINFO_NUM_CONNECTS, &connects);
+        curl_easy_getinfo(easy, CURLINFO_HTTP_VERSION, &version);
+        std::lock_guard lock(mutex);
+        protocol = version == CURL_HTTP_VERSION_3 ? "h3" : version == CURL_HTTP_VERSION_2_0 ? "h2" : "http/1.1";
+        timing.new_connection = connects > 0;
+        timing.resolved = std::chrono::microseconds(resolved);
+        timing.connected = std::chrono::microseconds(connected);
+        // Only a new connection's first head is the proxy's.
+        if (timing.new_connection && first_head)
+            timing.tunneled = std::chrono::duration_cast<std::chrono::microseconds>(*first_head - started);
     }
     void header(std::string_view line) {
         line = trim(line);
@@ -436,9 +466,11 @@ struct HttpSession::Impl : std::enable_shared_from_this<HttpSession::Impl> {
         const auto transfer = std::move(found->second);
         active.erase(found);
         curl_multi_remove_handle(multi, easy);
+        transfer->measure();
         transfer->finish(code);
     }
     void start(const std::shared_ptr<Transfer> &transfer) {
+        transfer->started = Clock::now();
         if (const auto code = curl_multi_add_handle(multi, transfer->easy); code != CURLM_OK) {
             transfer->finish(CURLE_FAILED_INIT);
             return;
@@ -548,6 +580,11 @@ std::shared_ptr<Transfer> HttpSession::Impl::prepare(HttpRequest request, std::c
     curl_easy_setopt(easy, CURLOPT_HEADERDATA, transfer.get());
     curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, &Transfer::on_body);
     curl_easy_setopt(easy, CURLOPT_WRITEDATA, transfer.get());
+    if (given.trace_tunnel && transfer->proxied) {
+        curl_easy_setopt(easy, CURLOPT_DEBUGFUNCTION, &Transfer::on_trace);
+        curl_easy_setopt(easy, CURLOPT_DEBUGDATA, transfer.get());
+        curl_easy_setopt(easy, CURLOPT_VERBOSE, 1L);
+    }
     if (given.body) {
         curl_easy_setopt(easy, CURLOPT_POST, 1L);
         curl_easy_setopt(easy, CURLOPT_POSTFIELDS, given.body->data());
@@ -582,6 +619,12 @@ class Exchange final : public HttpExchange {
         if (transfer.finished && transfer.result != CURLE_OK) throw transfer.failure();
         status_ = transfer.status;
         headers_ = transfer.headers;
+    }
+    // The protocol and the connection's timing, once the body is complete.
+    void describe(HttpResponse &response) const {
+        std::lock_guard lock(transfer_->mutex);
+        response.protocol = transfer_->protocol;
+        response.timing = transfer_->timing;
     }
     std::optional<std::string> read(std::size_t limit, std::chrono::milliseconds wait, std::stop_token cancel) override {
         auto &transfer = *transfer_;
@@ -646,7 +689,10 @@ HttpResponse HttpSession::send(HttpRequest request, std::stop_token cancel, std:
     for (;;) {
         const auto bytes = exchange.read(pause_bytes, 1000ms, cancel);
         if (!bytes) continue;
-        if (bytes->empty()) return response;
+        if (bytes->empty()) {
+            exchange.describe(response);
+            return response;
+        }
         if (response.body.size() + bytes->size() > limit) throw Error(502, "network_failed", "Google sent a response larger than expected");
         response.body += *bytes;
     }

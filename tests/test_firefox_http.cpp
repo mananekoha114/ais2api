@@ -417,3 +417,21 @@ TEST_CASE("Encoded responses are decoded", "[firefox-http]") {
     CHECK(session.send(request).body == "hello");
     CHECK(server.request(0).lines().back() == "Accept-Encoding: " + codings);
 }
+
+TEST_CASE("A response tells how its connection came about", "[firefox-http]") {
+    Server server([](const Server::Request &, tcp::socket &socket) { Server::reply(socket, "200 OK", "", "ok"); });
+    HttpSession session(options());
+    HttpRequest request;
+    request.url = server.url("/");
+    // Without a proxy there is no tunnel to trace.
+    request.trace_tunnel = true;
+    const auto first = session.send(request);
+    CHECK(first.protocol == "http/1.1");
+    CHECK(first.timing.new_connection);
+    CHECK(first.timing.connected >= first.timing.resolved);
+    CHECK(first.timing.tunneled.count() == 0);
+    // The connection is kept and used again.
+    const auto second = session.send(request);
+    CHECK(second.body == "ok");
+    CHECK_FALSE(second.timing.new_connection);
+}

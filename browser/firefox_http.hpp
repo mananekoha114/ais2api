@@ -43,11 +43,28 @@ struct HttpRequest {
     // top-level document 42, a script, XHR or fetch of normal priority 22 and
     // an image of urgency 5 12.
     int weight = 22;
+    // Through a proxy, records when the proxy answered the CONNECT of a new
+    // connection (libcurl's verbose trace, which costs a little).
+    bool trace_tunnel = false;
+};
+// How a response's connection came about, by libcurl's timers.
+struct HttpTiming {
+    // Whether the request opened a connection rather than reusing one; only
+    // then are the stages below its own.
+    bool new_connection = false;
+    // From the request's start: the name resolved, the TCP connection (to the
+    // proxy, when there is one) made and, with HttpRequest::trace_tunnel, the
+    // proxy's answer to CONNECT received. Zero for a stage that did not
+    // happen.
+    std::chrono::microseconds resolved{}, connected{}, tunneled{};
 };
 struct HttpResponse {
     long status = 0;
     HttpHeaders headers;
     std::string body;
+    // The protocol's ALPN name: "h2", "http/1.1" or "h3".
+    std::string protocol;
+    HttpTiming timing;
 };
 
 // A response as it arrives. Destroying it abandons the transfer.
