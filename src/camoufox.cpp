@@ -826,8 +826,7 @@ struct CamoufoxGateway::Impl {
         all.insert(all.end(), arguments.begin(), arguments.end());
         return bidi->call_function(declaration, all, page, token, timeout);
     }
-    // Sends a request body to the page in pieces passed as call arguments, as
-    // BrowserGateway does over CDP.
+    // Sends a request body to the page in pieces passed as call arguments.
     std::string upload(std::string_view body, std::stop_token token) {
         constexpr std::size_t piece_bytes = 512 * 1024;
         const auto id = random_hex(8);

@@ -265,13 +265,15 @@ TEST_CASE("Bridge preload channel mode adds zero own properties or Symbols to Fi
     CHECK(bool_or(report, "hasExpFn"));
     CHECK_FALSE(bool_or(report, "capHasKey"));
 
-    // Legacy CDP invocation without a publish callback still attaches globalThis.__ais2bridge.
-    const auto legacy = "(function() {\n" + bridge_source +
-                        "\n  const attached = Boolean(globalThis.__ais2bridge && typeof globalThis.__ais2bridge.start === 'function');\n"
-                        "  if (globalThis.__ais2bridge) globalThis.__ais2bridge.dispose();\n"
-                        "  return JSON.stringify({ attached });\n})()";
-    const auto legacy_report = json::parse(page.eval_text(legacy)).as_object();
-    CHECK(bool_or(legacy_report, "attached"));
+    // Direct invocation without a publish callback is a no-op and attaches no global properties.
+    const auto noop = "(function() {\n" + bridge_source +
+                      "\n  return JSON.stringify({\n"
+                      "    hasGlobal: ('__ais2bridge' in globalThis),\n"
+                      "    typeofGlobal: typeof globalThis.__ais2bridge\n"
+                      "  });\n})()";
+    const auto noop_report = json::parse(page.eval_text(noop)).as_object();
+    CHECK_FALSE(bool_or(noop_report, "hasGlobal"));
+    CHECK(string_or(noop_report, "typeofGlobal") == "undefined");
 }
 #endif
 

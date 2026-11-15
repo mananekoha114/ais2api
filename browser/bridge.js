@@ -6,9 +6,8 @@
 
 /* ais2api page bridge. No credentials, snapshots or response bodies are persisted. */
 (function(publish) {
-  if (typeof publish === 'function') {
-    if (globalThis.top && globalThis.top !== globalThis) return;
-  } else if (globalThis.__ais2bridge) return;
+  if (typeof publish !== 'function') return;
+  if (globalThis.top && globalThis.top !== globalThis) return;
   const nativeFetch = globalThis.fetch.bind(globalThis);
   const state = { template: null, snapshotCall: null, models: [], transfer: null, discoveryRequest: null, templateTransport: null, snapshotCandidates: 0, snapshotHooked: 0 };
   const fail = message => { throw new Error(message); };
@@ -374,7 +373,7 @@
       if (lower === 'authorization' && typeof value === 'string' && value.trim()) capturedAuthorization = value;
       if (!['host', 'content-length', 'authorization', 'x-goog-authuser', 'x-aistudio-g1-tier'].includes(lower)) headers[lower] = value;
     }
-    // The native host signs current CDP cookies. As in the reference transport,
+    // The native host signs current cookies. As in the reference transport,
     // use only this page's captured Authorization when a fresh one is unavailable.
     const selected = typeof authorization === 'string' && authorization.trim() ? authorization : capturedAuthorization;
     if (!selected) fail('browser_incompatible: current signing cookies and captured Authorization unavailable');
@@ -496,7 +495,7 @@
     } finally { clearTimeout(timer); }
   }
   // The host sends a request body in pieces as call arguments. Each piece is
-  // kept as a Blob, which Chromium stores outside the JavaScript heap, so the
+  // kept as a Blob, which the browser stores outside the JavaScript heap, so the
   // page never holds the whole body as a string.
   let upload = null;
   function append(id, chunk) {
@@ -618,6 +617,5 @@
     models: () => state.models,
     dispose: () => { abort(); benefit.controller?.abort(); clearInterval(installTimer); }
   };
-  if (typeof publish === 'function') publish(bridge);
-  else globalThis.__ais2bridge = bridge;
+  publish(bridge);
 })(typeof arguments !== 'undefined' ? arguments[0] : undefined)

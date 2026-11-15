@@ -14,11 +14,11 @@
 #include <vector>
 namespace ais2api {
 namespace browser_detail {
-// Stored cookies (the CDP shape used by the account store) as BiDi
+// Stored cookies (the normalized shape used by the account store) as BiDi
 // storage.setCookie cookies. Partitioned cookies and entries without a name
 // or string value are left out.
 json::array bidi_cookies(const json::array &stored);
-// Cookies from BiDi storage.getCookies in the stored (CDP) shape, as read by
+// Cookies from BiDi storage.getCookies in the stored shape, as read by
 // import_cookies and refreshed_cookies. Binary values are left out.
 json::array stored_cookies(const json::array &bidi);
 // The cookies a request to https://<host>/ carries.
@@ -69,10 +69,10 @@ std::vector<std::string> proot_arguments(const fs::path &program, const std::vec
                                          const std::vector<std::pair<std::string, std::string>> &environment,
                                          bool shared_x11 = false);
 } // namespace browser_detail
-// The experimental Camoufox backend (browser_backend "camoufox"): the same
-// account flow as BrowserGateway over WebDriver BiDi. Each account keeps a
-// Firefox identity generated on this machine from the fpgen model setup
-// installs, stored with its fingerprint seed.
+// The Camoufox backend (browser_backend "camoufox") running the page bridge
+// over WebDriver BiDi. Each account keeps a Firefox identity generated on this
+// machine from the fpgen model setup installs, stored with its fingerprint
+// seed.
 class CamoufoxGateway final : public GenerationBackend {
   public:
     CamoufoxGateway(const Config &config, Store &store);
