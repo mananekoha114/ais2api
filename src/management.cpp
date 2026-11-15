@@ -83,11 +83,7 @@ json::object fingerprint_view(Store& store, const Config& config, std::string_vi
     }
     const auto firefox = store.firefox_identity(id);
     // Firefox identities present the host OS they were generated on.
-#ifdef _WIN32
-    std::string platform = "windows";
-#else
-    std::string platform = "linux";
-#endif
+    std::string platform(fingerprint_platform());
     if (firefox && !string_or(*firefox, "os").empty()) platform = string_or(*firefox, "os");
     json::object result{{"seed", fingerprint.seed}, {"platform", platform},
                         {"timezone", fingerprint.timezone}, {"locale", fingerprint.locale},

@@ -8,6 +8,9 @@
 #include "mozjs.h"
 #include <algorithm>
 
+// Global un-namespaced SpiderMonkey teardown omitted from the shim header.
+void JS_ShutDown();
+
 namespace ais2api::waa::js {
 namespace {
 // The shim reports a null string for a missing one.
@@ -48,6 +51,11 @@ void initialise() {
         return reason ? std::string(reason) : std::string();
     }();
     if (!failure.empty()) throw std::runtime_error("SpiderMonkey did not start: " + failure);
+    // Join SpiderMonkey helper threads before libjs_static global mutexes tear down.
+    struct Shutdown {
+        ~Shutdown() { ::JS_ShutDown(); }
+    };
+    static Shutdown shutdown;
 }
 // Room left on the stack for the shim and the host beneath a script.
 constexpr std::size_t stack_slack = 256 * 1024, minimum_stack_quota = 512 * 1024;
