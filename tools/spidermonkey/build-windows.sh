@@ -64,7 +64,7 @@ if [ ! -f "$source/.ais2api-patched" ]; then
     rm -rf "$source"
     # tar -J forks xz itself, which fails at random under MSYS2 (a DLL loads at
     # a different address in the child); the shell starts both instead.
-    xz -dc "$tarball" | tar -xf - -C "$work/src"
+    xz -T0 -dc "$tarball" | tar -xf - -C "$work/src"
     [ -f "$source/mach" ] || { echo "extracting the source tarball failed" >&2; exit 1; }
     for patch in "$here"/patches/*.patch; do
         patch -d "$source" -p1 --forward < "$patch"
@@ -76,6 +76,7 @@ fi
     printf '. "%s/mozconfig-windows"\n' "$(cygpath -m "$here")"
     printf 'mk_add_options MOZ_OBJDIR=%s\n' "$(cygpath -m "$objdir")"
 } > "$work/mozconfig"
+export DISABLE_TELEMETRY=1
 export MOZCONFIG="$(cygpath -m "$work/mozconfig")"
 cd "$source"
 ./mach configure < /dev/null
