@@ -5,7 +5,6 @@
 from __future__ import annotations
 import argparse
 import hashlib
-import importlib.util
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -14,10 +13,6 @@ import struct
 import sys
 import tarfile
 import zipfile
-
-spec = importlib.util.spec_from_file_location('browser_bundle', Path(__file__).with_name('browser-bundle.py'))
-bundle = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(bundle)
 
 TERMUX_PREFIX = '/data/data/com.termux/files/usr'
 # src/common.cpp keeps the build mode in the executable as this tag.
@@ -206,6 +201,13 @@ def check_termux(relative, read) -> None:
             raise ValueError('missing_termux_dependency_license')
 
 
+def sha256_digest(source) -> str:
+    result = hashlib.sha256()
+    while block := source.read(1024 * 1024):
+        result.update(block)
+    return result.hexdigest()
+
+
 def check_build_mode(binary: bytes, dev: bool) -> None:
     """Release archives hold only release builds; --dev checks a dev bundle."""
     release, development = BUILD_TAG + b'release' in binary, BUILD_TAG + b'dev' in binary
@@ -250,13 +252,11 @@ def check_camoufox(files, relative, read, manifest, platform, mode=None) -> None
         raise ValueError('camoufox_is_not_executable')
 
 
-def check(path: Path, with_browser=False, target='desktop', dev=False) -> int:
+def check(path: Path, target='desktop', dev=False) -> int:
     if target not in {'desktop', 'termux-aarch64'}:
         raise ValueError('invalid_package_target')
-    if target == 'termux-aarch64' and (with_browser or dev or not path.name.endswith('.tar.gz')):
+    if target == 'termux-aarch64' and (dev or not path.name.endswith('.tar.gz')):
         raise ValueError('termux_requires_backend_tar_gz')
-    if dev and with_browser:
-        raise ValueError('dev_bundle_cannot_carry_cloakbrowser')
     archive = zipfile.ZipFile(path) if path.suffix == '.zip' else tarfile.open(path, 'r:gz')
     with archive:
         names = {}
@@ -330,10 +330,12 @@ def check(path: Path, with_browser=False, target='desktop', dev=False) -> int:
             raise ValueError('missing_dependency_licenses')
         if target == 'termux-aarch64':
             check_termux(relative, lambda name, limit=None: read(original[name], limit))
-        non_browser_files = {name for name in relative
-                             if not name.startswith(('bin/camoufox-runtime/', 'bin/browser-runtime/'))}
+        if any(name.startswith('bin/browser-runtime/') for name in relative):
+            raise ValueError('unexpected_browser_bundle')
+        non_camoufox_files = {name for name in relative
+                              if not name.startswith('bin/camoufox-runtime/')}
         if any(re.search(r'\.(?:dll|dylib|a|lib|pdb|exp|ilk)$|\.so(?:\.[0-9]+)*$', name, re.IGNORECASE)
-               for name in non_browser_files):
+               for name in non_camoufox_files):
             raise ValueError('unexpected_bundled_library')
         sm_licenses = {name for name in relative if name.startswith('share/doc/ais2api/licenses/spidermonkey/')}
         ada_licenses = {name for name in relative if name.startswith('share/doc/ais2api/licenses/ada-url/')}
@@ -361,59 +363,23 @@ def check(path: Path, with_browser=False, target='desktop', dev=False) -> int:
                            json.loads(read(original['bin/runtime-manifest.json'], 100000)),
                            'windows-x64' if path.suffix == '.zip' else 'linux-x64',
                            None if path.suffix == '.zip' else lambda name: names[original[name]].mode)
-        browser_files = {name for name in relative if name.startswith('bin/browser-runtime/')}
-        if with_browser:
-            platform = 'windows-x64' if path.suffix == '.zip' else 'linux-x64'
-            prefix = 'bin/browser-runtime/' + platform + '/'
-            manifest = json.loads(read(original['bin/runtime-manifest.json'], 100000))
-            marker_name = prefix + bundle.MARKER
-            if marker_name not in relative:
-                raise ValueError('missing_browser_bundle_marker')
-            marker = json.loads(read(original[marker_name], 4000000))
-            expected = {'platform': platform, 'browser_version': manifest['browser_version'], 'sha256': manifest['artifacts'][platform]['sha256']}
-            if any(marker.get(key) != value for key, value in expected.items()):
-                raise ValueError('browser_bundle_manifest_mismatch')
-            actual = {}
-            # Compressed tar seeks backwards by replaying decompression. Hash in
-            # archive order so a large browser is read sequentially.
-            ordered_browser_files = sorted(browser_files, key=lambda name:
-                names[original[name]].header_offset if isinstance(archive, zipfile.ZipFile)
-                else names[original[name]].offset_data)
-            for name in ordered_browser_files:
-                if not name.startswith(prefix):
-                    raise ValueError('unexpected_browser_platform')
-                local = bundle.safe_name(name[len(prefix):])
-                if local == bundle.MARKER:
-                    continue
-                source = archive.open(names[original[name]]) if isinstance(archive, zipfile.ZipFile) else archive.extractfile(names[original[name]])
-                with source:
-                    actual[local] = bundle.digest(source)
-            if 'BINARY-LICENSE.md' not in actual or marker.get('usage') != 'local-internal':
-                raise ValueError('missing_browser_binary_license_or_local_usage')
-            if not actual or marker.get('files') != actual:
-                raise ValueError('browser_bundle_inventory_mismatch')
-            if ('chrome.exe' if platform == 'windows-x64' else 'chrome') not in actual:
-                raise ValueError('missing_browser_executable')
-        elif browser_files:
-            raise ValueError('unexpected_browser_bundle_use_with_browser')
     expected = Path(str(path) + '.sha256').read_text(encoding='utf-8').split()[0].lower()
     with path.open('rb') as source:
-        digest = bundle.digest(source)
+        digest = sha256_digest(source)
     if digest != expected:
         raise ValueError('archive_checksum_mismatch')
-    print(f'Runtime archive verified: {len(names)} files, SHA-256 matches' + (', browser inventory matches' if with_browser else '')
+    print(f'Runtime archive verified: {len(names)} files, SHA-256 matches'
           + (', dev bundle' if dev else ''))
     return 0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--with-browser', action='store_true')
     parser.add_argument('--dev', action='store_true', help='check a dev bundle (scripts/build-dev.ps1) instead')
     parser.add_argument('--target', choices=['desktop', 'termux-aarch64'], default='desktop')
     parser.add_argument('archive', type=Path)
     args = parser.parse_args()
     try:
-        sys.exit(check(args.archive, args.with_browser, args.target, args.dev))
+        sys.exit(check(args.archive, args.target, args.dev))
     except Exception as error:
         print(f'Runtime archive validation failed: {type(error).__name__}: {error}', file=sys.stderr)
         sys.exit(1)

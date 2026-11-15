@@ -80,49 +80,28 @@ jobs:
           set -eu
           data="$RUNNER_TEMP/ais2api-data"
           mkdir -p "$data"
-          # A new configuration starts on Camoufox, which the entrypoint installs
-          # into the data volume. This smoke checks the Chromium the image carries.
+          # A new configuration starts on Camoufox, which setup installs into
+          # the data volume. Verify init and doctor before downloading it.
           docker run --rm --entrypoint /app/bin/ais2api \
-            -e AIS2API_BROWSER_BACKEND=cloakbrowser \
             -v "$data:/data" "$IMAGE" \
-            init --config /data/config.json --data-dir /data \
-            --bind 0.0.0.0 --browser /usr/bin/chromium
+            init --config /data/config.json --data-dir /data --bind 0.0.0.0
           docker run --rm --entrypoint /app/bin/ais2api \
             -v "$data:/data" "$IMAGE" \
             doctor --config /data/config.json > "$RUNNER_TEMP/doctor.json"
           cat "$RUNNER_TEMP/doctor.json"
-          grep -q '"browser_backend":"cloakbrowser"' "$RUNNER_TEMP/doctor.json"
-          grep -q '"browser_exists":true' "$RUNNER_TEMP/doctor.json"
-          grep -q '"code":"cloakbrowser_backend"' "$RUNNER_TEMP/doctor.json"
-          docker run --rm --entrypoint /usr/bin/chromium "$IMAGE" \
-            --no-sandbox --headless=new --disable-gpu --disable-dev-shm-usage \
-            --dump-dom about:blank | grep -q '<html'
-          docker run --rm --entrypoint /bin/sh "$IMAGE" -c '
-            set -eu
-            profile=$(mktemp -d)
-            /usr/bin/chromium --no-sandbox --headless=new --disable-gpu \
-              --disable-dev-shm-usage --remote-debugging-address=127.0.0.1 \
-              --remote-debugging-port=0 --user-data-dir="$profile" about:blank \
-              >/tmp/chromium.log 2>&1 &
-            pid=$!
-            trap "kill $pid 2>/dev/null || true" EXIT
-            for _ in $(seq 1 30); do
-              [ -f "$profile/DevToolsActivePort" ] && break
-              sleep 1
-            done
-            if [ ! -f "$profile/DevToolsActivePort" ]; then cat /tmp/chromium.log; exit 1; fi
-            port=$(sed -n 1p "$profile/DevToolsActivePort")
-            curl -fsS "http://127.0.0.1:$port/json/version"
-          '
+          grep -q '"browser_backend":"camoufox"' "$RUNNER_TEMP/doctor.json"
+          grep -q '"browser_exists":false' "$RUNNER_TEMP/doctor.json"
+          grep -q '"camoufox":{' "$RUNNER_TEMP/doctor.json"
+          grep -q '"fpgen_model":{' "$RUNNER_TEMP/doctor.json"
           # Start from an empty volume so the entrypoint creates the config.
           fresh="$RUNNER_TEMP/ais2api-fresh"
           mkdir -p "$fresh"
           docker run -d --name ais2api-smoke \
             -p 18452:18451 -v "$fresh:/data" "$IMAGE"
           trap 'docker logs ais2api-smoke; docker rm -f ais2api-smoke' EXIT
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:18452/health >/dev/null 2>&1; then break; fi
-            sleep 1
+            sleep 2
           done
           curl -fsS http://127.0.0.1:18452/health
           curl -fsS http://127.0.0.1:18452/ | grep -q 'id="app"'

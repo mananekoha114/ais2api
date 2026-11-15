@@ -17,7 +17,7 @@
 set(AIS2API_CURL_IMPERSONATE_VERSION "2.3.2")
 set(AIS2API_CURL_IMPERSONATE_RELEASE_REPO "mananekoha114/ais2api-spidermonkey" CACHE STRING
   "GitHub repository providing static curl-impersonate archives")
-set(AIS2API_CURL_IMPERSONATE_TAG "curl-impersonate-2.3.2-r1" CACHE STRING
+set(AIS2API_CURL_IMPERSONATE_TAG "curl-impersonate-2.3.2-r2" CACHE STRING
   "Release tag for static curl-impersonate archives")
 set(AIS2API_CURL_IMPERSONATE_DIR "" CACHE PATH
   "An unpacked static curl-impersonate archive; empty downloads the pinned one")
@@ -28,18 +28,18 @@ set(AIS2API_CURL_IMPERSONATE_SHA256 "" CACHE STRING
 
 if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64)$")
   set(curl_impersonate_platform "windows-x64")
-  set(curl_impersonate_default_sha256 "")
+  set(curl_impersonate_default_sha256 "ad708cb957aa6ff2c88708955f6778c40c389451b0abd9e214377f8b671f4c9d")
 elseif((ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR DEFINED ENV{TERMUX_VERSION}
         OR "$ENV{PREFIX}" MATCHES "com\\.termux" OR "$ENV{TERMUX__PREFIX}" MATCHES "com\\.termux")
        AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
   set(curl_impersonate_platform "android-arm64")
-  set(curl_impersonate_default_sha256 "")
+  set(curl_impersonate_default_sha256 "cbfb6bea88f2648fb85ddf648d6a145a53be83a3787634f67342e0875871820d")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
   set(curl_impersonate_platform "linux-x64")
-  set(curl_impersonate_default_sha256 "")
+  set(curl_impersonate_default_sha256 "39030d9722238a7753e8140f866d334ac90db678c369fa42ffb01de949344d87")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
   set(curl_impersonate_platform "linux-arm64")
-  set(curl_impersonate_default_sha256 "")
+  set(curl_impersonate_default_sha256 "aa3b8518ec46d38a00f0a1423bf6cc96a00f2c0627a2c50a60b01a788429c6cb")
 else()
   message(FATAL_ERROR "AIS2API_CURL_IMPERSONATE supports windows-x64, linux-x64, linux-arm64 and android-arm64")
 endif()

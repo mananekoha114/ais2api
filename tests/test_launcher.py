@@ -79,12 +79,21 @@ class ShellLauncherTests(unittest.TestCase):
         self.assertNotIn('setup --yes', calls)
         self.assertIn('setup --yes', err)
 
+    def test_skip_setup_starts_even_when_browser_is_missing(self):
+        code, out, err, calls = self.run_launcher('--port', '18460', '--skip-setup', '--background', STUB_BROWSER='false')
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, ['status --port 18460', 'init --port 18460', 'doctor --port 18460',
+                                 'start --port 18460', 'config show --port 18460'])
+        self.assertIn('http://127.0.0.1:18452/', out)
+        self.assertEqual(err, '')
+
 
 class WindowsLauncherTests(unittest.TestCase):
     def test_every_message_exists_and_the_batch_file_stays_ascii(self):
         batch = (LAUNCHER / 'start.cmd').read_bytes()
         self.assertTrue(batch.isascii())
         self.assertEqual(batch.count(b'\n'), batch.count(b'\r\n'))
+        self.assertIn(b'--skip-setup', batch)
         messages = (LAUNCHER / 'start-messages.txt').read_bytes()
         self.assertFalse(messages.startswith(b'\xef\xbb\xbf'), 'a BOM would hide the first message')
         names = {line.split('|', 1)[0] for line in messages.decode('utf-8').splitlines()}
