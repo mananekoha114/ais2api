@@ -17,7 +17,7 @@
 在 P4 第一步（网络指纹）和第二步（升级到 SpiderMonkey 158）之后，对照实验前完成以下关键工程项：
 
 1. **统一四平台静态预编译库（`mananekoha114/ais2api-spidermonkey`）**：
-   - **静态 SpiderMonkey 158.0.1**（`spidermonkey-158.0.1-r1`）：统一产出 `windows-x64`、`linux-x64`、`linux-arm64`、`android-arm64` 四个目标的静态归档（Android ARM64 使用 NDK r27c），通过 [`scripts/spidermonkey.cmake`](../../scripts/spidermonkey.cmake) 接入；
+   - **静态 SpiderMonkey 158.0.1**（`spidermonkey-158.0.1-r2`）：统一产出 `windows-x64`、`linux-x64`、`linux-arm64`、`android-arm64` 四个目标的静态归档（Android ARM64 使用 NDK r27c），通过 [`scripts/spidermonkey.cmake`](../../scripts/spidermonkey.cmake) 接入；
    - **静态 curl-impersonate 2.3.2**（`curl-impersonate-2.3.2-r2`）：接入四个平台，BoringSSL 编译时加 `BORINGSSL_PREFIX=bssl_` 符号前缀，可直接与程序静态链接的 OpenSSL 3 共存于同一可执行文件，运行时零 `.dll`/`.so` 依赖；
    - **完整补齐 Firefox 158 网络指纹**：恢复 TLS 1.3 PSK 会话复用并省略与 `pre_shared_key` 并存的 `session_ticket` 扩展（首次握手 `JA4 = t13d1517h2_8daaf6152771_3cbfd9057e0d`，恢复握手 `JA4 = t13d1517h2_8daaf6152771_e6dcd7ae0a9e`），按 NSS 尺寸对齐外层 ECH GREASE（首次 `282` 字节、恢复 `570` 字节），并在每个 HTTP/2 `HEADERS` 后发送流级 `WINDOW_UPDATE 12451840`。
 2. **SpiderMonkey 无浏览器身份合成**：
