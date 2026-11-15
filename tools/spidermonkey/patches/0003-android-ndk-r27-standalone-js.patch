@@ -44,7 +44,7 @@ index 2a76811..14b80fb 100644
  
 -    if NDK_VERSION != human:
 +    if build_project == "js":
-+        if major < 27:
++        if int(major) < 27:
 +            die(
 +                "Standalone SpiderMonkey requires Android NDK r27 or newer (have %s)."
 +                % human
