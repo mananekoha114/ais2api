@@ -11,7 +11,7 @@
 # AIS2API_SPIDERMONKEY_LICENSES and AIS2API_RESOLVED_SPIDERMONKEY_DIR.
 set(AIS2API_SPIDERMONKEY_RELEASE_REPO "mananekoha114/ais2api-spidermonkey" CACHE STRING
   "GitHub repository providing SpiderMonkey static archives")
-set(AIS2API_SPIDERMONKEY_TAG "spidermonkey-158.0.1-r1" CACHE STRING
+set(AIS2API_SPIDERMONKEY_TAG "spidermonkey-158.0.1-r2" CACHE STRING
   "Release tag for SpiderMonkey static archives")
 set(AIS2API_SPIDERMONKEY_ARCHIVE_VERSION "158.0.1")
 set(AIS2API_SPIDERMONKEY_URL "" CACHE STRING
@@ -21,18 +21,18 @@ set(AIS2API_SPIDERMONKEY_SHA256 "" CACHE STRING
 
 if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64)$")
   set(spidermonkey_platform "windows-x64")
-  set(spidermonkey_default_sha256 "")
+  set(spidermonkey_default_sha256 "a96e50ff8cb516e5daf902bfda62f1f8999106726916cb33e4c0e2525d37c838")
 elseif((ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR DEFINED ENV{TERMUX_VERSION}
         OR "$ENV{PREFIX}" MATCHES "com\\.termux" OR "$ENV{TERMUX__PREFIX}" MATCHES "com\\.termux")
        AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
   set(spidermonkey_platform "android-arm64")
-  set(spidermonkey_default_sha256 "")
+  set(spidermonkey_default_sha256 "beff3f5728b3dd5680f0f0fcf15800f39a2a49d7e86cecfa6932af235bf43e95")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
   set(spidermonkey_platform "linux-x64")
-  set(spidermonkey_default_sha256 "")
+  set(spidermonkey_default_sha256 "2c3acad9eb4197d3689b9ea669fd27e5febe54cd7da04170e99bac87540e84f7")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
   set(spidermonkey_platform "linux-arm64")
-  set(spidermonkey_default_sha256 "")
+  set(spidermonkey_default_sha256 "4fb6ac73d8a472d747e4a7fa15b44634ef0660ae665c4b68ce963fd94f8e1b12")
 else()
   message(FATAL_ERROR "AIS2API_SPIDERMONKEY supports windows-x64, linux-x64, linux-arm64 and android-arm64")
 endif()
