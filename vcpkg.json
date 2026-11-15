@@ -3,16 +3,23 @@
   "license": "MPL-2.0",
   "builtin-baseline": "664933b8d385dfc01f4e0cdff4c7c74e71f6a740",
   "dependencies": ["boost-asio", "boost-beast", "boost-json", "openssl", "sqlite3",
-    {"name":"curl", "default-features":false, "features":["ssl"]},
     {"name":"libarchive", "default-features":false}, "zstd", "catch2"],
+  "default-features": ["libcurl"],
   "features": {
+    "libcurl": {
+      "description": "vcpkg's libcurl; a build with AIS2API_CURL_IMPERSONATE leaves it out",
+      "dependencies": [{"name":"curl", "default-features":false, "features":["ssl"]}]
+    },
     "spidermonkey": {
       "description": "The experimental SpiderMonkey backend (AIS2API_SPIDERMONKEY)",
       "dependencies": [
         "ada-url",
-        "zlib",
-        {"name": "curl", "default-features": false, "features": ["http2", "brotli", "zstd"]}
+        "zlib"
       ]
+    },
+    "curl-impersonate": {
+      "description": "curl-impersonate's libcurl (AIS2API_CURL_IMPERSONATE); nghttp2 decodes HTTP/2 headers in its tests",
+      "dependencies": ["nghttp2"]
     }
   }
 }

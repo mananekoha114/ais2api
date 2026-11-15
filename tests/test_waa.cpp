@@ -221,3 +221,69 @@ TEST_CASE("A closed event loop drops what was queued and takes no more", "[waa]"
     loop.join();
     CHECK(trace.read() == "a");
 }
+
+namespace {
+std::string events_text(const waa::PointerEvents &events) {
+    std::string text = events.from + ">" + events.to + " " + events.blurred + ">" + events.focused + " " + std::to_string(events.rounds) + ":";
+    for (const auto &type : events.types) text += " " + type;
+    return text;
+}
+waa::PointerStep step(waa::PointerStep::Action action, std::string to = {}) { return {0ms, action, std::move(to)}; }
+} // namespace
+
+TEST_CASE("The page's pointer gives each step the events Firefox dispatches", "[waa]") {
+    using Action = waa::PointerStep::Action;
+    waa::Pointer pointer;
+    CHECK_FALSE(pointer.clicked());
+    // Outside the page, nothing is under the pointer to replace.
+    CHECK(events_text(pointer.step(step(Action::replace))) == "> prompt>prompt 0:");
+    // Run: the pointer enters the page, the press takes the focus from the
+    // prompt box, the release clicks.
+    CHECK(events_text(pointer.step(step(Action::move, "run"))) == ">run prompt>prompt 0: pointerover pointermove mouseover mousemove");
+    CHECK(events_text(pointer.step(step(Action::press))) == "run>run prompt>run 0: pointerdown mousedown focusout focusin");
+    CHECK_FALSE(pointer.clicked());
+    CHECK(events_text(pointer.step(step(Action::release))) == "run>run run>run 0: pointerup mouseup click");
+    CHECK(pointer.clicked());
+    // Run turns into Stop under the pointer.
+    CHECK(events_text(pointer.step(step(Action::replace))) == "run>run run>run 0: pointerover mouseover");
+    // Rerun on the last of two turns.
+    pointer.set_rounds(2);
+    CHECK(events_text(pointer.step(step(Action::move, "turn"))) ==
+          "run>turn run>run 2: pointerout pointerover pointermove mouseout mouseover mousemove");
+    CHECK(events_text(pointer.step(step(Action::move, "turn"))) == "turn>turn run>run 2: pointermove mousemove");
+    CHECK(events_text(pointer.step(step(Action::move, "rerun"))) ==
+          "turn>rerun run>run 2: pointerout pointerover pointermove mouseout mouseover mousemove");
+    CHECK(events_text(pointer.step(step(Action::press))) == "rerun>rerun run>rerun 2: pointerdown mousedown focusout focusin");
+    CHECK(events_text(pointer.step(step(Action::release))) == "rerun>rerun rerun>rerun 2: pointerup mouseup click");
+    // Rerun removes the last turn and its button, which had the focus: the
+    // conversation is under the pointer, and no element has the focus.
+    CHECK(events_text(pointer.step(step(Action::replace))) == "rerun>content rerun> 2: pointerover mouseover");
+    CHECK(events_text(pointer.step(step(Action::replace))) == "content>content > 2:");
+    // Pressing where nothing takes the focus moves it only in.
+    waa::Pointer fresh;
+    fresh.step(step(Action::move, "run"));
+    fresh.step(step(Action::press));
+    fresh.step(step(Action::release));
+    fresh.step(step(Action::move, "turn"));
+    fresh.step(step(Action::move, "rerun"));
+    fresh.step(step(Action::press));
+    fresh.step(step(Action::release));
+    fresh.step(step(Action::replace));
+    fresh.step(step(Action::move, "run"));
+    CHECK(events_text(fresh.step(step(Action::press))) == "run>run >run 0: pointerdown mousedown focusin");
+}
+
+TEST_CASE("Clicks on Run and Rerun keep the intervals Firefox showed", "[waa]") {
+    using Action = waa::PointerStep::Action;
+    const auto &run = waa::run_click();
+    REQUIRE(run.size() == 3);
+    CHECK((run[0].action == Action::move && run[0].to == "run" && run[0].delay == 0ms));
+    CHECK((run[1].action == Action::press && run[1].delay == 5ms));
+    CHECK((run[2].action == Action::release && run[2].delay == 65ms));
+    const auto &rerun = waa::rerun_click();
+    REQUIRE(rerun.size() == 4);
+    CHECK((rerun[0].action == Action::move && rerun[0].to == "turn" && rerun[0].delay == 0ms));
+    CHECK((rerun[1].action == Action::move && rerun[1].to == "rerun" && rerun[1].delay == 1000ms));
+    CHECK((rerun[2].action == Action::press && rerun[2].delay == 5ms));
+    CHECK((rerun[3].action == Action::release && rerun[3].delay == 65ms));
+}

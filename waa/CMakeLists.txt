@@ -7,7 +7,7 @@
 # The WAA runtime. Every build compiles the parts that need no JavaScript
 # engine, so that they are tested on every platform; the virtual machine itself
 # is compiled with AIS2API_SPIDERMONKEY.
-add_library(ais2api_waa STATIC src/challenge.cpp src/loop.cpp src/text.cpp)
+add_library(ais2api_waa STATIC src/challenge.cpp src/loop.cpp src/pointer.cpp src/text.cpp)
 target_include_directories(ais2api_waa PUBLIC include)
 target_link_libraries(ais2api_waa PUBLIC ais2api_common)
 if(NOT MSVC)
@@ -56,11 +56,18 @@ endforeach()
 find_package(ada CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
 set(waa_host_inc "${CMAKE_CURRENT_BINARY_DIR}/generated/waa_host.inc")
+# The shape tables collected with tools/shape: Windows's on Windows, Linux's
+# everywhere else, Android included until it has a table of its own.
+if(WIN32)
+  set(waa_shape "${CMAKE_CURRENT_SOURCE_DIR}/shapes/firefox158-windows.json.gz")
+else()
+  set(waa_shape "${CMAKE_CURRENT_SOURCE_DIR}/shapes/firefox158-linux.json.gz")
+endif()
 add_custom_command(OUTPUT "${waa_host_inc}"
   COMMAND "${CMAKE_COMMAND}" "-DDOM=${third_party}/dom.js" "-DHOST=${third_party}/smhost.js"
-    "-DSHAPE=${third_party}/firefox152.json.gz" "-DOUTPUT=${waa_host_inc}"
+    "-DSHAPE=${waa_shape}" "-DOUTPUT=${waa_host_inc}"
     -P "${PROJECT_SOURCE_DIR}/scripts/embed-waa.cmake"
-  DEPENDS "${third_party}/dom.js" "${third_party}/smhost.js" "${third_party}/firefox152.json.gz"
+  DEPENDS "${third_party}/dom.js" "${third_party}/smhost.js" "${waa_shape}"
     "${PROJECT_SOURCE_DIR}/scripts/embed-waa.cmake" VERBATIM)
 target_sources(ais2api_waa PRIVATE src/js.cpp src/url.cpp src/host.cpp src/runtime.cpp "${waa_host_inc}")
 target_include_directories(ais2api_waa PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated" "${third_party}/mozjs")

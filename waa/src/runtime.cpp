@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 
 namespace ais2api::waa {
@@ -25,6 +26,11 @@ constexpr std::chrono::nanoseconds idle_shrink_delay = std::chrono::minutes(5);
 // How long closing waits for the program's shutdown function, and then for
 // the running task, before it interrupts the script.
 constexpr auto close_grace = std::chrono::seconds(1);
+// How long after a click on Run the page's application asks for the
+// GenerateContent proof.
+constexpr auto run_proof_delay = std::chrono::milliseconds(50);
+// At most this many metrics wait for take_metrics; the oldest go first.
+constexpr std::size_t metric_limit = 1024;
 
 // Releases the handles it collected when the scope ends.
 class Roots {
@@ -124,19 +130,53 @@ std::string number_text(double number) {
     return buffer;
 }
 Error closed_error() { return Error(502, "waa_runtime_failed", "The WAA runtime closed"); }
+double milliseconds_since(Clock::time_point started) {
+    return static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count());
+}
+// Waits `delay` on the caller's thread: 499 when `cancel` is requested first,
+// 502 when the loop closes first.
+void pause(std::chrono::milliseconds delay, std::stop_token cancel, std::stop_token closed) {
+    if (delay.count() > 0) {
+        std::mutex mutex;
+        std::condition_variable_any wake;
+        std::stop_callback on_close(closed, [&] {
+            std::lock_guard lock(mutex);
+            wake.notify_all();
+        });
+        std::unique_lock lock(mutex);
+        wake.wait_for(lock, cancel, delay, [&] { return closed.stop_requested(); });
+    }
+    check_cancel(cancel);
+    if (closed.stop_requested()) throw closed_error();
+}
 } // namespace
 
 struct Runtime::Impl {
-    explicit Impl(Options given) : options(std::move(given)) {}
+    explicit Impl(Options given) : options(std::move(given)), pointer(options.pointer ? options.pointer : std::make_shared<Pointer>()) {}
     ~Impl();
 
     void open(std::stop_token cancel);
-    void fill_prompt(std::string prompt, bool submit, std::stop_token cancel);
+    // Types `prompt` when there is one, clicks through `steps`, then takes the
+    // proof for `digest`; the prompt box is empty again afterwards.
+    std::string proof(std::string_view digest, std::optional<std::string_view> prompt, const std::vector<PointerStep> *steps,
+                      std::stop_token cancel);
+    void fill_prompt(std::string prompt, std::stop_token cancel);
+    // The steps of a trusted click at their intervals, then the wait until the
+    // page asks for the proof.
+    void click(const std::vector<PointerStep> &steps, std::stop_token cancel);
+    // Dispatches one pointer step's events; with a result, reports when they
+    // are through.
+    void pointer_input(const PointerStep &step, std::shared_ptr<Result> result);
     std::string snapshot_with(std::optional<std::string> digest, std::stop_token cancel);
     // Clears the prompt box once the queued work is through.
     void clear_prompt();
     // Restarts the wait for the idle compaction.
     void used();
+    // Keeps a metric for take_metrics; on the loop's thread.
+    void record(Metric metric) {
+        if (metrics.size() >= metric_limit) metrics.erase(metrics.begin());
+        metrics.push_back(std::move(metric));
+    }
 
     // On the loop's thread.
     void start(const std::string &source_name, const std::shared_ptr<Result> &ready);
@@ -159,11 +199,19 @@ struct Runtime::Impl {
     // Guards the pointer: the loop's thread sets it, closing reads it.
     std::mutex agent_mutex;
     std::unique_ptr<Agent> agent;
+    const std::shared_ptr<Pointer> pointer;
     // The loop's thread owns everything from here to `idle_armed`.
-    Handle snapshot_function = 0, shutdown_function = 0, prompt_function = 0, clear_function = 0;
+    Handle snapshot_function = 0, shutdown_function = 0, prompt_function = 0, mouse_function = 0, clear_function = 0;
     Handle options_function = 0, bind_function = 0, deliver_function = 0;
-    std::map<double, std::shared_ptr<Result>> results;
+    // A snapshot waiting for its result, and when it was asked for.
+    struct Pending {
+        std::shared_ptr<Result> result;
+        Clock::time_point started;
+    };
+    std::map<double, Pending> results;
     double next_result = 0;
+    // What the page's BotGuard wrapper recorded since the last take_metrics.
+    std::vector<Metric> metrics;
     bool idle_armed = false;
     std::atomic<Clock::rep> last_used{0};
     // One proof or snapshot at a time, as the page has one prompt box.
@@ -240,6 +288,7 @@ void Runtime::Impl::start(const std::string &source_name, const std::shared_ptr<
     options_function = handle_of(context.get(helpers, "options"));
     bind_function = handle_of(context.get(helpers, "bind"));
     prompt_function = handle_of(state.evaluate(top.global, scripts::prompt_script, scripts::host_script_name));
+    mouse_function = handle_of(state.evaluate(top.global, scripts::pointer_script, scripts::host_script_name));
     clear_function = handle_of(state.evaluate(top.global, scripts::clear_prompt_script, scripts::host_script_name));
     context.release(step("Running the WAA interpreter", [&] { return state.evaluate(top.global, options.interpreter, source_name); }));
     context.release(step("Ordering the top global's keys", [&] { return state.invoke(top.order, 0); }));
@@ -249,21 +298,32 @@ void Runtime::Impl::start(const std::string &source_name, const std::shared_ptr<
     if (initialize.kind != js::Kind::handle) throw std::runtime_error("The WAA interpreter has no initialisation function");
     auto [signals, stored] = experiment_signals(top.global);
     roots.add(signals);
-    const auto callback = roots.add(context.new_function(top.global, "", 2, [this, ready](js::Call &call) {
+    // The wrapper counts the initialisation and times it until the program
+    // hands over its snapshot function.
+    const auto init_started = Clock::now();
+    record({"ec", "t", 1});
+    const auto callback = roots.add(context.new_function(top.global, "", 2, [this, ready, init_started](js::Call &call) {
         const auto snapshot = call.arg(0);
         if (snapshot.kind != js::Kind::handle) {
             ready->fail("The WAA interpreter returned no snapshot function");
             return;
         }
+        record({"el", "t", milliseconds_since(init_started)});
         snapshot_function = snapshot.handle;
         if (const auto shutdown = call.arg(1); shutdown.kind == js::Kind::handle) shutdown_function = shutdown.handle;
         ready->finish({});
     }));
     deliver_function = new_deliver();
+    const auto metric_sink = roots.add(context.new_function(top.global, "", 3, [this](js::Call &call) {
+        const auto label = call.arg(1);
+        agent->context().release(label);
+        record({call.arg_string(0), label.kind == js::Kind::number ? number_text(label.number) : label.string, call.arg_number(2)});
+    }));
     // An empty source name: the page's own script, visible in stacks.
-    const auto noop = roots.add(handle_of(state.evaluate(top.global, scripts::noop_script, "")));
+    const auto recorder = roots.add(handle_of(state.evaluate(top.global, scripts::recorder_script, "")));
+    const auto recorded = roots.add(handle_of(state.invoke(recorder, 0, {Value::object(metric_sink)})));
     std::array<Value, 5> callbacks;
-    for (std::size_t index = 0; index < callbacks.size(); ++index) callbacks[index] = roots.add(context.get(noop, std::to_string(index)));
+    for (std::size_t index = 0; index < callbacks.size(); ++index) callbacks[index] = roots.add(context.get(recorded, std::to_string(index)));
     const auto loggers = roots.add(state.new_array({callbacks[1], callbacks[2], callbacks[3], callbacks[4]}));
     context.release(step("Initialising the WAA program", [&] {
         return state.invoke(initialize.handle, object.handle,
@@ -280,9 +340,12 @@ Handle Runtime::Impl::new_deliver() {
         agent->context().release(value);
         const auto found = results.find(id);
         if (found == results.end()) return;
-        const auto result = std::move(found->second);
+        const auto pending = std::move(found->second);
         results.erase(found);
-        result->finish(value.kind == js::Kind::string ? value.string : number_text(value.number));
+        auto text = value.kind == js::Kind::string ? value.string : number_text(value.number);
+        record({"el", "n", milliseconds_since(pending.started)});
+        record({"frs", "", static_cast<double>(text.size())});
+        pending.result->finish(std::move(text));
     });
 }
 
@@ -328,15 +391,30 @@ std::pair<Value, Value> Runtime::Impl::experiment_signals(Handle global) {
     return {context.parse_json(global, json::serialize(signals)), stored};
 }
 
-void Runtime::Impl::fill_prompt(std::string prompt, bool submit, std::stop_token cancel) {
+std::string Runtime::Impl::proof(std::string_view digest, std::optional<std::string_view> prompt, const std::vector<PointerStep> *steps,
+                                 std::stop_token cancel) {
+    std::lock_guard lock(operation);
+    struct After {
+        Impl &impl;
+        ~After() {
+            impl.clear_prompt();
+            impl.used();
+        }
+    } after{*this};
+    if (prompt) fill_prompt(textarea_value(*prompt), cancel);
+    if (steps) click(*steps, cancel);
+    return snapshot_with(std::string(digest), cancel);
+}
+
+void Runtime::Impl::fill_prompt(std::string prompt, std::stop_token cancel) {
     const auto result = std::make_shared<Result>();
-    if (!loop.post([this, result, prompt = std::move(prompt), submit, cancel] {
+    if (!loop.post([this, result, prompt = std::move(prompt), cancel] {
             if (cancel.stop_requested()) {
                 result->fail("cancelled");
                 return;
             }
             try {
-                const auto value = agent->invoke(prompt_function, 0, {Value::of(prompt), Value::of(submit)});
+                const auto value = agent->invoke(prompt_function, 0, {Value::of(prompt)});
                 agent->context().release(value);
                 if (value.kind == js::Kind::string && value.string == prompt) result->finish({});
                 else result->fail("The page's prompt box did not take the prompt");
@@ -351,6 +429,42 @@ void Runtime::Impl::fill_prompt(std::string prompt, bool submit, std::stop_token
     result->wait(cancel, loop.closed());
 }
 
+void Runtime::Impl::click(const std::vector<PointerStep> &steps, std::stop_token cancel) {
+    for (const auto &step : steps) {
+        pause(step.delay, cancel, loop.closed());
+        const auto result = std::make_shared<Result>();
+        pointer_input(step, result);
+        result->wait(cancel, loop.closed());
+    }
+    pause(run_proof_delay, cancel, loop.closed());
+}
+
+void Runtime::Impl::pointer_input(const PointerStep &step, std::shared_ptr<Result> result) {
+    const bool posted = loop.post([this, step, result] {
+        const auto events = pointer->step(step);
+        try {
+            if (!events.types.empty()) {
+                auto &context = agent->context();
+                Roots roots(context);
+                std::vector<Value> names;
+                for (const auto &type : events.types) names.push_back(Value::of(type));
+                const auto list = roots.add(agent->new_array(names));
+                context.release(agent->invoke(mouse_function, 0,
+                                              {Value::object(agent->mouse_input), Value::of(events.from), Value::of(events.to),
+                                               Value::of(events.blurred), Value::of(events.focused),
+                                               Value::of(static_cast<double>(events.rounds)), list}));
+            }
+            if (result) result->finish({});
+        } catch (const js::Exception &exception) {
+            agent->release(exception);
+            if (result) result->fail("Dispatching mouse events: " + describe(exception));
+        } catch (const std::exception &error) {
+            if (result) result->fail(error.what());
+        }
+    });
+    if (!posted && result) throw closed_error();
+}
+
 std::string Runtime::Impl::snapshot_with(std::optional<std::string> digest, std::stop_token cancel) {
     const auto result = std::make_shared<Result>();
     if (!loop.post([this, result, digest = std::move(digest), cancel] {
@@ -359,7 +473,8 @@ std::string Runtime::Impl::snapshot_with(std::optional<std::string> digest, std:
                 return;
             }
             const double id = ++next_result;
-            results[id] = result;
+            record({"ec", "n", 1});
+            results[id] = Pending{result, Clock::now()};
             try {
                 auto &context = agent->context();
                 Roots roots(context);
@@ -420,17 +535,48 @@ void Runtime::settle(std::stop_token cancel) {
     done->wait(cancel, impl_->loop.closed());
 }
 
-std::string Runtime::proof(std::string_view digest, std::string_view prompt, bool run, std::stop_token cancel) {
-    std::lock_guard lock(impl_->operation);
-    struct After {
-        Impl &impl;
-        ~After() {
-            impl.clear_prompt();
-            impl.used();
-        }
-    } after{*impl_};
-    impl_->fill_prompt(textarea_value(prompt), run, cancel);
-    return impl_->snapshot_with(std::string(digest), cancel);
+std::string Runtime::proof(std::string_view digest, std::string_view prompt, std::stop_token cancel) {
+    return impl_->proof(digest, prompt, nullptr, std::move(cancel));
+}
+
+std::string Runtime::run_proof(std::string_view digest, std::string_view prompt, std::stop_token cancel) {
+    return impl_->proof(digest, prompt, &run_click(), std::move(cancel));
+}
+
+std::string Runtime::rerun_proof(std::string_view digest, int rounds, std::stop_token cancel) {
+    impl_->pointer->set_rounds(rounds);
+    return impl_->proof(digest, std::nullopt, &rerun_click(), std::move(cancel));
+}
+
+void Runtime::replaced() { impl_->pointer_input({std::chrono::milliseconds(0), PointerStep::Action::replace, {}}, nullptr); }
+
+void Runtime::activate(std::stop_token cancel) {
+    const auto result = std::make_shared<Result>();
+    if (!impl_->loop.post([impl = impl_.get(), result] {
+            try {
+                impl->agent->context().release(impl->agent->invoke(impl->agent->activate, 0));
+                result->finish({});
+            } catch (const js::Exception &exception) {
+                impl->agent->release(exception);
+                result->fail("Recording a user action: " + describe(exception));
+            } catch (const std::exception &error) {
+                result->fail(error.what());
+            }
+        }))
+        throw closed_error();
+    result->wait(cancel, impl_->loop.closed());
+}
+
+std::vector<Metric> Runtime::take_metrics(std::stop_token cancel) {
+    const auto result = std::make_shared<Result>();
+    const auto taken = std::make_shared<std::vector<Metric>>();
+    if (!impl_->loop.post([impl = impl_.get(), result, taken] {
+            *taken = std::exchange(impl->metrics, {});
+            result->finish({});
+        }))
+        throw closed_error();
+    result->wait(cancel, impl_->loop.closed());
+    return std::move(*taken);
 }
 
 std::string Runtime::refresh_snapshot(std::stop_token cancel) {

@@ -37,7 +37,7 @@ const BACKENDS = computed<{ value: AccountBackend; label: string; hint: string; 
     ? {
         value: 'spidermonkey',
         label: 'SpiderMonkey（实验性）',
-        hint: '实验性原型：不启动浏览器，在本进程内运行 Google 的 WAA 程序。沿用 Camoufox 生成的 Firefox 身份，但声称 Firefox 152；网络层为普通 libcurl，TLS 与 HTTP/2 特征不是 Firefox 的。仅供测试账号使用',
+        hint: '实验性原型：不启动浏览器，在本进程内运行 Google 的 WAA 程序。沿用 Camoufox 生成的 Firefox 身份，与 Camoufox 一样声称 Firefox 158；默认构建以 curl-impersonate 发出 Firefox 的 TLS 与 HTTP/2 特征。仅供测试账号使用',
       }
     : { value: 'spidermonkey', label: 'SpiderMonkey', hint: '此版本未包含 SpiderMonkey 后端', disabled: true },
 ])

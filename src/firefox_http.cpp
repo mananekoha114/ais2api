@@ -106,6 +106,81 @@ Error transport_error(CURLcode code, std::string_view detail, bool proxied) {
     default: return Error(502, "network_failed", "Could not reach Google (" + message + ")");
     }
 }
+
+#ifdef AIS2API_CURL_IMPERSONATE
+// Firefox's TLS ClientHello and HTTP/2 connection preface, as measured from
+// Camoufox 158 on Windows (docs/reports/firefox-network-fingerprint-2026-11-12.md).
+// Set value by value rather than through curl-impersonate's own Firefox
+// target, whose groups add FFDHE that Firefox does not offer.
+namespace firefox {
+// TLS 1.3 first, in Firefox's order: AES-128, ChaCha20, AES-256.
+constexpr const char *ciphers =
+    "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384:"
+    "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:"
+    "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:"
+    "AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA:AES256-SHA";
+// The first three also get a key share.
+constexpr const char *groups = "X25519MLKEM768:X25519:P-256:P-384:P-521";
+constexpr long key_shares = 3;
+constexpr const char *signature_algorithms =
+    "ecdsa_secp256r1_sha256:ecdsa_secp384r1_sha384:ecdsa_secp521r1_sha512:rsa_pss_rsae_sha256:rsa_pss_rsae_sha384:"
+    "rsa_pss_rsae_sha512:rsa_pkcs1_sha256:rsa_pkcs1_sha384:rsa_pkcs1_sha512:ecdsa_sha1:rsa_pkcs1_sha1";
+constexpr const char *delegated_credentials = "ecdsa_secp256r1_sha256:ecdsa_secp384r1_sha384:ecdsa_secp521r1_sha512:ecdsa_sha1";
+constexpr const char *certificate_compression = "zlib,brotli,zstd";
+constexpr long record_size_limit = 16385;
+// server_name, extended_master_secret, renegotiation_info, supported_groups,
+// ec_point_formats, session_ticket, alpn, status_request,
+// delegated_credentials, signed_certificate_timestamp, key_share,
+// supported_versions, signature_algorithms, psk_key_exchange_modes,
+// record_size_limit, compress_certificate, encrypted_client_hello. No GREASE
+// and no shuffling.
+constexpr const char *extension_order = "0-23-65281-10-11-35-16-5-34-18-51-43-13-45-28-27-65037";
+// Without an ECH configuration for the host, Firefox sends a GREASE one.
+constexpr const char *ech = "true";
+// HEADER_TABLE_SIZE, ENABLE_PUSH, INITIAL_WINDOW_SIZE, MAX_FRAME_SIZE.
+constexpr const char *http2_settings = "1:65536;2:0;4:131072;5:16384";
+constexpr long http2_connection_window_update = 12517377;
+constexpr const char *http2_pseudo_headers = "mpas";
+} // namespace firefox
+
+void set(CURL *easy, CURLoption option, long value, const char *name) {
+    if (curl_easy_setopt(easy, option, value) != CURLE_OK)
+        throw Error(500, "network_init", std::string("The HTTP client rejected Firefox's ") + name);
+}
+void set(CURL *easy, CURLoption option, const char *value, const char *name) {
+    if (curl_easy_setopt(easy, option, value) != CURLE_OK)
+        throw Error(500, "network_init", std::string("The HTTP client rejected Firefox's ") + name);
+}
+void apply_firefox(CURL *easy) {
+    set(easy, CURLOPT_SSLVERSION, static_cast<long>(CURL_SSLVERSION_TLSv1_2 | CURL_SSLVERSION_MAX_DEFAULT), "TLS versions");
+    set(easy, CURLOPT_SSL_CIPHER_LIST, firefox::ciphers, "cipher suites");
+    set(easy, CURLOPT_SSL_EC_CURVES, firefox::groups, "key exchange groups");
+    set(easy, CURLOPT_TLS_KEY_SHARES_LIMIT, firefox::key_shares, "key shares");
+    set(easy, CURLOPT_SSL_SIGNATURE_ALGORITHMS, firefox::signature_algorithms, "signature algorithms");
+    set(easy, CURLOPT_TLS_DELEGATED_CREDENTIALS, firefox::delegated_credentials, "delegated credentials");
+    set(easy, CURLOPT_SSL_CERT_COMPRESSION, firefox::certificate_compression, "certificate compression");
+    set(easy, CURLOPT_TLS_RECORD_SIZE_LIMIT, firefox::record_size_limit, "record size limit");
+    set(easy, CURLOPT_TLS_EXTENSION_ORDER, firefox::extension_order, "extension order");
+    set(easy, CURLOPT_TLS_GREASE, 0L, "GREASE setting");
+    set(easy, CURLOPT_SSL_PERMUTE_EXTENSIONS, 0L, "extension order setting");
+    set(easy, CURLOPT_SSL_ENABLE_ALPN, 1L, "ALPN");
+    set(easy, CURLOPT_SSL_ENABLE_ALPS, 0L, "ALPS setting");
+    set(easy, CURLOPT_SSL_ENABLE_TICKET, 1L, "session tickets");
+    // Firefox resumes a TLS 1.3 session without the session_ticket extension;
+    // BoringSSL keeps it beside pre_shared_key, a ClientHello no Firefox
+    // sends. Without resumption every connection sends the full handshake's.
+    set(easy, CURLOPT_SSL_SESSIONID_CACHE, 0L, "session resumption setting");
+    set(easy, CURLOPT_TLS_SIGNED_CERT_TIMESTAMPS, 1L, "certificate timestamps");
+    set(easy, CURLOPT_TLS_STATUS_REQUEST, 1L, "status request");
+    set(easy, CURLOPT_ECH, firefox::ech, "encrypted client hello");
+    set(easy, CURLOPT_HTTP2_SETTINGS, firefox::http2_settings, "HTTP/2 settings");
+    set(easy, CURLOPT_HTTP2_WINDOW_UPDATE, firefox::http2_connection_window_update, "HTTP/2 window");
+    set(easy, CURLOPT_HTTP2_PSEUDO_HEADERS_ORDER, firefox::http2_pseudo_headers, "pseudo-header order");
+    set(easy, CURLOPT_STREAM_EXCLUSIVE, 0L, "stream dependency");
+    // Cookies come from the session's jar, not curl's, so CURLOPT_SPLIT_COOKIES
+    // does not apply: prepare() splits them itself.
+}
+#endif
 } // namespace
 
 std::string header_value(const HttpHeaders &headers, std::string_view name) {
@@ -114,7 +189,7 @@ std::string header_value(const HttpHeaders &headers, std::string_view name) {
     return {};
 }
 
-std::string cookie_header(const json::array &stored, std::string_view url, std::int64_t now) {
+std::vector<std::string> cookie_pairs(const json::array &stored, std::string_view url, std::int64_t now) {
     const auto address = split_address(url);
     if (!address) return {};
     std::vector<const json::object *> matched;
@@ -131,13 +206,14 @@ std::string cookie_header(const json::array &stored, std::string_view url, std::
     std::stable_sort(matched.begin(), matched.end(), [](const json::object *a, const json::object *b) {
         return string_or(*a, "path").size() > string_or(*b, "path").size();
     });
+    std::vector<std::string> pairs;
+    for (const auto *cookie : matched) pairs.push_back(string_or(*cookie, "name") + "=" + string_or(*cookie, "value"));
+    return pairs;
+}
+
+std::string cookie_header(const json::array &stored, std::string_view url, std::int64_t now) {
     std::string header;
-    for (const auto *cookie : matched) {
-        if (!header.empty()) header += "; ";
-        header += string_or(*cookie, "name");
-        header += '=';
-        header += string_or(*cookie, "value");
-    }
+    for (const auto &pair : cookie_pairs(stored, url, now)) header += (header.empty() ? "" : "; ") + pair;
     return header;
 }
 
@@ -238,6 +314,13 @@ struct Transfer {
     std::deque<std::string> chunks;
     std::size_t consumed = 0; // of the first chunk
     std::size_t buffered = 0;
+    std::string protocol;
+    HttpTiming timing;
+
+    // The session's thread only: when the transfer started, and when the
+    // first response head arrived (through a proxy, its answer to CONNECT).
+    Clock::time_point started{};
+    std::optional<Clock::time_point> first_head;
 
     ~Transfer() {
         if (easy) curl_easy_cleanup(easy);
@@ -249,6 +332,29 @@ struct Transfer {
     }
     static std::size_t on_body(char *data, std::size_t size, std::size_t count, void *self) {
         return static_cast<Transfer *>(self)->body(std::string_view(data, size * count));
+    }
+    static int on_trace(CURL *, curl_infotype type, char *, std::size_t, void *self) {
+        auto &transfer = *static_cast<Transfer *>(self);
+        if (type == CURLINFO_HEADER_IN && !transfer.first_head) transfer.first_head = Clock::now();
+        return 0;
+    }
+    // Reads the connection's timers once the transfer is over; on the
+    // session's thread.
+    void measure() {
+        curl_off_t resolved = 0, connected = 0;
+        long connects = 0, version = 0;
+        curl_easy_getinfo(easy, CURLINFO_NAMELOOKUP_TIME_T, &resolved);
+        curl_easy_getinfo(easy, CURLINFO_CONNECT_TIME_T, &connected);
+        curl_easy_getinfo(easy, CURLINFO_NUM_CONNECTS, &connects);
+        curl_easy_getinfo(easy, CURLINFO_HTTP_VERSION, &version);
+        std::lock_guard lock(mutex);
+        protocol = version == CURL_HTTP_VERSION_3 ? "h3" : version == CURL_HTTP_VERSION_2_0 ? "h2" : "http/1.1";
+        timing.new_connection = connects > 0;
+        timing.resolved = std::chrono::microseconds(resolved);
+        timing.connected = std::chrono::microseconds(connected);
+        // Only a new connection's first head is the proxy's.
+        if (timing.new_connection && first_head)
+            timing.tunneled = std::chrono::duration_cast<std::chrono::microseconds>(*first_head - started);
     }
     void header(std::string_view line) {
         line = trim(line);
@@ -360,9 +466,11 @@ struct HttpSession::Impl : std::enable_shared_from_this<HttpSession::Impl> {
         const auto transfer = std::move(found->second);
         active.erase(found);
         curl_multi_remove_handle(multi, easy);
+        transfer->measure();
         transfer->finish(code);
     }
     void start(const std::shared_ptr<Transfer> &transfer) {
+        transfer->started = Clock::now();
         if (const auto code = curl_multi_add_handle(multi, transfer->easy); code != CURLM_OK) {
             transfer->finish(CURLE_FAILED_INIT);
             return;
@@ -411,6 +519,7 @@ std::shared_ptr<Transfer> HttpSession::Impl::prepare(HttpRequest request, std::c
     };
 
     bool accept = false, accept_encoding = false, content_type = false;
+    const bool split_cookies = HttpSession::firefox_fingerprint() && lower(given.url).starts_with("https://");
     const auto add = [&](const std::string &line) {
         const auto list = curl_slist_append(transfer->header_list, line.c_str());
         if (!list) throw Error(500, "network_init", "Cannot allocate an HTTP request");
@@ -422,7 +531,17 @@ std::shared_ptr<Transfer> HttpSession::Impl::prepare(HttpRequest request, std::c
         content_type = content_type || same_name(name, "content-type");
         if (same_name(name, "cookie") && value.empty()) {
             std::lock_guard lock(jar_mutex);
-            if (const auto cookies = cookie_header(jar, given.url); !cookies.empty()) add(name + ": " + cookies);
+            // Over HTTP/2, which Google always negotiates, Firefox sends each
+            // cookie in a header of its own; over HTTP/1.1, one header.
+            if (split_cookies) {
+                for (const auto &pair : cookie_pairs(jar, given.url)) add(name + ": " + pair);
+            } else if (const auto cookies = cookie_header(jar, given.url); !cookies.empty()) {
+                add(name + ": " + cookies);
+            }
+            continue;
+        }
+        if (same_name(name, "content-length") && value.empty()) {
+            add(name + ": " + std::to_string(given.body ? given.body->size() : 0));
             continue;
         }
         add(name + ": " + value);
@@ -438,6 +557,10 @@ std::shared_ptr<Transfer> HttpSession::Impl::prepare(HttpRequest request, std::c
     curl_easy_setopt(easy, CURLOPT_PROTOCOLS_STR, options.protocols.c_str());
     curl_easy_setopt(easy, CURLOPT_HTTPHEADER, transfer->header_list);
     curl_easy_setopt(easy, CURLOPT_HTTP_VERSION, static_cast<long>(CURL_HTTP_VERSION_2TLS));
+#ifdef AIS2API_CURL_IMPERSONATE
+    apply_firefox(easy);
+#endif
+    curl_easy_setopt(easy, CURLOPT_STREAM_WEIGHT, static_cast<long>(given.weight));
     curl_easy_setopt(easy, CURLOPT_PIPEWAIT, 1L);
     curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 0L);
     // Decodes what the response is encoded with; the Accept-Encoding header
@@ -457,6 +580,11 @@ std::shared_ptr<Transfer> HttpSession::Impl::prepare(HttpRequest request, std::c
     curl_easy_setopt(easy, CURLOPT_HEADERDATA, transfer.get());
     curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, &Transfer::on_body);
     curl_easy_setopt(easy, CURLOPT_WRITEDATA, transfer.get());
+    if (given.trace_tunnel && transfer->proxied) {
+        curl_easy_setopt(easy, CURLOPT_DEBUGFUNCTION, &Transfer::on_trace);
+        curl_easy_setopt(easy, CURLOPT_DEBUGDATA, transfer.get());
+        curl_easy_setopt(easy, CURLOPT_VERBOSE, 1L);
+    }
     if (given.body) {
         curl_easy_setopt(easy, CURLOPT_POST, 1L);
         curl_easy_setopt(easy, CURLOPT_POSTFIELDS, given.body->data());
@@ -491,6 +619,12 @@ class Exchange final : public HttpExchange {
         if (transfer.finished && transfer.result != CURLE_OK) throw transfer.failure();
         status_ = transfer.status;
         headers_ = transfer.headers;
+    }
+    // The protocol and the connection's timing, once the body is complete.
+    void describe(HttpResponse &response) const {
+        std::lock_guard lock(transfer_->mutex);
+        response.protocol = transfer_->protocol;
+        response.timing = transfer_->timing;
     }
     std::optional<std::string> read(std::size_t limit, std::chrono::milliseconds wait, std::stop_token cancel) override {
         auto &transfer = *transfer_;
@@ -555,7 +689,10 @@ HttpResponse HttpSession::send(HttpRequest request, std::stop_token cancel, std:
     for (;;) {
         const auto bytes = exchange.read(pause_bytes, 1000ms, cancel);
         if (!bytes) continue;
-        if (bytes->empty()) return response;
+        if (bytes->empty()) {
+            exchange.describe(response);
+            return response;
+        }
         if (response.body.size() + bytes->size() > limit) throw Error(502, "network_failed", "Google sent a response larger than expected");
         response.body += *bytes;
     }
@@ -579,5 +716,22 @@ std::string HttpSession::accept_encoding() {
     if (features & CURL_VERSION_BROTLI) codings += codings.empty() ? "br" : ", br";
     if (features & CURL_VERSION_ZSTD) codings += codings.empty() ? "zstd" : ", zstd";
     return codings;
+}
+
+bool HttpSession::firefox_fingerprint() {
+#ifdef AIS2API_CURL_IMPERSONATE
+    return true;
+#else
+    return false;
+#endif
+}
+
+std::string HttpSession::network_stack() {
+    initialise_curl();
+    const auto *info = curl_version_info(CURLVERSION_NOW);
+    std::string stack = "libcurl/" + std::string(info->version);
+    if (info->ssl_version) stack += " " + std::string(info->ssl_version);
+    if (info->nghttp2_version) stack += " nghttp2/" + std::string(info->nghttp2_version);
+    return stack;
 }
 } // namespace ais2api::browser_detail

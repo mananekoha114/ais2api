@@ -6,6 +6,7 @@
 
 #pragma once
 #include "backend.hpp"
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -106,6 +107,13 @@ class CamoufoxGateway final : public GenerationBackend {
     std::string experiment_ticket(const Request &request, const Account &account, std::stop_token cancel = {});
     void experiment_send(const Request &request, const Account &account, std::string_view ticket, const EventSink &sink,
                          std::stop_token cancel = {});
+    // For tools/shape_collect only: opens `url` in a new tab with the
+    // account's identity, and its cookies when `with_cookies` is set, but no
+    // preload script; waits until the page's first frame has loaded and then
+    // `settle`; and returns the text `script` evaluates to in the page. The
+    // page must stay on `url`'s host (a sign-in redirect is a 401).
+    std::string experiment_collect(const Account &account, const std::string &url, std::string_view script, bool with_cookies,
+                                   std::chrono::seconds settle, std::stop_token cancel = {});
 
   private:
     struct Impl;

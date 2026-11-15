@@ -1,4 +1,4 @@
-# SpiderMonkey 152.0.4 as a static library for ais2api: windows-x64, clang-cl,
+# SpiderMonkey 158.0.1 as a static library for ais2api: windows-x64, clang-cl,
 # static C runtime. Used by build-windows.sh, which sets MOZ_OBJDIR.
 
 # Only the JavaScript engine, optimised, without assertions.
@@ -22,7 +22,7 @@ ac_add_options --disable-tests
 # Let the build download the compiler (clang-cl) and the Visual Studio and
 # Windows SDK files it was released with, so the result does not depend on
 # what this machine has. Rust is not bootstrapped outside Mozilla's CI:
-# build-windows.cmd installs the version Firefox 152 is built with.
+# build-windows.cmd installs the version Firefox 158 is built with.
 ac_add_options --enable-bootstrap
 
 # Rust code links the static C runtime too, like the C++ objects

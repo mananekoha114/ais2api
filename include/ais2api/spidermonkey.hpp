@@ -7,6 +7,9 @@
 #pragma once
 #include "ais2api/backend.hpp"
 #include "ais2api/waa/runtime.hpp"
+#include <deque>
+#include <random>
+#include <set>
 
 namespace ais2api {
 class Store;
@@ -42,6 +45,51 @@ std::string_view fetch_site(std::string_view url);
 // The text of the request's last user turn: what the page's prompt box holds
 // when Run is clicked. Empty when that turn has no text.
 std::string page_prompt(const Request &request);
+// The conversations an account's page ran: running one again is what the
+// page's Rerun on the last turn does, with an empty prompt box. After
+// AIStudio2API's internal/aistudio/page_runs.go (MIT).
+class PageRuns {
+  public:
+    // Records the request's conversation for the account and returns whether
+    // the account ran it before. A conversation that does not end with a user
+    // turn is neither recorded nor run again. Past 1000, the oldest goes.
+    bool rerun(std::string_view account_id, const Request &request);
+
+  private:
+    std::set<std::pair<std::string, std::string>> entries_;
+    std::deque<std::pair<std::string, std::string>> order_;
+};
+// The number of user turns in the request's conversation: where the last
+// turn and its Rerun button are on the page.
+int user_turns(const Request &request);
+
+// One load of the page as the address bar loads it, as measured.
+struct PageLoad {
+    std::string url;
+    std::string protocol; // the response's ALPN name: "h2", "http/1.1"
+    // Whether the document's request opened a connection; then how long the
+    // name lookup, the TCP connect (to the proxy, when there is one) and the
+    // proxy's answer to CONNECT took, zero for a stage that did not happen.
+    bool new_connection = false;
+    std::chrono::milliseconds lookup{}, connect{}, tunnel{};
+    // When the body was read, from the navigation's start.
+    std::chrono::milliseconds end{};
+    std::size_t decoded = 0;
+};
+// Firefox 158's PerformanceNavigationTiming for the load's network stages, in
+// milliseconds from the navigation's start, and the legacy timing's
+// domLoading. A new connection's lookup, connect and CONNECT answer are the
+// measured ones; TLS inside the tunnel and the server's time fall after
+// requestStart; the response is complete when the body was read. Firefox's
+// own dispatch gaps and the encoded body size follow Firefox 158 on the page.
+// After AIStudio2API's internal/aistudio/navigation_timing.go (MIT).
+std::pair<json::object, int> navigation_timing(const PageLoad &load, std::mt19937_64 &random);
+// Completes the entry with the document's parsing and load stages:
+// domInteractive no earlier than the later of the response's end and
+// `resources` (the document's subresources loaded, from the navigation's
+// start), then running the scripts and the application as sampled from
+// Firefox 158 on the page.
+void document_timing(json::object &entry, std::chrono::milliseconds resources, std::mt19937_64 &random);
 // document.lastModified for a document received at `time` in `timezone`
 // (IANA; UTC when unknown here): "MM/DD/YYYY hh:mm:ss".
 std::string last_modified(std::chrono::system_clock::time_point time, std::string_view timezone);
@@ -93,9 +141,12 @@ struct RpcContext {
     std::string api_key, auth_user = "0", authorization;
     // Empty ones are left out.
     std::string visit_id, extension, tier;
-    std::string priority = "u=4";
 };
+// A MakerSuite RPC.
 Headers rpc_headers(const PageHeaders &page, const RpcContext &rpc);
+// Waa/Create, whose headers the page sets in an order of their own; it takes
+// no visit ID, extension or tier.
+Headers waa_headers(const PageHeaders &page, const RpcContext &rpc);
 
 struct HostIdentity {
     waa::Profile profile; // without the page's URL, globals and document
@@ -110,8 +161,8 @@ HostIdentity host_identity(const json::object &config);
 // The experimental SpiderMonkey backend (browser_backend "spidermonkey"):
 // Google's WAA virtual machine runs in this process and requests go out over
 // HTTP, with no browser. An account uses the Firefox identity it was given
-// under the Camoufox backend. The prototype claims Firefox 152 and sends with
-// plain libcurl.
+// under the Camoufox backend. The prototype claims Firefox 158; a build with
+// curl-impersonate sends with Firefox's TLS and HTTP/2 fingerprints.
 class SpiderMonkeyGateway final : public GenerationBackend {
   public:
     SpiderMonkeyGateway(const Config &config, Store &store);

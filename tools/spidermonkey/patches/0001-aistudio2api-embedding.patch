@@ -1,29 +1,25 @@
-From e297ff009d3b9afee0e223c02ae3271ef24d51b6 Mon Sep 17 00:00:00 2001
-From: Mag1cFall <107487022+Mag1cFall@users.noreply.github.com>
-Date: Fri, 30 Oct 2026 04:21:18 +0800
-Subject: [PATCH] =?UTF-8?q?=E5=9C=A8=20FIREFOX=5F152=5F0=5F4=5FRELEASE=20?=
- =?UTF-8?q?=E4=B8=8A=E5=BA=94=E7=94=A8=20AIStudio2API=20=E7=9A=84=20Spider?=
- =?UTF-8?q?Monkey=20=E8=A1=A5=E4=B8=81?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH] Embedding changes for ais2api on FIREFOX_158_0_1_RELEASE
 
----
- build/moz.configure/flags.configure |  2 +-
- intl/components/src/Locale.cpp      | 41 +++++++++++++++++++++++++++++
- intl/components/src/Locale.h        | 38 +++++++++++++++++++++++---
- js/src/build/moz.build              |  1 +
- js/src/jsapi.cpp                    |  4 ++-
- js/src/vm/FrameIter.cpp             | 16 ++++++++---
- js/src/vm/GlobalObject.cpp          | 40 ++++++++++++++++++++++++++++
- js/src/vm/GlobalObject.h            |  9 ++++++-
- 8 files changed, 141 insertions(+), 10 deletions(-)
+Based on AIStudio2API's SpiderMonkey patch (Mag1cFall/firefox e297ff009d,
+written for FIREFOX_152_0_4_RELEASE); ais2api maintains it since 158.0.1.
 
-diff --git a/build/moz.configure/flags.configure b/build/moz.configure/flags.configure
-index 4822831ac5c57..9da5a246a4e87 100644
+- build/moz.configure/flags.configure: the js project skips the check for
+  linking libstdc++ statically.
+- intl/components/src/Locale.*: mozjs_set_camou_locale(locale) sets the
+  thread's default locale. Unlike the 152 patch, it no longer replaces the
+  language and region of every Locale, which made a locale a script names
+  itself (new Intl.Locale("fr-FR")) report the embedding's language.
+- js/src/build/moz.build: mozglue is linked into the js library.
+- js/src/jsapi.cpp, js/src/vm/FrameIter.cpp: scripts compiled with the file
+  name "self-hosted" count as self-hosted frames, so host scripts stay out of
+  stacks and caller lookups.
+- js/src/vm/GlobalObject.*: standard constructors appear in the order scripts
+  first use them, and mozjs_delete_global_property removes a global property.
+
+diff -ruN a/build/moz.configure/flags.configure b/build/moz.configure/flags.configure
 --- a/build/moz.configure/flags.configure
 +++ b/build/moz.configure/flags.configure
-@@ -74,7 +74,7 @@ def link_libstdcxx_statically(
+@@ -74,7 +74,7 @@
              )
  
  
@@ -32,11 +28,10 @@ index 4822831ac5c57..9da5a246a4e87 100644
  def check_libstdcxx_linkage():
      die("Firefox does not support linking statically with libstdc++")
  
-diff --git a/intl/components/src/Locale.cpp b/intl/components/src/Locale.cpp
-index 718d8814d8513..588e9218c3705 100644
+diff -ruN a/intl/components/src/Locale.cpp b/intl/components/src/Locale.cpp
 --- a/intl/components/src/Locale.cpp
 +++ b/intl/components/src/Locale.cpp
-@@ -21,10 +21,51 @@
+@@ -21,10 +21,32 @@
  #include "unicode/uloc.h"
  #include "unicode/utypes.h"
  
@@ -46,41 +41,22 @@ index 718d8814d8513..588e9218c3705 100644
  
  using namespace intl::LanguageTagLimits;
  
-+// sCamouLanguage、sCamouRegion 与 sCamouLocale 是当前线程上 Camoufox MaskConfig 的 locale:language、locale:region 与 navigator.language
-+static thread_local std::string sCamouLanguage;
-+static thread_local std::string sCamouRegion;
-+static thread_local std::string sCamouLocale;
-+
-+const char* Locale::GetCamouLanguage() {
-+  return sCamouLanguage.empty() ? nullptr : sCamouLanguage.c_str();
-+}
-+
-+const char* Locale::GetCamouRegion() {
-+  return sCamouRegion.empty() ? nullptr : sCamouRegion.c_str();
-+}
-+
-+const char* Locale::GetCamouScript() { return nullptr; }
-+
-+const char* Locale::GetCamouLocale() {
-+  return sCamouLocale.empty() ? nullptr : sCamouLocale.c_str();
-+}
++// The embedding's default locale on this thread (the identity's
++// navigator.language). When set it stands in for ICU's default locale;
++// locales a script names itself are left alone.
++static thread_local std::string sEmbeddingDefaultLocale;
 +
 +const char* Locale::GetDefaultLocale() {
-+  if (const char* value = GetCamouLocale()) {
-+    return value;
-+  }
-+  return uloc_getDefault();
++  return sEmbeddingDefaultLocale.empty() ? uloc_getDefault()
++                                         : sEmbeddingDefaultLocale.c_str();
 +}
 +
 +}  // namespace mozilla::intl
 +
-+// mozjs_set_camou_locale 设置当前线程的 Camoufox 区域设置
-+extern "C" MOZ_EXPORT void mozjs_set_camou_locale(const char* language,
-+                                                  const char* region,
-+                                                  const char* locale) {
-+  mozilla::intl::sCamouLanguage = language ? language : "";
-+  mozilla::intl::sCamouRegion = region ? region : "";
-+  mozilla::intl::sCamouLocale = locale ? locale : "";
++// mozjs_set_camou_locale sets this thread's default locale; an empty or null
++// locale restores ICU's.
++extern "C" MOZ_EXPORT void mozjs_set_camou_locale(const char* locale) {
++  mozilla::intl::sEmbeddingDefaultLocale = locale ? locale : "";
 +}
 +
 +namespace mozilla::intl {
@@ -88,76 +64,22 @@ index 718d8814d8513..588e9218c3705 100644
  template <typename CharT>
  bool IsStructurallyValidLanguageTag(Span<const CharT> aLanguage) {
    // unicode_language_subtag = alpha{2,3} | alpha{5,8};
-diff --git a/intl/components/src/Locale.h b/intl/components/src/Locale.h
-index b7314ec5f6920..2ec172d5393ec 100644
+diff -ruN a/intl/components/src/Locale.h b/intl/components/src/Locale.h
 --- a/intl/components/src/Locale.h
 +++ b/intl/components/src/Locale.h
-@@ -208,8 +208,11 @@ class MOZ_STACK_CLASS Locale final {
- 
-  private:
-   LanguageSubtag mLanguage = {};
-+  mutable LanguageSubtag mCamouLanguage = {};
-   ScriptSubtag mScript = {};
-+  mutable ScriptSubtag mCamouScript = {};
-   RegionSubtag mRegion = {};
-+  mutable RegionSubtag mCamouRegion = {};
- 
-   VariantsVector mVariants;
-   ExtensionsVector mExtensions;
-@@ -338,9 +341,28 @@ class MOZ_STACK_CLASS Locale final {
-     }
-   };
- 
--  const LanguageSubtag& Language() const { return mLanguage; }
--  const ScriptSubtag& Script() const { return mScript; }
--  const RegionSubtag& Region() const { return mRegion; }
-+  const LanguageSubtag& Language() const {
-+    if (const char* lang = GetCamouLanguage()) {
-+      mCamouLanguage.Set(mozilla::Span<const char>(lang, strlen(lang)));
-+      return mCamouLanguage;
-+    }
-+    return mLanguage;
-+  }
-+  const ScriptSubtag& Script() const {
-+    if (const char* script = GetCamouScript()) {
-+      mCamouScript.Set(mozilla::Span<const char>(script, strlen(script)));
-+      return mCamouScript;
-+    }
-+    return mScript;
-+  }
-+  const RegionSubtag& Region() const {
-+    if (const char* region = GetCamouRegion()) {
-+      mCamouRegion.Set(mozilla::Span<const char>(region, strlen(region)));
-+      return mCamouRegion;
-+    }
-+    return mRegion;
-+  }
-+
-   auto Variants() const { return SubtagEnumeration(mVariants); }
-   auto Extensions() const { return SubtagEnumeration(mExtensions); }
-   Maybe<Span<const char>> PrivateUse() const {
-@@ -518,7 +540,15 @@ class MOZ_STACK_CLASS Locale final {
+@@ -512,7 +512,7 @@
     *
     * Also see <https://unicode-org.github.io/icu/userguide/locale>.
     */
 -  static const char* GetDefaultLocale() { return uloc_getDefault(); }
 +  static const char* GetDefaultLocale();
-+
-+  static const char* GetCamouLocale();
-+
-+  static const char* GetCamouLanguage();
-+
-+  static const char* GetCamouRegion();
-+
-+  static const char* GetCamouScript();
  
    /**
     * Returns an iterator over all supported locales.
-diff --git a/js/src/build/moz.build b/js/src/build/moz.build
-index 2d5343a58ef44..fa9821710f74f 100644
+diff -ruN a/js/src/build/moz.build b/js/src/build/moz.build
 --- a/js/src/build/moz.build
 +++ b/js/src/build/moz.build
-@@ -50,6 +50,7 @@ if CONFIG["JS_HAS_INTL_API"]:
+@@ -50,6 +50,7 @@
  
  USE_LIBS += [
      "fdlibm",
@@ -165,11 +87,10 @@ index 2d5343a58ef44..fa9821710f74f 100644
      "nspr",
  ]
  
-diff --git a/js/src/jsapi.cpp b/js/src/jsapi.cpp
-index 6df2fc69cd79c..8a26b8c2f698e 100644
+diff -ruN a/js/src/jsapi.cpp b/js/src/jsapi.cpp
 --- a/js/src/jsapi.cpp
 +++ b/js/src/jsapi.cpp
-@@ -4903,7 +4903,9 @@ static bool GetScriptedCallerActivationRealmFast(JSContext* cx,
+@@ -4946,7 +4946,9 @@
    } else if (activationIter->isInterpreter()) {
      InterpreterActivation* act = activationIter->asInterpreter();
      for (InterpreterFrameIterator iter(act); !iter.done(); ++iter) {
@@ -180,11 +101,10 @@ index 6df2fc69cd79c..8a26b8c2f698e 100644
          *activation = act;
          *realm = iter.frame()->script()->realm();
          return true;
-diff --git a/js/src/vm/FrameIter.cpp b/js/src/vm/FrameIter.cpp
-index 796b6c659bbf1..71a7ec0227ef5 100644
+diff -ruN a/js/src/vm/FrameIter.cpp b/js/src/vm/FrameIter.cpp
 --- a/js/src/vm/FrameIter.cpp
 +++ b/js/src/vm/FrameIter.cpp
-@@ -10,6 +10,7 @@
+@@ -8,6 +8,7 @@
  #include <stddef.h>  // size_t
  #include <stdint.h>  // uint8_t, uint32_t
  #include <stdlib.h>  // getenv
@@ -192,7 +112,7 @@ index 796b6c659bbf1..71a7ec0227ef5 100644
  
  #include "jit/BaselineFrame.h"   // js::jit::BaselineFrame
  #include "jit/JitFrames.h"       // js::jit::EnsureUnwoundJitExitFrame
-@@ -103,6 +104,15 @@ void JitFrameIter::skipNonScriptedJSFrames() {
+@@ -102,6 +103,15 @@
    }
  }
  
@@ -208,7 +128,7 @@ index 796b6c659bbf1..71a7ec0227ef5 100644
  bool JitFrameIter::isSelfHostedIgnoringInlining() const {
    MOZ_ASSERT(!done());
  
-@@ -110,7 +120,7 @@ bool JitFrameIter::isSelfHostedIgnoringInlining() const {
+@@ -109,7 +119,7 @@
      return false;
    }
  
@@ -217,7 +137,7 @@ index 796b6c659bbf1..71a7ec0227ef5 100644
  }
  
  JS::Realm* JitFrameIter::realm() const {
-@@ -1039,7 +1049,7 @@ bool js::SelfHostedFramesVisible() {
+@@ -1050,7 +1060,7 @@
  
  void NonBuiltinFrameIter::settle() {
    if (!SelfHostedFramesVisible()) {
@@ -226,7 +146,7 @@ index 796b6c659bbf1..71a7ec0227ef5 100644
        FrameIter::operator++();
      }
    }
-@@ -1047,7 +1057,7 @@ void NonBuiltinFrameIter::settle() {
+@@ -1058,7 +1068,7 @@
  
  void NonBuiltinScriptFrameIter::settle() {
    if (!SelfHostedFramesVisible()) {
@@ -235,11 +155,10 @@ index 796b6c659bbf1..71a7ec0227ef5 100644
        ScriptFrameIter::operator++();
      }
    }
-diff --git a/js/src/vm/GlobalObject.cpp b/js/src/vm/GlobalObject.cpp
-index 169df198681a4..2c48f5252c5a7 100644
+diff -ruN a/js/src/vm/GlobalObject.cpp b/js/src/vm/GlobalObject.cpp
 --- a/js/src/vm/GlobalObject.cpp
 +++ b/js/src/vm/GlobalObject.cpp
-@@ -63,6 +63,7 @@
+@@ -59,6 +59,7 @@
  #include "vm/DateObject.h"
  #include "vm/EnvironmentObject.h"
  #include "vm/ErrorObject.h"
@@ -247,7 +166,7 @@ index 169df198681a4..2c48f5252c5a7 100644
  #include "vm/GeneratorObject.h"
  #include "vm/JSContext.h"
  #include "vm/NumberObject.h"
-@@ -491,6 +492,45 @@ bool GlobalObject::resolveConstructor(JSContext* cx,
+@@ -486,6 +487,45 @@
    return true;
  }
  
@@ -293,11 +212,10 @@ index 169df198681a4..2c48f5252c5a7 100644
  // Resolve a "globalThis" self-referential property if necessary,
  // per a stage-3 proposal. https://github.com/tc39/ecma262/pull/702
  //
-diff --git a/js/src/vm/GlobalObject.h b/js/src/vm/GlobalObject.h
-index 8e70f6e33901e..35800f043223d 100644
+diff -ruN a/js/src/vm/GlobalObject.h b/js/src/vm/GlobalObject.h
 --- a/js/src/vm/GlobalObject.h
 +++ b/js/src/vm/GlobalObject.h
-@@ -345,10 +345,14 @@ class GlobalObject : public NativeObject {
+@@ -345,10 +345,14 @@
                                   JSProtoKey key, IfClassIsDisabled mode);
  
   public:
@@ -313,7 +231,7 @@ index 8e70f6e33901e..35800f043223d 100644
      }
      return resolveConstructor(cx, global, key, IfClassIsDisabled::Throw);
    }
-@@ -725,6 +729,9 @@ class GlobalObject : public NativeObject {
+@@ -725,6 +729,9 @@
                                             Handle<GlobalObject*> global,
                                             ProtoKind kind, Handle<JSAtom*> tag,
                                             ObjectInitWithTagOp init) {
