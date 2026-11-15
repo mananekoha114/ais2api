@@ -4,7 +4,6 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-#include "ais2api/browser.hpp"
 #include "ais2api/config.hpp"
 #include "ais2api/proxy.hpp"
 #include "ais2api/retry_policy.hpp"
@@ -239,25 +238,7 @@ TEST_CASE("the relay reports an unreachable upstream proxy", "[proxy][relay]") {
     CHECK(relay.last_error() == "The connection to the upstream proxy failed");
 }
 
-TEST_CASE("navigation failures separate proxy and network faults from account faults", "[proxy]") {
-    using browser_detail::navigation_failure;
-    CHECK_FALSE(navigation_failure("", true));
-    CHECK_FALSE(navigation_failure("net::ERR_ABORTED", true));
-    for (auto text : {"net::ERR_NO_SUPPORTED_PROXIES", "net::ERR_PROXY_CONNECTION_FAILED", "net::ERR_TUNNEL_CONNECTION_FAILED",
-                      "net::ERR_SOCKS_CONNECTION_FAILED", "net::ERR_PROXY_AUTH_UNSUPPORTED"}) {
-        auto failure = navigation_failure(text, true);
-        REQUIRE(failure); CHECK(failure->code == "proxy_failed"); CHECK(failure->status == 502);
-        CHECK(classify_failure(*failure, 0, false).action == FailureAction::fail);
-    }
-    CHECK(navigation_failure("net::ERR_INVALID_AUTH_CREDENTIALS", true)->code == "proxy_failed");
-    CHECK_FALSE(navigation_failure("net::ERR_INVALID_AUTH_CREDENTIALS", false));
-    for (auto text : {"net::ERR_NAME_NOT_RESOLVED", "net::ERR_INTERNET_DISCONNECTED", "net::ERR_CONNECTION_RESET",
-                      "net::ERR_CERT_AUTHORITY_INVALID", "net::ERR_SSL_PROTOCOL_ERROR"}) {
-        auto failure = navigation_failure(text, false);
-        REQUIRE(failure); CHECK(failure->code == "network_failed");
-        // Retried as a transient upstream problem; never an account cooldown.
-        CHECK(classify_failure(*failure, 0, false).action == FailureAction::retry_same);
-    }
+TEST_CASE("unsupported proxy authentication fails without retrying", "[proxy]") {
     CHECK(classify_failure(Error(503, "proxy_auth_unsupported", "x"), 0, false).action == FailureAction::fail);
 }
 

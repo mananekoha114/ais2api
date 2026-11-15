@@ -274,12 +274,12 @@ TEST_CASE("the Camoufox gateway needs the fpgen model and Camoufox", "[camoufox]
     INFO(launch);
     CHECK(launch.starts_with("browser_not_configured: Camoufox "));
     CHECK(launch.find("is missing beside the executable") != std::string::npos);
-    // CloakBrowser's executable is not Camoufox: the backend looks for the
-    // build setup installs instead.
+    // Non-Camoufox executables are rejected: the backend looks for the
+    // installed Camoufox build instead.
     config.browser_executable = directory.path / "chrome.exe";
     write(config.browser_executable, "");
-    CamoufoxGateway chromium(config, store);
-    CHECK(failure([&] { chromium.verify_runtime(); }) == "browser_not_configured: Camoufox is not installed: run ais2api setup");
+    CamoufoxGateway non_camoufox(config, store);
+    CHECK(failure([&] { non_camoufox.verify_runtime(); }) == "browser_not_configured: Camoufox is not installed: run ais2api setup");
     config.browser_executable = directory.path / "missing" / "camoufox.exe";
     CamoufoxGateway missing(config, store);
     CHECK(failure([&] { missing.verify_runtime(); }).starts_with("browser_not_configured: browser_executable names a Camoufox"));
@@ -287,7 +287,7 @@ TEST_CASE("the Camoufox gateway needs the fpgen model and Camoufox", "[camoufox]
     CHECK(string_or(gateway.diagnostics(), "backend") == "camoufox");
 }
 
-TEST_CASE("Camoufox browser logs are log sources like Chromium ones", "[camoufox]") {
+TEST_CASE("Camoufox browser logs are included in log sources", "[camoufox]") {
     Directory directory;
     fs::create_directories(directory.path / "logs");
     write(directory.path / "logs" / "browser-1.log", "a");

@@ -59,9 +59,15 @@ function harness(options = {}) {
       }), { status: options.httpStatus || 200, headers: options.retryAfter ? { 'retry-after': options.retryAfter } : {} });
     }
   });
-  vm.runInContext(fs.readFileSync(__dirname + '/bridge.js', 'utf8'), context, { filename: 'bridge.js' });
+  let bridge = null;
+  vm.runInContext(
+    '(function(publish) {\n' + fs.readFileSync(__dirname + '/bridge.js', 'utf8') + '\n})',
+    context,
+    { filename: 'bridge.js' }
+  )(published => { bridge = published; });
+  assert.ok(bridge, 'bridge must publish its handle via the preload callback');
+  assert.equal('__ais2bridge' in context, false);
   context.install();
-  const bridge = context.__ais2bridge;
   async function capture() {
     const response = await context.fetch('https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent', { method: 'POST', headers: { 'content-type': 'application/json+protobuf', 'x-goog-api-key': 'test-key-never-real', authorization: 'SAPISIDHASH synthetic-captured', ...options.captureHeaders }, body: '["real-captured-template",null,null,null,"ticket:bootstrap"]' });
     assert.equal(await response.text(), '[]');
@@ -682,7 +688,7 @@ test('next waits at most its limit on a stalled stream and wakes on abort', asyn
   h.bridge.dispose();
 });
 
-test('generation prefers native CDP authentication and rebuilds the verified account header', async () => {
+test('generation prefers native cookie authentication and rebuilds the verified account header', async () => {
   let sent;
   const h = harness({ observeFetch: (_url, init) => { sent = init; } });
   await h.capture();
@@ -911,4 +917,30 @@ test('a body upload is used once and never mixes pieces from another upload', as
   h.bridge.abort(); await waitDone(h);
   assert.throws(() => h.bridge.start({ upload: 'upload-6' }), /upload missing/, 'an upload is consumed by start');
   h.bridge.dispose();
+});
+
+test('preload bridge is a no-op without a publish callback and in subframes', () => {
+  const source = fs.readFileSync(__dirname + '/bridge.js', 'utf8');
+  const makeContext = extra => vm.createContext({
+    fetch: () => Promise.resolve(new Response('[]')),
+    XMLHttpRequest: class {},
+    setInterval: () => { throw new Error('must not install timers'); },
+    clearInterval() {},
+    setTimeout, clearTimeout,
+    location: { href: 'https://aistudio.google.com/', origin: 'https://aistudio.google.com', hostname: 'aistudio.google.com' },
+    document: { cookie: '', readyState: 'complete', querySelector: () => null, querySelectorAll: () => [] },
+    ...extra
+  });
+
+  const plain = makeContext();
+  const before = Object.getOwnPropertyNames(plain).sort();
+  vm.runInContext(source, plain, { filename: 'bridge.js' });
+  assert.equal('__ais2bridge' in plain, false);
+  assert.deepEqual(Object.getOwnPropertyNames(plain).sort(), before);
+
+  let published = null;
+  const subframe = makeContext({ top: {} });
+  vm.runInContext('(function(publish) {\n' + source + '\n})', subframe, { filename: 'bridge.js' })(v => { published = v; });
+  assert.equal(published, null);
+  assert.equal('__ais2bridge' in subframe, false);
 });
