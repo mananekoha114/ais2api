@@ -6,6 +6,7 @@
 
 #include "ais2api/store.hpp"
 #include "ais2api/backend_router.hpp"
+#include "ais2api/console.hpp"
 #include "ais2api/pricing.hpp"
 #include "ais2api/region.hpp"
 #include "ais2api/runtime.hpp"
@@ -514,6 +515,7 @@ fs::path secured(const fs::path &directory) {
 } // namespace
 struct Store::Impl : Database {
     fs::path directory;
+    std::size_t migrated_cloakbrowser = 0;
     // Request history, price caches and discovered model catalogs. Kept apart
     // from accounts and credentials; see init_usage().
     std::unique_ptr<Database> usage;
@@ -521,6 +523,16 @@ struct Store::Impl : Database {
         : Database(secured(directory) / "state.sqlite3", "state", init_state),
           directory(directory),
           usage(std::make_unique<Database>(directory / "usage.sqlite3", "usage", init_usage)) {
+        migrated_cloakbrowser = run([&] {
+            Statement migrate(db, "UPDATE fingerprints SET backend='auto' WHERE backend='cloakbrowser'");
+            migrate.row();
+            return static_cast<std::size_t>(sqlite3_changes(db));
+        });
+        if (migrated_cloakbrowser > 0)
+            console::emit_record({{"event", "backend_migrated"},
+                                  {"from", "cloakbrowser"},
+                                  {"to", "auto"},
+                                  {"count", migrated_cloakbrowser}});
         if (run([&] { return has_table(db, "request_history"); })) {
             // Each step commits on its own and is safe to repeat after a crash;
             // the state tables are dropped only after the copy is complete.
@@ -1649,7 +1661,7 @@ BrowserFingerprint Store::regenerate_fingerprint(std::string_view id) {
     return impl_->run([&] {
         const auto previous = read_fingerprint(impl_->db, id);
         auto next = previous;
-        // Same 10000..99999 range CloakBrowser uses for its own random seeds.
+        // Random 5-digit seed (10000..99999) for per-account browser identity generation.
         while (next.seed == previous.seed)
             next.seed = 10000 + static_cast<unsigned>(std::stoul(random_hex(4), nullptr, 16) % 90000);
         Statement s(impl_->db, "UPDATE fingerprints SET seed=?,firefox='' WHERE account=?");
@@ -1787,6 +1799,7 @@ std::size_t Store::adopt_backends(std::string_view backend) {
         return static_cast<std::size_t>(sqlite3_changes(impl_->db));
     });
 }
+std::size_t Store::migrated_cloakbrowser_backends() const { return impl_->migrated_cloakbrowser; }
 std::vector<std::string> Store::stored_backends() {
     return impl_->run([&] {
         std::vector<std::string> result;
@@ -1805,7 +1818,12 @@ std::vector<std::string> stored_backends(const fs::path &directory) {
         sqlite3_busy_timeout(db, 5000);
         try {
             Statement s(db, stored_backends_query);
-            while (s.row()) result.push_back(s.str(0));
+            while (s.row()) {
+                auto backend = s.str(0);
+                if (backend == "cloakbrowser") backend = "auto";
+                if (std::find(result.begin(), result.end(), backend) == result.end())
+                    result.push_back(std::move(backend));
+            }
         } catch (const Error &) {
             // A database from before per-account backends: every account is unsettled.
             result = {""};

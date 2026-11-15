@@ -118,13 +118,13 @@ Arguments parse_arguments(int argc, char **argv) {
 }
 
 void help() {
-    std::cout << "ais2api: Chromium/CDP Gemini and OpenAI gateway\n\n"
+    std::cout << "ais2api: Gemini and OpenAI gateway (Firefox / SpiderMonkey)\n\n"
                  "Commands:\n"
                  "  init | serve | start | stop | status | setup [--backend BACKEND] | doctor\n"
                  "  browser update [BACKEND] | browser rollback [BACKEND]\n"
                  "  accounts list | import (--file PATH | --stdin) [--name NAME]\n"
                  "  accounts select ID | remove ID | reset ID | probe (ID | all)\n"
-                 "  accounts backend (ID | --all) (cloakbrowser | auto | camoufox | spidermonkey) [--yes]\n"
+                 "  accounts backend (ID | --all) (auto | camoufox | spidermonkey)\n"
                  "  keys list (edit api_key in config.json to set or rotate)\n"
                  "  stats | diagnostics | models list | config show | config validate | config reload\n"
                  "  operations status ID\n\n"
@@ -134,8 +134,7 @@ void help() {
                  "  --request-bytes N --object-bytes N --relay-bytes N --queue-size N\n"
                  "  --queue-seconds N --generation-seconds N --stream-idle-seconds N\n"
                  "  --max-attempts N\n"
-                 "setup/browser update accept --yes to approve required system package changes;\n"
-                 "accounts backend needs --yes to move accounts between CloakBrowser and Firefox.\n"
+                 "setup/browser update accept --yes to approve required system package changes.\n"
                  "All non-help results are JSON. Set api_key in config.json; secrets are never printed.\n";
 }
 
@@ -335,8 +334,8 @@ json::object execute(Arguments args) {
             if (p.size() == 3)
                 backend = p[2];
         }
-        if (!backend.empty() && backend != "cloakbrowser" && backend != "camoufox" && backend != "spidermonkey")
-            usage_error("The browser backend must be cloakbrowser, camoufox or spidermonkey");
+        if (!backend.empty() && backend != "camoufox" && backend != "spidermonkey")
+            usage_error("The browser backend must be camoufox or spidermonkey");
         require_offline(config);
         InstanceLock lock(config.data_dir);
         if (command == "browser" && p[1] == "rollback")

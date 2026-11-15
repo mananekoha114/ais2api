@@ -64,19 +64,12 @@ json::object runtime_part(const json::object &doctor) {
     if (auto needed = doctor.if_contains("backends_needed"); needed && needed->is_array()) {
         json::array backends;
         for (const auto &backend : needed->as_array())
-            if (backend == "cloakbrowser" || backend == "camoufox" || backend == "spidermonkey")
+            if (backend == "camoufox" || backend == "spidermonkey")
                 backends.push_back(backend);
         out["backends_needed"] = std::move(backends);
     }
     if (auto deprecations = doctor.if_contains("deprecations"); deprecations && deprecations->is_array()) {
-        json::array known;
-        for (const auto &item : deprecations->as_array()) {
-            if (!item.is_object() || string_or(item.as_object(), "code") != "cloakbrowser_backend") continue;
-            json::object entry{{"code", "cloakbrowser_backend"}};
-            copy(entry, item.as_object(), {"default_backend", "accounts"});
-            known.push_back(std::move(entry));
-        }
-        out["deprecations"] = std::move(known);
+        out["deprecations"] = json::array{};
     }
     if (auto model = object_at(doctor, "fpgen_model")) {
         json::object fpgen;
@@ -139,7 +132,7 @@ json::object browser_part(const json::object &diagnostics) {
 json::object config_part(const Config &config) {
     const auto source = config.to_json();
     json::object out;
-    copy(out, source, {"browser_backend", "headless", "browser_proxy_relay", "browser_site_isolation",
+    copy(out, source, {"browser_backend", "headless", "browser_proxy_relay",
                        "browser_idle_seconds", "continuation_retry_enabled", "ignore_unsupported_parameters",
                        "search_model_drop_functions", "request_retention_days", "cookie_import_max_accounts",
                        "cookie_import_timeout_seconds"});
@@ -187,8 +180,7 @@ json::object safe_report(const DiagnosticsSources &sources) {
             out["backend"] = *backend;
         if (auto effective = account.if_contains("effective_backend");
             effective && effective->is_string() &&
-            (effective->as_string() == "cloakbrowser" || effective->as_string() == "camoufox" ||
-             effective->as_string() == "spidermonkey"))
+            (effective->as_string() == "camoufox" || effective->as_string() == "spidermonkey"))
             out["effective_backend"] = *effective;
         json::array cooldowns;
         if (auto failures = account.if_contains("failures"); failures && failures->is_array())

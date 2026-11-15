@@ -74,8 +74,9 @@ TEST_CASE("loading a partial configuration fills defaults, preserves values and 
     CHECK(persisted.at("limits").at("max_continuation_retries") == 1);
     CHECK(persisted.at("browser_idle_seconds") == 0);
     CHECK(persisted.at("browser_proxy_relay") == false);
-    CHECK(persisted.at("browser_remote_allow_origins") == false);
-    CHECK(persisted.at("browser_site_isolation") == true);
+    CHECK(persisted.at("browser_backend") == "camoufox");
+    CHECK_FALSE(persisted.contains("browser_remote_allow_origins"));
+    CHECK_FALSE(persisted.contains("browser_site_isolation"));
     CHECK(persisted.at("port") == 19000);
     CHECK(persisted.at("data_dir") == "relative-data");
     CHECK(persisted.at("browser_executable") == "");

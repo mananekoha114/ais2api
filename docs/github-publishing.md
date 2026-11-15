@@ -20,7 +20,7 @@
 
 ## 容器镜像
 
-`.github/workflows/docker.yml` 在 amd64 与 arm64 原生 runner 上构建镜像并运行冒烟测试，推送到 `main`、标签或手动触发时发布 `linux/amd64` 与 `linux/arm64` 的 multi-arch manifest 到 `ghcr.io/mananekoha114/ais2api`。镜像只包含 Debian Chromium，不包含 CloakBrowser，见 [Docker 部署](docker.md)。
+`.github/workflows/docker.yml` 在 amd64 与 arm64 原生 runner 上构建镜像并运行冒烟测试，推送到 `main`、标签或手动触发时发布 `linux/amd64` 与 `linux/arm64` 的 multi-arch manifest 到 `ghcr.io/mananekoha114/ais2api`。运行时浏览器（Camoufox）在第一次启动时下载到数据卷，不打入公共镜像，见 [Docker 部署](docker.md)。
 
 ## 发布二进制
 
@@ -28,7 +28,6 @@
 2. 为发布提交打标签，上传与该提交一致的 CI 运行包（ZIP / TGZ）及其 SHA-256 旁文件。不要上传本机 `.tools/` 或 `data/runtime/` 目录。
 3. 上传前运行 `python scripts/check-package.py PATH_TO_ARCHIVE` 检查清单和摘要，并确认附件中没有 Cookie 或个人数据。
 4. MPL 覆盖的二进制须提供对应源码的获取方式：GitHub Release 应指向同一标签的源码并保留自动生成的源码归档，发行说明中写明对应的标签或提交，不能只发布二进制。
-5. 运行包中保留 `LICENSE`、`NOTICE`、`THIRD_PARTY_NOTICES.md` 与依赖版权文件。浏览器与系统包的许可不因本项目而改变。
-6. **不要**把 `Browser-Local` 包作为公开发行附件上传：其中的 CloakBrowser 二进制许可只允许个人和内部使用，见 [第三方说明](../THIRD_PARTY_NOTICES.md)。
+5. 运行包中保留 `LICENSE`、`NOTICE`、`THIRD_PARTY_NOTICES.md` 与依赖版权文件。依赖库的许可不因本项目而改变。
 
 本清单只是本项目的操作流程，MPL 条款以仓库中的完整许可与 [Mozilla 官方文本](https://www.mozilla.org/MPL/2.0/) 为准。2026-10-20 首次上传前的范围与归属审查见 [报告](reports/publication-audit-2026-10-20.md)。

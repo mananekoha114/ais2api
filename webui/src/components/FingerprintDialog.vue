@@ -1,8 +1,8 @@
 <script setup lang="ts">
-// Per-account browser identity: a permanent seed, from which both the
-// CloakBrowser fingerprint and the Firefox identity derive, the browser backend
-// that presents it, plus timezone and language, which follow this computer
-// unless overridden. Changes apply the next time the account is used.
+// Per-account browser identity: a permanent seed generating the Firefox
+// identity, the Firefox backend that presents it, plus timezone and language,
+// which follow this computer unless overridden. Changes apply the next time
+// the account is used.
 import { computed, ref, watch } from 'vue'
 import FDialog from './FDialog.vue'
 import FIcon from './FIcon.vue'
@@ -11,7 +11,7 @@ import ProgressRing from './ProgressRing.vue'
 import { api, describeError, enc } from '../api/client'
 import type { Account, AccountBackend, FingerprintView } from '../api/types'
 import { notify } from '../stores/ui'
-import { backendIdentity, backendLabel } from '../utils/accounts'
+import { backendLabel } from '../utils/accounts'
 import { formatTimestamp } from '../utils/format'
 
 const props = defineProps<{ account: Account | null }>()
@@ -26,12 +26,11 @@ const timezoneMode = ref<'auto' | 'custom'>('auto')
 const timezone = ref('')
 const localeMode = ref<'auto' | 'custom'>('auto')
 const locale = ref('')
-const backend = ref<AccountBackend>('cloakbrowser')
+const backend = ref<AccountBackend>('auto')
 const confirmingRegenerate = ref(false)
 
 // SpiderMonkey is only offered by a build that includes it.
 const BACKENDS = computed<{ value: AccountBackend; label: string; hint: string; disabled?: boolean }[]>(() => [
-  { value: 'cloakbrowser', label: 'CloakBrowser', hint: 'Chrome 身份。已弃用，将在以后的版本中移除' },
   {
     value: 'auto',
     label: '自动',
@@ -94,8 +93,6 @@ const desired = computed(() => ({
 const regionDirty = computed(() => !!view.value && (desired.value.timezone !== view.value.timezone || desired.value.locale !== view.value.locale))
 const backendDirty = computed(() => !!view.value && backend.value !== view.value.backend)
 const dirty = computed(() => regionDirty.value || backendDirty.value)
-// Chrome and Firefox identities are different devices to Google.
-const identityChange = computed(() => !!view.value && backendDirty.value && backendIdentity(backend.value) !== view.value.identity)
 
 async function save() {
   if (!dirty.value || !timezoneValid.value || !localeValid.value) return
@@ -105,7 +102,7 @@ async function save() {
     const switching = backendDirty.value
     const body: Record<string, unknown> = {}
     if (regionDirty.value) Object.assign(body, { timezone: desired.value.timezone || null, locale: desired.value.locale || null })
-    if (switching) Object.assign(body, { backend: backend.value, confirm_identity_change: identityChange.value })
+    if (switching) Object.assign(body, { backend: backend.value })
     adopt(await api.patch<FingerprintView>(path.value, body))
     notify('success', switching ? '浏览器指纹与后端已保存' : '浏览器时区与语言已保存', '下次使用该账号时生效。')
     emit('changed')
@@ -134,13 +131,13 @@ async function regenerate() {
 
 const platformLabel = (platform: string | undefined) =>
   platform === 'macos' ? 'macOS' : platform === 'windows' ? 'Windows' : platform === 'linux' ? 'Linux' : platform ?? '—'
-const identityLabel = (identity: string | undefined) => (identity === 'firefox' ? 'Firefox' : identity === 'chrome' ? 'Chrome' : '—')
+const identityLabel = (identity: string | undefined) => (identity === 'firefox' ? 'Firefox' : '—')
 </script>
 
 <template>
   <FDialog v-model:open="open" title="浏览器指纹" :width="540" :dismissible="!saving">
     <p class="t-secondary">
-      每个账号拥有固定的浏览器指纹，让 Google 始终看到同一台设备。浏览器后端决定它以 Chrome 还是 Firefox 身份出现；时区和语言默认跟随本机地区设置。
+      每个账号拥有固定的 Firefox 浏览器指纹，让 Google 始终看到同一台设备；时区和语言默认跟随本机地区设置。
     </p>
     <FInfoBar v-if="error" severity="error" :message="error" />
     <div v-if="loading" class="stack" style="--gap: 8px">
@@ -182,21 +179,13 @@ const identityLabel = (identity: string | undefined) => (identity === 'firefox' 
             {{ option.label }}
           </button>
         </div>
+        <span class="hint">{{ BACKENDS.find((option) => option.value === backend)?.hint }}</span>
         <FInfoBar
-          v-if="identityChange"
-          severity="warning"
-          :title="backendIdentity(backend) === 'firefox' ? '换成 Firefox 身份？' : '换回 Chrome 身份？'"
-          message="Google 会把该账号视为在一台新设备上登录，可能触发额外的安全验证。保存即确认切换。"
+          v-if="backend === 'auto' && view.backend_switched_until"
+          severity="info"
+          :title="`已临时切换至 ${backendLabel(view.effective_backend)}`"
+          :message="`原后端重复返回 403，当前账号在 ${formatTimestamp(view.backend_switched_until)} 前临时使用 ${backendLabel(view.effective_backend)}。手动改选后端、清除冷却或重置账号会提前解除。`"
         />
-        <template v-else>
-          <span class="hint">{{ BACKENDS.find((option) => option.value === backend)?.hint }}</span>
-          <FInfoBar
-            v-if="backend === 'auto' && view.backend_switched_until"
-            severity="info"
-            :title="`已临时切换至 ${backendLabel(view.effective_backend)}`"
-            :message="`原后端重复返回 403，当前账号在 ${formatTimestamp(view.backend_switched_until)} 前临时使用 ${backendLabel(view.effective_backend)}。手动改选后端、清除冷却或重置账号会提前解除。`"
-          />
-        </template>
       </fieldset>
 
       <fieldset class="field">
@@ -289,7 +278,7 @@ const identityLabel = (identity: string | undefined) => (identity === 'firefox' 
 
     <template #footer>
       <button class="btn accent" :disabled="!dirty || !timezoneValid || !localeValid || saving" @click="save">
-        <ProgressRing v-if="saving && !confirmingRegenerate" class="on-accent" />{{ identityChange ? '确认切换并保存' : '保存' }}
+        <ProgressRing v-if="saving && !confirmingRegenerate" class="on-accent" />保存
       </button>
       <button class="btn" :disabled="saving" @click="open = false">关闭</button>
     </template>

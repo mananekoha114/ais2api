@@ -1,12 +1,10 @@
 # Firefox 后端迁移计划
 
-状态截至 2026-11-06。本文记录从 CloakBrowser 迁移到 Firefox 系后端的已定决策、分阶段计划和待实测事项。P1 Camoufox 原型已在 Windows 上完成验证，结果见 [原型报告](reports/camoufox-prototype-2026-11-06.md)。
+本文记录项目采用双 Firefox 系后端（Camoufox 与 SpiderMonkey）并移除 CloakBrowser 的架构决策、分阶段计划和验证情况。P1 Camoufox 原型已在 Windows 上完成验证，结果见 [原型报告](reports/camoufox-prototype-2026-11-06.md)。
 
 ## 背景
 
-- 当前锁定 CloakBrowser `146.0.7680.177.4`。上游从 148 起的版本都是 Pro 构建：GitHub Release 只提供校验文件，浏览器要用许可证密钥从 cloakbrowser.dev 下载，启动、心跳和关闭时都会连接授权服务器。免费密钥只有 1 个并发会话，服务器总是给免费密钥发最新版。
-- 新授权方式与本项目冲突：无法锁定 SHA-256；Windows 关闭 Job Object、POSIX 发送 SIGTERM 后很快 SIGKILL，浏览器来不及释放会话，被强制结束的会话约 4 分钟后才自动释放，期间重启浏览器会被拒绝；二进制要求 `~/.cloakbrowser` 可写，与便携目录的约定冲突。
-- `146.0.7680.177.5` 是最后一个无需密钥的版本，只有 Windows x64 和 Linux x64。本项目不再升级 CloakBrowser，[v0.1.0](https://github.com/mananekoha114/ais2api/releases/tag/v0.1.0) 是最后一个使用 CloakBrowser 的版本。
+- 本项目早期锁定 CloakBrowser `146.0.7680.177.4`。上游从 148 起改为需要许可证密钥与授权服务器的 Pro 构建，与本项目的 SHA-256 锁定、便携目录和进程关闭生命周期冲突；[v0.1.0](https://github.com/mananekoha114/ais2api/releases/tag/v0.1.0) 是最后一个使用 CloakBrowser 的版本。现已全面移除 CloakBrowser，改为 Firefox 系后端。
 - [AIStudio2API](https://github.com/Mag1cFall/AIStudio2API)（MIT）已经在 AI Studio 上实际使用两条 Firefox 路线：在进程内的 SpiderMonkey 中运行 WAA（BotGuard）并直接发送 HTTP 请求，以及通过 WebDriver BiDi 驱动 Camoufox。本计划的 SpiderMonkey 后端以它为参考。
 
 ## 目标
@@ -26,10 +24,9 @@
 - **共用身份**：每个账号只有一份 Firefox 身份，两种后端共用，并且声称同一个 Firefox 大版本。
 - **后端选择**：
   - 每个账号的后端设置为"自动 / Camoufox / SpiderMonkey"，命令行、管理 API 和 WebUI 的指纹对话框都能修改。
-  - "自动"使用默认后端；就地重建会话后仍是 403（Code 7）这类和 WAA 有关的失败时，这次请求换到另一种 Firefox 后端重试，之后该账号 6 小时内留在新后端。
-  - 手动指定后端时固定使用，不自动切换。
-  - 不会在 CloakBrowser（Chrome 身份）和 Firefox 后端之间自动切换。
-  - 新账号的默认后端在 P4 决定。SpiderMonkey 原型的对照实验没有完成（见下文“分阶段计划”），在此之前保持 Camoufox。
+  - "自动"使用默认后端（桌面与服务器为 Camoufox；包含 SpiderMonkey 引擎的 Termux 原生构建为 SpiderMonkey，免除 proot 容器）；就地重建会话后仍是 403（Code 7）这类和 WAA 有关的失败时，这次请求换到另一种已就绪的 Firefox 后端重试，之后该账号 6 小时内留在新后端。
+  - 手动指定 `camoufox` 或 `spidermonkey` 时固定使用，不自动切换。
+  - 桌面与服务器的新账号默认后端待 P4 对照实验完成后决定，目前仍以 Camoufox 为默认路由。
 - **模块边界**：新写的 SpiderMonkey WAA 运行时和 BiDi 客户端做成不依赖 `server`、`config`、`store` 的独立静态库。JS 宿主与对象结构表在构建时由 CMake 嵌入（与 `bridge.js` 相同），诊断信息显示其 SHA-256；运行时目录由调用方传入。这样以后的 Windows 桌面 App 和 Android App 可以直接使用。整个核心是否拆成库，在 App 立项时再定。
 - **并发**：第一版主线沿用"只常驻一个账号、请求排队"的调度方式。多账号并发在 SpiderMonkey 后端稳定后单独评估。
 
@@ -54,7 +51,7 @@
 - **生命周期**：
   - Firefox 升级时身份抽到的值保持不变，只更新浏览器标识中的版本号等字段。
   - 只有用户明确操作时才重新生成身份：重新生成指纹（命令行、管理 API、WebUI）会一并清除身份，下次启动按新种子生成。
-  - 已有账号从 CloakBrowser 指纹迁移到 Firefox 身份必须显式操作，不在后台自动迁移；迁移在 Google 看来等同于换了一台新设备。每个账号记住自己的后端（`cloakbrowser`、`auto`、`camoufox`、`spidermonkey`），配置项 `browser_backend` 只决定新账号的后端；在 CloakBrowser 与 Firefox 之间切换要确认（`accounts backend [--all] ... --yes`、管理 API 或 WebUI），见 [浏览器网关](browser.md#按账号选择后端)。
+  - 每个账号保存自己的后端（`auto`、`camoufox`、`spidermonkey`），配置项 `browser_backend` 固定为 `camoufox`；所有后端共用同一份 Firefox 身份和种子，可随时免确认切换。遗留数据库中的 `cloakbrowser` 记录会在首次打开时自动迁移为 `auto`。见 [浏览器网关](browser.md#按账号选择后端)。
 - **已知限制**：参考项目的 SpiderMonkey 宿主中 WebGL 返回 null，canvas 只有 2d 的空壳实现，图形表现无法与 Camoufox 完全一致。共用身份实际覆盖 navigator、屏幕、语言和时区。
 
 ## 版本策略
@@ -90,7 +87,7 @@
 ## Camoufox 后端
 
 - **平台顺序**：Windows → Linux x64（含 Docker）→ Termux → macOS（可暂缓）。
-- **显示模式**：Linux 上用 Xvfb 虚拟显示、以有界面模式运行，`setup` 负责安装 Xvfb。Termux 上用 Linux arm64 版，像现在的 CloakBrowser 一样跑在 proot Ubuntu 中，proot 内同样使用 Xvfb。Windows 上用无界面模式：P1 实测两种模式功能相同，无界面模式私有内存少约 270–300 MiB，也不弹出窗口；有界面模式只用于排查登录。
+- **显示模式**：Linux 上用 Xvfb 虚拟显示、以有界面模式运行，`setup` 负责安装 Xvfb。Termux 上使用 `camoufox` 后端时用 Linux arm64 版运行在 proot Ubuntu 中，proot 内同样使用 Xvfb（`auto` 在包含 SpiderMonkey 引擎的 Termux 构建上默认使用原生 SpiderMonkey，不创建 proot）。Windows 上用无界面模式：P1 实测两种模式功能相同，无界面模式私有内存少约 270–300 MiB，也不弹出窗口；有界面模式只用于排查登录。
 - **安装**：
   - **下载**：
     - 正式分发版由 `setup` 从 Camoufox 官方 GitHub Release 下载 `runtime-manifest.json` 锁定的版本，校验 SHA-256；
@@ -110,8 +107,8 @@
   - 开发版可以把 Camoufox 一起打包。
   - **Termux**：
     - Linux ARM64 版安装在 Termux 一侧，裁剪方式与 Linux 相同；
-    - 与 CloakBrowser 共用 proot 容器 `ais2api-browser`，`setup` 在容器内只安装缺少的包；
-    - 网关通过 `proot-distro login` 启动 Xvfb 和 Camoufox，把数据目录按原路径绑定进去。`proot-distro` 不传递宿主的环境变量，身份配置等都用 `--env` 传入，所以不需要 CloakBrowser 那样的启动脚本。
+    - 使用项目专属 proot 容器 `ais2api-browser`，`setup` 在容器内只安装缺少的包；
+    - 网关通过 `proot-distro login` 启动 Xvfb 和 Camoufox，把数据目录按原路径绑定进去。`proot-distro` 不传递宿主的环境变量，身份配置等都用 `--env` 传入。
 
 ## SpiderMonkey 后端
 
@@ -138,14 +135,12 @@ CMake 选项 `AIS2API_DEV_BUNDLE` 区分开发版与正式分发版，默认关�
 | 身份 | 本机生成（与正式版相同） | 本机生成 |
 | fpgen 模型 | 嵌入 | `setup` 下载 |
 | Camoufox | 一起打包，放在 `bin/camoufox-runtime/<版本>-<平台>/` | `setup` 下载 |
-| 新建配置的后端 | `camoufox` | `camoufox`（带 CloakBrowser 的 `Browser-Local` 包为 `cloakbrowser`） |
+| 新建配置的后端 | `camoufox` | `camoufox` |
 
 - 开发版支持 Windows x64（`build-dev.ps1`）和 Linux x64（`build-dev.sh`）。构建方法见 [构建与打包](platforms.md#构建开发版)。
 - 打包的 Camoufox 是刚构建的程序用 `setup` 安装后原样复制的，裁剪方式和归属标记都与 `setup` 的安装相同。只有它是锁定版本、且按本程序的规则裁剪时才使用。使用顺序：指向 Camoufox 的 `browser_executable`、打包版、`setup` 的安装。使用打包版时 `browser rollback` 不可用，要退回就换回上一个开发版包。
-- 已有的配置保持原来的后端：账号换成 Firefox 身份始终要显式操作。
 - 防止误发：`build.ps1` 和 `build.sh` 拒绝开启了该选项的构建目录；`check-package.py` 要求正式分发包里是正式版构建、且不含 Camoufox，开发版包用 `--dev` 检查。
 - 诊断信息、`/version`、`doctor` 和 WebUI 都显示构建模式（`build_mode`：`release` 或 `dev`）。
-- CloakBrowser 的 `Browser-Local` 包不能与开发版同时构建，它随 CloakBrowser 退役一起删除；打包 Camoufox 只用开发版。
 
 ## 合并标准与问题反馈
 
@@ -154,13 +149,10 @@ CMake 选项 `AIS2API_DEV_BUNDLE` 区分开发版与正式分发版，默认关�
   - 诊断信息和 WebUI 按后端分别统计 403（Code 7）、跳转登录页、认证冷却、403 冷却、登录失效、需要同意条款，以及就地重建会话和重启浏览器的次数，各给出总计、近 7 天和今天。计数存放在 `usage.sqlite3`，随用量统计一起重置。
   - 一键导出诊断报告（WebUI、`POST /diagnostics/export` 或 `ais2api diagnostics`），按白名单只取安全字段：不含 Cookie、邮箱、账号 ID、请求内容、本机路径和代理地址，账号按顺序编号，用户报告问题时附上。
 
-## CloakBrowser 退役
+## CloakBrowser 退役（已完成）
 
-1. 在 Camoufox 后端覆盖所有平台（包括 Termux）之前，CloakBrowser 保持 `146.0.7680.177.4` 不变。
-2. 覆盖之后的下一个版本把 CloakBrowser 标为弃用，并提供一条把账号显式迁移到 Firefox 身份的命令（`accounts backend --all auto --yes`，P2 已实现）。**已实现**：
-   - 新建的配置默认使用 `camoufox`；带有 CloakBrowser 的 `Browser-Local` 包新建的配置仍是 `cloakbrowser`。已有的配置和账号保持不变。
-   - 默认后端或有账号仍是 CloakBrowser 时，`doctor`、`/status`、`setup` 和诊断报告给出 `deprecations`，服务启动时写日志，WebUI 显示提示，见 [按账号选择后端](browser.md#按账号选择后端)。
-3. 再下一个版本删除 CloakBrowser 的全部代码与资料：`runtime-manifest.json` 中的浏览器条目、`Browser-Local` 打包、许可文件和相关文档。
+1. 在 Camoufox 后端覆盖所有平台（包括 Termux）后，先行版将 CloakBrowser 标为弃用并提供显式迁移命令。
+2. 当前版本已删除 CloakBrowser 与 CDP 的全部代码及打包：`runtime-manifest.json` 浏览器条目、`Browser-Local` 打包、`browser_remote_allow_origins`/`browser_site_isolation` 配置项及相关许可文件均已移除；旧配置与数据库会在加载时自动迁移到 `camoufox` / `auto`。
 
 ## 分阶段计划
 
@@ -237,7 +229,6 @@ P4 第二项（SpiderMonkey 升到 158）于 2026-11-14 实现，详见 [升级�
 
 ## 参考
 
-- [CloakBrowser Releases](https://github.com/CloakHQ/CloakBrowser/releases) 与 [二进制许可](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md)
 - [Camoufox](https://github.com/daijro/camoufox)（MPL-2.0；Python 与 TypeScript 启动器为 MIT）
 - [AIStudio2API](https://github.com/Mag1cFall/AIStudio2API)（MIT），其中 `docs/protocol.md` 与 `docs/reverse-engineering.md` 可用于核对线路编解码与 WAA 生命周期
 - [fpgen](https://github.com/scrapfly/fingerprint-generator)（Apache-2.0）

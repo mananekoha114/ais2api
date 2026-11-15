@@ -1,4 +1,4 @@
-import type { Account, Deprecation } from '../api/types'
+import type { Account } from '../api/types'
 import type { IconName } from '../icons'
 import { isIndefinite } from './format'
 
@@ -44,7 +44,6 @@ const cooldownKinds: Record<string, string> = {
 }
 
 const backendNames: Record<string, string> = {
-  cloakbrowser: 'CloakBrowser',
   auto: '自动（Firefox）',
   camoufox: 'Camoufox',
   spidermonkey: 'SpiderMonkey',
@@ -52,8 +51,8 @@ const backendNames: Record<string, string> = {
 
 /** Display name of a stored account backend. */
 export const backendLabel = (backend: string | undefined) => (backend ? backendNames[backend] ?? backend : '—')
-/** CloakBrowser presents Chrome; every other backend a Firefox identity. */
-export const backendIdentity = (backend: string) => (backend === 'cloakbrowser' ? 'chrome' : 'firefox')
+/** Every active backend presents a Firefox identity. */
+export const backendIdentity = (_backend: string) => 'firefox'
 
 /** Human-readable backend summary for an account row, including any active 6-hour failover switch. */
 export function accountBackendSummary(account: Account, at = now()): { text: string; title: string } {
@@ -70,17 +69,6 @@ export function accountBackendSummary(account: Account, at = now()): { text: str
     }
   }
   return { text: `${stored}（${active}）`, title: `浏览器后端：${stored}，当前生效：${active}` }
-}
-
-/** What to do about the deprecated CloakBrowser backend; empty when the installation no longer uses it. */
-export function cloakbrowserNotice(deprecations: Deprecation[] | undefined): string {
-  const entry = deprecations?.find((d) => d.code === 'cloakbrowser_backend')
-  if (!entry) return ''
-  const steps: string[] = []
-  if (entry.default_backend) steps.push('在“配置”中把浏览器后端改为 Camoufox，新账号才不会再用它')
-  if (entry.accounts)
-    steps.push('在账号的指纹对话框中把后端改为“自动”，或运行 ais2api accounts backend --all auto --yes（Google 会把换了身份的账号看作一台新设备）')
-  return `CloakBrowser 后端将在以后的版本中移除。${steps.join('；')}。`
 }
 
 /** Human-readable reason of a stored cooldown kind. */

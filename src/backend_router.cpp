@@ -5,7 +5,6 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/backend_router.hpp"
-#include "ais2api/browser.hpp"
 #include "ais2api/camoufox.hpp"
 #include "ais2api/runtime.hpp"
 #include "ais2api/spidermonkey.hpp"
@@ -20,10 +19,10 @@ bool default_readiness(std::string_view backend, const Config &config) {
 }
 } // namespace
 bool valid_account_backend(std::string_view backend) {
-    return backend == "cloakbrowser" || backend == "auto" || backend == "camoufox" || backend == "spidermonkey";
+    return backend == "auto" || backend == "camoufox" || backend == "spidermonkey";
 }
-std::string_view adopted_backend(std::string_view default_backend) {
-    return default_backend == "camoufox" ? "auto" : "cloakbrowser";
+std::string_view adopted_backend(std::string_view) {
+    return "auto";
 }
 bool spidermonkey_available() {
 #ifdef AIS2API_HAS_SPIDERMONKEY
@@ -40,19 +39,17 @@ std::string_view default_firefox_backend() {
     return default_firefox_backend(runtime_platform());
 }
 // Always one of the literals, never a view of the arguments.
-std::string_view effective_backend(std::string_view stored, std::string_view default_backend,
+std::string_view effective_backend(std::string_view stored, std::string_view,
                                    std::string_view platform) {
-    if (stored == "cloakbrowser") return "cloakbrowser";
     if (stored == "spidermonkey") return spidermonkey_available() ? "spidermonkey" : "camoufox";
     if (stored == "camoufox") return "camoufox";
-    if (stored == "auto") return default_firefox_backend(platform);
-    return default_backend == "camoufox" ? default_firefox_backend(platform) : "cloakbrowser";
+    return default_firefox_backend(platform);
 }
 std::string_view effective_backend(std::string_view stored, std::string_view default_backend) {
     return effective_backend(stored, default_backend, runtime_platform());
 }
-std::string_view identity_family(std::string_view backend) {
-    return backend == "cloakbrowser" ? "chrome" : "firefox";
+std::string_view identity_family(std::string_view) {
+    return "firefox";
 }
 std::vector<std::string> backends_needed(std::string_view default_backend, const std::vector<std::string> &stored,
                                          std::string_view platform) {
@@ -66,13 +63,8 @@ std::vector<std::string> backends_needed(std::string_view default_backend, const
 std::vector<std::string> backends_needed(std::string_view default_backend, const std::vector<std::string> &stored) {
     return backends_needed(default_backend, stored, runtime_platform());
 }
-json::array backend_deprecations(std::string_view default_backend, const std::vector<std::string> &stored) {
-    const bool by_default = effective_backend({}, default_backend) == "cloakbrowser";
-    const bool accounts = std::any_of(stored.begin(), stored.end(), [&](const std::string &backend) {
-        return effective_backend(backend, default_backend) == "cloakbrowser";
-    });
-    if (!by_default && !accounts) return {};
-    return {json::object{{"code", "cloakbrowser_backend"}, {"default_backend", by_default}, {"accounts", accounts}}};
+json::array backend_deprecations(std::string_view, const std::vector<std::string> &) {
+    return {};
 }
 void adopt_backends(Store &store, const Config &config) {
     store.adopt_backends(adopted_backend(config.browser_backend));
@@ -80,11 +72,12 @@ void adopt_backends(Store &store, const Config &config) {
 
 namespace {
 std::unique_ptr<GenerationBackend> browser_gateway(std::string_view backend, const Config &config, Store &store) {
-    if (backend == "camoufox") return std::make_unique<CamoufoxGateway>(config, store);
 #ifdef AIS2API_HAS_SPIDERMONKEY
     if (backend == "spidermonkey") return std::make_unique<SpiderMonkeyGateway>(config, store);
+#else
+    (void)backend;
 #endif
-    return std::make_unique<BrowserGateway>(config, store);
+    return std::make_unique<CamoufoxGateway>(config, store);
 }
 } // namespace
 

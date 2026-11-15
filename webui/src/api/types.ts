@@ -23,7 +23,7 @@ export interface Status {
   verification?: string
 }
 
-/** `cloakbrowser_backend`: new accounts (`default_backend`) or stored ones (`accounts`) are on CloakBrowser. */
+/** Deprecated compatibility field; currently always empty. */
 export interface Deprecation {
   code: string
   default_backend?: boolean
@@ -51,14 +51,14 @@ export interface Account {
   /** Stored browser backend; empty only before the account settles. */
   backend?: AccountBackend | ''
   /** Gateway currently serving the account. */
-  effective_backend?: 'cloakbrowser' | 'camoufox' | 'spidermonkey' | ''
+  effective_backend?: 'camoufox' | 'spidermonkey' | ''
   /** Unix seconds until an automatic 6-hour failover switch expires. */
   backend_switched_until?: number
   /** Stored per-account browser identity; empty timezone/locale follow the host. */
   fingerprint?: { seed: number; timezone: string; locale: string }
 }
 
-export type AccountBackend = 'cloakbrowser' | 'auto' | 'camoufox' | 'spidermonkey'
+export type AccountBackend = 'auto' | 'camoufox' | 'spidermonkey'
 
 /** GET/PATCH /accounts/{id}/fingerprint and POST .../regenerate. */
 export interface FingerprintView {
@@ -66,10 +66,10 @@ export interface FingerprintView {
   platform: string
   backend: AccountBackend
   /** Gateway that serves the account now. */
-  effective_backend: 'cloakbrowser' | 'camoufox' | 'spidermonkey'
+  effective_backend: 'camoufox' | 'spidermonkey'
   /** Unix seconds until an automatic 6-hour failover switch expires. */
   backend_switched_until?: number
-  identity: 'chrome' | 'firefox'
+  identity: 'firefox'
   firefox_identity_saved: boolean
   /** Whether this build includes the experimental SpiderMonkey backend. */
   spidermonkey_available?: boolean
@@ -276,8 +276,6 @@ export interface Config {
   browser_executable?: string
   proxy?: string
   browser_proxy_relay?: boolean
-  browser_remote_allow_origins?: boolean
-  browser_site_isolation?: boolean
   headless?: boolean
   ignore_unsupported_parameters?: boolean
   search_model_drop_functions?: boolean

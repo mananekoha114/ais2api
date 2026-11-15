@@ -49,7 +49,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 | GET | `/auth/check` | 验证密码，返回 `password_change_required` |
 | POST | `/auth/password` | 修改管理密码，正文 `{"password": "..."}`，立即生效 |
 | GET | `/version`、`/capabilities` | 版本与能力 |
-| GET | `/status` | 服务状态、队列、正在生成的账号、`logging_healthy`、`pending_logs`；`deprecations` 列出仍在使用、以后会移除的功能（目前只有 `cloakbrowser_backend`，见 [按账号选择后端](browser.md#按账号选择后端)） |
+| GET | `/status` | 服务状态、队列、正在生成的账号、`logging_healthy`、`pending_logs`、`deprecations`（当前版本为空数组） |
 | POST | `/service/stop` | 停止本地服务，返回 202 |
 
 ### 账号
@@ -65,7 +65,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 | POST | `/accounts/{id}/activate` | 设为首选账号 |
 | POST | `/accounts/{id}/reset` | 重置失败/禁用状态（同时清除临时后端切换） |
 | POST | `/accounts/probe`、`/accounts/{id}/probe`、`/accounts/{id}/detect-email` | 探测全部或单个账号；检测邮箱使用同一个浏览器探测 |
-| GET | `/accounts/{id}/fingerprint` | 永久指纹：`seed`、`platform`、保存的 `timezone`/`locale`（为空表示跟随本机）、`effective_*` 与 `host_*`；浏览器后端 `backend`、实际使用的 `effective_backend`、临时后端切换截止时间 `backend_switched_until`（未处于切换期时省略）、身份类型 `identity`（`chrome` 或 `firefox`）与 `firefox_identity_saved` |
+| GET | `/accounts/{id}/fingerprint` | 永久指纹：`seed`、`platform`、保存的 `timezone`/`locale`（为空表示跟随本机）、`effective_*` 与 `host_*`；浏览器后端 `backend`、实际使用的 `effective_backend`、临时后端切换截止时间 `backend_switched_until`（未处于切换期时省略）、身份类型 `identity`（`firefox`）与 `firefox_identity_saved` |
 | PATCH | `/accounts/{id}/fingerprint` | 覆盖 `timezone`（IANA）和/或 `locale`（BCP 47），`null` 或 `""` 恢复为本机默认；或修改 `backend`（见下文）；下次使用该账号时生效 |
 | POST | `/accounts/{id}/fingerprint/regenerate` | 分配新种子，Google 会把该账号视为新设备 |
 
@@ -100,7 +100,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 
 `/keys/config` 的两个接口实际是一次配置修改，返回 `ConfigSaved`（`saved`、`applied`、`restart_required`）。存在待重启的配置时，新值只会写入待重启配置：`applied: false` 表示当前进程仍在使用旧密钥，重启后才切换。HTTP 200 本身不能说明已经生效。
 
-`backend` 可取 `cloakbrowser`、`auto`、`camoufox`、`spidermonkey`。`spidermonkey` 只有开启 `AIS2API_SPIDERMONKEY` 编译的版本才有；其他版本返回 400 `backend_unavailable`。响应的 `spidermonkey_available` 说明当前版本是否包含它，`GET /version` 的 `backends.spidermonkey` 也是同一个值。`backend` 为 `auto` 时，桌面与服务器默认使用 `camoufox`，Termux 在包含 `spidermonkey` 时默认使用 `spidermonkey`；生成请求在就地重建会话后仍遇到 403 且另一 Firefox 后端已就绪时，会自动把该账号临时切换到另一后端 6 小时（返回 `backend_switched_until` Unix 秒）。手动修改 `backend`、执行 `/accounts/{id}/reset` 或 `/rotation/clear-cooldown` 都会清除临时切换；固定设为 `camoufox`、`spidermonkey` 或 `cloakbrowser` 的账号从不自动切换。在 CloakBrowser 与 Firefox 后端之间切换会换成另一种身份，Google 会把它看作新设备，因此必须同时传 `confirm_identity_change: true`，否则返回 409 `identity_change_unconfirmed`；Firefox 后端之间可以直接切换，种子保持不变。
+`backend` 可取 `auto`、`camoufox`、`spidermonkey`（旧数据库中的 `cloakbrowser` 会在打开时自动迁移为 `auto`）。`spidermonkey` 只有开启 `AIS2API_SPIDERMONKEY` 编译的版本才有；其他版本返回 400 `backend_unavailable`。响应的 `spidermonkey_available` 说明当前版本是否包含它，`GET /version` 的 `backends.spidermonkey` 也是同一个值。`backend` 为 `auto` 时，桌面与服务器默认使用 `camoufox`，Termux 在包含 `spidermonkey` 时默认使用 `spidermonkey`；生成请求在就地重建会话后仍遇到 403 且另一 Firefox 后端已就绪时，会自动把该账号临时切换到另一后端 6 小时（返回 `backend_switched_until` Unix 秒）。手动修改 `backend`、执行 `/accounts/{id}/reset` 或 `/rotation/clear-cooldown` 都会清除临时切换；固定设为 `camoufox` 或 `spidermonkey` 的账号从不自动切换。各后端共用同一 Firefox 身份，彼此之间可以直接切换，种子保持不变（可选的 `confirm_identity_change` 布尔字段仍保留兼容，已无实际作用）。
 
 ### 配置、统计与诊断
 
@@ -119,7 +119,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 | GET | `/diagnostics` | 管理员查看的完整诊断（隐藏密钥，但含本机路径和账号状态） |
 | POST | `/diagnostics/export` | 安全诊断报告，只含白名单字段，可附在问题反馈中 |
 
-`GET /diagnostics` 的 `events` 是按后端统计的排查计数：`backends.<后端>.<事件>` 给出 `total`、`last_7_days`、`today`（按 UTC 日期）和 `last_at`，`since` 是上次重置统计的时间（Unix 秒）。后端为 `cloakbrowser`、`camoufox`、`spidermonkey`，或自定义后端的 `custom`；事件有 `permission_denied`（403，包括随后被救回的）、`login_redirect`、`auth_cooldown`、`permission_cooldown`、`login_expired`、`terms_required`、`session_rebuild`、`browser_restart` 与 `backend_switch`（自动后端 6 小时切换）。`DELETE /stats` 会一并清零。
+`GET /diagnostics` 的 `events` 是按后端统计的排查计数：`backends.<后端>.<事件>` 给出 `total`、`last_7_days`、`today`（按 UTC 日期）和 `last_at`，`since` 是上次重置统计的时间（Unix 秒）。后端为 `camoufox`、`spidermonkey`，或自定义后端的 `custom`；事件有 `permission_denied`（403，包括随后被救回的）、`login_redirect`、`auth_cooldown`、`permission_cooldown`、`login_expired`、`terms_required`、`session_rebuild`、`browser_restart` 与 `backend_switch`（自动后端 6 小时切换）。`DELETE /stats` 会一并清零。
 
 `POST /diagnostics/export` 返回 `report: "ais2api-diagnostics"` 的安全报告，它不是在完整诊断上做脱敏，而是只复制白名单内的字段：版本、平台、服务状态、运行时版本与来源（含 `spidermonkey` 就绪状态）、浏览器适配状态、配置开关（代理只给协议）、按后端统计、账号（按顺序编号为 `account-N`，只有后端、当前生效后端、临时切换截止时间、状态和冷却）、最近 50 条故障与后端切换事件和日志大小。报告不含 Cookie、邮箱、账号 ID、请求内容、本机路径、代理地址、模型别名、User-Agent 和 GPU 字符串。
 
@@ -154,7 +154,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 - `GET /config` 返回当前运行的脱敏配置 `config`、文件路径和 `restart_required`。有待重启的修改时，`saved_config` 包含脱敏后的待生效配置。
 - PATCH 会在原子保存前校验修改后的完整配置。未知字段、类型错误、无效限额以及把脱敏占位符 `***` 当作密钥提交都会被拒绝。提交表单时请省略未修改的脱敏密钥字段。
 - 只有 `limits` 按子项合并；`model_aliases`、`model_defaults`、`configured_models` 与 `admin_origins` 整体替换。要删除某个别名，提交不含它的完整对象。
-- 需要重启的字段：监听地址、端口、数据目录、浏览器路径、代理、`browser_proxy_relay`、`browser_remote_allow_origins`、`browser_site_isolation`、无界面模式、生成时限、流式空闲时限、`object_bytes` 与 `relay_bytes`。其余字段热更新。
+- 需要重启的字段：监听地址、端口、数据目录、浏览器路径、代理、`browser_proxy_relay`、无界面模式、生成时限、流式空闲时限、`object_bytes` 与 `relay_bytes`。其余字段热更新。
 - 响应包含 `saved`、`applied` 与 `restart_required`。只要包含任一需重启的差异，整份配置就作为待重启配置保存，不会部分应用；之后的 PATCH 以待重启配置为基础，保留之前保存的修改。把所有需重启的字段改回运行值后，完整结果会立即应用。重启时加载保存的配置，环境变量覆盖在启动和重新加载时依然生效。
 
 部分字段的补充说明：

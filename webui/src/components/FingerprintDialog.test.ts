@@ -31,8 +31,12 @@ function fakeFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Re
     }
   }
   if (method === 'PATCH' && body.backend) {
-    const firefox = body.backend !== 'cloakbrowser'
-    stored = { ...stored, backend: body.backend, effective_backend: firefox ? 'camoufox' : 'cloakbrowser', identity: firefox ? 'firefox' : 'chrome' }
+    stored = {
+      ...stored,
+      backend: body.backend,
+      effective_backend: body.backend === 'spidermonkey' ? 'spidermonkey' : 'camoufox',
+      identity: 'firefox',
+    }
   }
   if (method === 'POST' && path.endsWith('/regenerate')) stored = { ...stored, seed: stored.seed + 1 }
   return Promise.resolve(json(stored))
@@ -72,10 +76,10 @@ beforeEach(() => {
     effective_locale: 'zh-CN',
     host_timezone: 'Asia/Shanghai',
     host_locale: 'zh-CN',
-    backend: 'cloakbrowser',
-    effective_backend: 'cloakbrowser',
-    identity: 'chrome',
-    firefox_identity_saved: false,
+    backend: 'camoufox',
+    effective_backend: 'camoufox',
+    identity: 'firefox',
+    firefox_identity_saved: true,
   }
   calls = []
   failNext = null
@@ -96,7 +100,7 @@ describe('browser fingerprint dialog', () => {
     await mountDialog()
     expect(calls[0]).toMatchObject({ method: 'GET', path: '/accounts/acc_one/fingerprint' })
     expect(body()).toContain('54321')
-    expect(body()).toContain('Chrome · Windows')
+    expect(body()).toContain('Firefox · Windows')
     expect(body()).toContain('本机时区：Asia/Shanghai')
     expect(body()).toContain('本机语言：zh-CN')
     expect(button('保存').disabled).toBe(true)
@@ -160,30 +164,19 @@ describe('browser fingerprint dialog', () => {
     expect(wrapper!.emitted('changed')).toHaveLength(1)
   })
 
-  it('moves the account to a Firefox identity only with the warning shown', async () => {
+  it('switches from Camoufox to auto without identity confirmation', async () => {
     await mountDialog()
-    expect(segment('浏览器后端', 'CloakBrowser').getAttribute('aria-checked')).toBe('true')
+    expect(segment('浏览器后端', 'CloakBrowser')).toBeUndefined()
+    expect(segment('浏览器后端', 'Camoufox').getAttribute('aria-checked')).toBe('true')
     expect(segment('浏览器后端', 'SpiderMonkey').disabled).toBe(true)
-    segment('浏览器后端', 'Camoufox').click()
-    await flushPromises()
-    expect(body()).toContain('换成 Firefox 身份？')
-    button('确认切换并保存').click()
-    await flushPromises()
-    expect(calls.at(-1)).toMatchObject({ method: 'PATCH', body: { backend: 'camoufox', confirm_identity_change: true } })
-    expect(calls.at(-1)?.body).not.toHaveProperty('timezone')
-    expect(toasts.map((t) => t.title)).toContain('浏览器指纹与后端已保存')
-  })
-
-  it('switches between Firefox backends without a warning', async () => {
-    stored = { ...stored, backend: 'camoufox', effective_backend: 'camoufox', identity: 'firefox', firefox_identity_saved: true }
-    await mountDialog()
-    expect(body()).toContain('Firefox · Windows')
     segment('浏览器后端', '自动').click()
     await flushPromises()
-    expect(body()).not.toContain('Firefox 身份？')
     button('保存').click()
     await flushPromises()
-    expect(calls.at(-1)?.body).toEqual({ backend: 'auto', confirm_identity_change: false })
+    expect(calls.at(-1)).toMatchObject({ method: 'PATCH', body: { backend: 'auto' } })
+    expect(calls.at(-1)?.body).not.toHaveProperty('timezone')
+    expect(calls.at(-1)?.body).not.toHaveProperty('confirm_identity_change')
+    expect(toasts.map((t) => t.title)).toContain('浏览器指纹与后端已保存')
   })
 
   it('offers the experimental SpiderMonkey backend only in a build that has it', async () => {
@@ -195,10 +188,9 @@ describe('browser fingerprint dialog', () => {
     await flushPromises()
     expect(body()).toContain('实验性原型')
     expect(body()).toContain('Firefox 158')
-    expect(body()).not.toContain('Firefox 身份？')
     button('保存').click()
     await flushPromises()
-    expect(calls.at(-1)?.body).toEqual({ backend: 'spidermonkey', confirm_identity_change: false })
+    expect(calls.at(-1)?.body).toEqual({ backend: 'spidermonkey' })
   })
 
   it('shows active temporary 6-hour backend failover notice for auto accounts', async () => {

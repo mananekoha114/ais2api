@@ -13,12 +13,11 @@ import { api, describeError, enc, runOperation } from '../api/client'
 import type { Account, ProbeResult, Rotation } from '../api/types'
 import { refreshStatus, service } from '../stores/service'
 import { confirm, notify, notifyError } from '../stores/ui'
-import { accountBackendSummary, accountLabel, accountState, cloakbrowserNotice, cooldownReason, now } from '../utils/accounts'
+import { accountBackendSummary, accountLabel, accountState, cooldownReason, now } from '../utils/accounts'
 import { formatRelative, formatTimestamp, isIndefinite } from '../utils/format'
 import { usePolling } from '../utils/media'
 
 const rotation = ref<Rotation | null>(null)
-const deprecation = computed(() => cloakbrowserNotice(service.status?.deprecations))
 const loading = ref(true)
 const loadError = ref('')
 const busy = reactive<Record<string, string>>({})
@@ -206,7 +205,6 @@ function menuFor(a: Account): MenuItem[] {
 
     <div class="stack" style="--gap: 12px">
       <FInfoBar v-if="loadError" severity="error" title="加载失败" :message="loadError" />
-      <FInfoBar v-if="deprecation" severity="warning" title="CloakBrowser 已弃用" :message="deprecation" />
       <FInfoBar v-if="globalBusy === 'probe'" severity="info" title="正在探测">
         后端正在通过浏览器逐个确认账号身份，可能需要数分钟。
       </FInfoBar>

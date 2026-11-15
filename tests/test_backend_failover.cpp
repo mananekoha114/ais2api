@@ -457,11 +457,9 @@ TEST_CASE("BackendRouter routes auto accounts to ready switch targets and never 
     const auto auto_id = import_account(store, "auto");
     const auto cam_id = import_account(store, "cam");
     const auto sm_id = import_account(store, "sm");
-    const auto chrome_id = import_account(store, "chrome");
     store.set_backend(auto_id, "auto");
     store.set_backend(cam_id, "camoufox");
     store.set_backend(sm_id, "spidermonkey");
-    store.set_backend(chrome_id, "cloakbrowser");
 
     auto state = std::make_shared<FailoverState>();
     auto factory = [state](std::string_view backend, const Config &, Store &) {
@@ -488,12 +486,11 @@ TEST_CASE("BackendRouter routes auto accounts to ready switch targets and never 
     }
 
     // Pinned accounts ignore switches and never offer an alternate Firefox backend.
-    for (const auto &id : {cam_id, sm_id, chrome_id}) {
+    for (const auto &id : {cam_id, sm_id}) {
         store.switch_backend(id, "camoufox", 3600);
         CHECK_FALSE(desktop_router.alternate_firefox_backend(make_account(id)).has_value());
     }
     CHECK(desktop_router.backend_for(make_account(cam_id)) == "camoufox");
-    CHECK(desktop_router.backend_for(make_account(chrome_id)) == "cloakbrowser");
     CHECK(desktop_router.backend_for(make_account(sm_id)) == (spidermonkey_available() ? "spidermonkey" : "camoufox"));
 
     // Simulated Termux: falls back safely when Camoufox is not installed in proot.
