@@ -15,10 +15,10 @@ TEST_CASE("host region detection always yields usable browser values", "[fingerp
     INFO(timezone << " " << locale);
     CHECK(valid_timezone(timezone));
     CHECK(valid_locale(locale));
-#ifdef __APPLE__
-    CHECK(fingerprint_platform() == "macos");
-#else
+#ifdef _WIN32
     CHECK(fingerprint_platform() == "windows");
+#else
+    CHECK(fingerprint_platform() == "linux");
 #endif
 }
 

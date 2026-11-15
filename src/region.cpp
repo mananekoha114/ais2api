@@ -105,10 +105,10 @@ bool valid_locale(std::string_view value) {
 }
 
 std::string_view fingerprint_platform() {
-#ifdef __APPLE__
-    return "macos";
-#else
+#ifdef _WIN32
     return "windows";
+#else
+    return "linux";
 #endif
 }
 

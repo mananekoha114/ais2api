@@ -394,6 +394,34 @@ TEST_CASE("A session reports what kept a response from arriving", "[firefox-http
         request.url = silent.url("/");
         CHECK(error_of([&] { proxied.send(request); }) == "502 proxy_failed");
     }
+    SECTION("proxy drops connection before tunnel") {
+        Server dropping([](const Server::Request &, tcp::socket &socket) {
+            boost::system::error_code ignored;
+            socket.set_option(tcp::socket::linger(true, 0), ignored);
+            socket.close(ignored);
+        });
+        auto proxied_options = options();
+        proxied_options.proxy = dropping.url("");
+        HttpSession proxied(std::move(proxied_options));
+        request.url = "https://127.0.0.1:443/";
+        CHECK(error_of([&] { proxied.send(request); }) == "502 proxy_failed");
+    }
+    SECTION("proxy drops after tunnel opens") {
+        Server failing_after_connect([](const Server::Request &, tcp::socket &socket) {
+            asio::write(socket, asio::buffer("HTTP/1.1 200 Connection established\r\n\r\n"));
+            boost::system::error_code ignored;
+            // Wait for the client's TLS ClientHello so curl has processed the 200 before RST arrives.
+            std::array<char, 1> hello{};
+            socket.read_some(asio::buffer(hello), ignored);
+            socket.set_option(tcp::socket::linger(true, 0), ignored);
+            socket.close(ignored);
+        });
+        auto proxied_options = options();
+        proxied_options.proxy = failing_after_connect.url("");
+        HttpSession proxied(std::move(proxied_options));
+        request.url = "https://127.0.0.1:443/";
+        CHECK(error_of([&] { proxied.send(request); }) == "502 network_failed");
+    }
     SECTION("a scheme the session does not speak") {
         HttpSession session{HttpSession::Options{}};
         CHECK(error_of([&] { session.send(request); }) == "502 network_failed");
