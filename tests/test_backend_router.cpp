@@ -70,11 +70,13 @@ TEST_CASE("account backends map onto the gateways that serve them", "[router]") 
     CHECK(adopted_backend("cloakbrowser") == "cloakbrowser");
     CHECK(adopted_backend("camoufox") == "auto");
     CHECK(effective_backend("cloakbrowser", "camoufox") == "cloakbrowser");
-    for (auto stored : {"auto", "camoufox"}) CHECK(effective_backend(stored, "cloakbrowser") == "camoufox");
+    for (auto stored : {"auto", "camoufox"})
+        CHECK(effective_backend(stored, "cloakbrowser", "windows-x64") == "camoufox");
+    CHECK(effective_backend("auto", "cloakbrowser") == default_firefox_backend());
     // Without the engine compiled in, Camoufox stands in for it.
     CHECK(effective_backend("spidermonkey", "cloakbrowser") == (spidermonkey_available() ? "spidermonkey" : "camoufox"));
     CHECK(identity_family("spidermonkey") == "firefox");
-    CHECK(effective_backend("", "camoufox") == "camoufox");
+    CHECK(effective_backend("", "camoufox") == default_firefox_backend());
     CHECK(effective_backend("unknown", "cloakbrowser") == "cloakbrowser");
     CHECK(identity_family("cloakbrowser") == "chrome");
     CHECK(identity_family("auto") == "firefox");
@@ -83,10 +85,13 @@ TEST_CASE("account backends map onto the gateways that serve them", "[router]") 
     CHECK_FALSE(valid_account_backend(""));
     CHECK_FALSE(valid_account_backend("Camoufox"));
     CHECK(backends_needed("cloakbrowser", {}) == std::vector<std::string>{"cloakbrowser"});
-    CHECK(backends_needed("cloakbrowser", {"", "cloakbrowser", "auto"}) == std::vector<std::string>{"cloakbrowser", "camoufox"});
-    CHECK(backends_needed("camoufox", {"camoufox", "cloakbrowser"}) == std::vector<std::string>{"camoufox", "cloakbrowser"});
-    // The SpiderMonkey backend serves identities Camoufox's setup provides.
-    CHECK(backends_needed("cloakbrowser", {"spidermonkey"}) == std::vector<std::string>{"cloakbrowser", "camoufox"});
+    CHECK(backends_needed("cloakbrowser", {"", "cloakbrowser", "auto"}, "windows-x64") ==
+          std::vector<std::string>{"cloakbrowser", "camoufox"});
+    CHECK(backends_needed("camoufox", {"camoufox", "cloakbrowser"}, "windows-x64") ==
+          std::vector<std::string>{"camoufox", "cloakbrowser"});
+    // SpiderMonkey stays distinct when compiled in; otherwise Camoufox stands in for it.
+    CHECK(backends_needed("cloakbrowser", {"spidermonkey"}) ==
+          std::vector<std::string>{"cloakbrowser", spidermonkey_available() ? "spidermonkey" : "camoufox"});
 }
 
 TEST_CASE("CloakBrowser is reported as deprecated wherever it is still used", "[router]") {
@@ -139,7 +144,7 @@ TEST_CASE("the router serves each account on its own gateway and keeps one brows
     Config config;
     config.data_dir = dir.path;
     Calls calls;
-    BackendRouter router(config, store, recording(calls));
+    BackendRouter router(config, store, recording(calls), {}, "windows-x64");
 
     // Before any work the default backend's gateway answers diagnostics.
     auto diagnostics = router.diagnostics();
@@ -215,7 +220,7 @@ TEST_CASE("moving accounts between Chrome and Firefox identities needs confirmat
     // Between Firefox backends the identity stays.
     view = update({{"backend", "auto"}});
     CHECK(string_or(view, "backend") == "auto");
-    CHECK(string_or(view, "effective_backend") == "camoufox");
+    CHECK(string_or(view, "effective_backend") == std::string(default_firefox_backend()));
     for (const auto &fields : std::vector<json::object>{{{"backend", "firefox"}}, {{"backend", 1}},
                                                        {{"backend", "auto"}, {"confirm_identity_change", "yes"}}})
         CHECK_THROWS_AS(update(fields), Error);
@@ -262,7 +267,7 @@ TEST_CASE("doctor checks every backend the stored accounts need", "[router][setu
     Config config;
     config.data_dir = dir.path;
     config.browser_executable = dir.path / "missing-chrome";
-    auto result = doctor(config, dir.path, std::vector<std::string>{});
+    auto result = doctor(config, dir.path, std::vector<std::string>{}, "windows-x64");
     CHECK(result.at("backends_needed").as_array() == json::array{"cloakbrowser"});
     CHECK(result.at("deprecations").as_array().size() == 1);
     CHECK(result.at("deprecations").at(0).at("default_backend") == true);
@@ -270,16 +275,16 @@ TEST_CASE("doctor checks every backend the stored accounts need", "[router][setu
     CHECK_FALSE(result.contains("camoufox"));
     // A Firefox account adds Camoufox, whose runtime this directory lacks.
     atomic_write(config.browser_executable, "stub");
-    result = doctor(config, dir.path, std::vector<std::string>{"cloakbrowser"});
+    result = doctor(config, dir.path, std::vector<std::string>{"cloakbrowser"}, "windows-x64");
     CHECK(result.at("browser_exists") == true);
-    result = doctor(config, dir.path, std::vector<std::string>{"cloakbrowser", "auto"});
+    result = doctor(config, dir.path, std::vector<std::string>{"cloakbrowser", "auto"}, "windows-x64");
     CHECK(result.at("backends_needed").as_array() == json::array{"cloakbrowser", "camoufox"});
     CHECK(result.contains("camoufox"));
     CHECK(result.at("browser_exists") == false);
     // On Camoufox nothing is deprecated until an account stays on CloakBrowser.
     config.browser_backend = "camoufox";
-    CHECK(doctor(config, dir.path, std::vector<std::string>{"auto"}).at("deprecations").as_array().empty());
-    result = doctor(config, dir.path, std::vector<std::string>{"auto", "cloakbrowser"});
+    CHECK(doctor(config, dir.path, std::vector<std::string>{"auto"}, "windows-x64").at("deprecations").as_array().empty());
+    result = doctor(config, dir.path, std::vector<std::string>{"auto", "cloakbrowser"}, "windows-x64");
     CHECK(result.at("deprecations").at(0).at("code") == "cloakbrowser_backend");
     CHECK(result.at("deprecations").at(0).at("default_backend") == false);
     CHECK(result.at("deprecations").at(0).at("accounts") == true);

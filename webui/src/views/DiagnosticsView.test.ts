@@ -23,7 +23,7 @@ const diagnostics = {
   events: {
     since: 1792000000,
     backends: {
-      camoufox: { permission_denied: count(5, 3, 1), session_rebuild: count(2, 2, 0), novel_event: count(1, 1, 1) },
+      camoufox: { permission_denied: count(5, 3, 1), session_rebuild: count(2, 2, 0), backend_switch: count(1, 1, 1), novel_event: count(1, 1, 1) },
       cloakbrowser: { login_redirect: count(4, 0, 0) },
     },
   },
@@ -48,7 +48,7 @@ it('lists every recorded event per backend with its recent counts', async () => 
   const table = view.findAll('table').find(t => t.text().includes('Camoufox'))!
   expect(table.findAll('th').map(th => th.text())).toEqual(['事件', 'Camoufox', 'CloakBrowser'])
   const rows = table.findAll('tbody tr').map(row => row.findAll('td').map(td => td.text()))
-  expect(rows.map(row => row[0])).toEqual(['403（Code 7）', '跳转登录页', '就地重建会话', 'novel_event'])
+  expect(rows.map(row => row[0])).toEqual(['403（Code 7）', '跳转登录页', '就地重建会话', '自动切换后端', 'novel_event'])
   expect(rows[0][1]).toContain('5')
   expect(rows[0][1]).toContain('近 7 天 3 · 今天 1')
   expect(rows[0][2]).toBe('0')

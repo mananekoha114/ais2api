@@ -24,6 +24,7 @@ struct Arguments {
     std::vector<std::string> positional;
     std::optional<fs::path> import_file;
     std::string name;
+    std::string setup_backend;
     bool stdin_import = false;
     bool yes = false;
     bool all = false;
@@ -94,6 +95,8 @@ Arguments parse_arguments(int argc, char **argv) {
             result.import_file = fs::u8path(value);
         else if (option == "--name")
             result.name = value;
+        else if (option == "--backend")
+            result.setup_backend = value;
         else if (auto found = string_options.find(option); found != string_options.end())
             result.overrides[found->second] = value;
         else if (option == "--port")
@@ -117,7 +120,7 @@ Arguments parse_arguments(int argc, char **argv) {
 void help() {
     std::cout << "ais2api: Chromium/CDP Gemini and OpenAI gateway\n\n"
                  "Commands:\n"
-                 "  init | serve | start | stop | status | setup | doctor\n"
+                 "  init | serve | start | stop | status | setup [--backend BACKEND] | doctor\n"
                  "  browser update [BACKEND] | browser rollback [BACKEND]\n"
                  "  accounts list | import (--file PATH | --stdin) [--name NAME]\n"
                  "  accounts select ID | remove ID | reset ID | probe (ID | all)\n"
@@ -242,6 +245,8 @@ json::object execute(Arguments args) {
     if (!args.name.empty() && !(p.size() > 1 && ((command == "accounts" && p[1] == "import") ||
                                                  (command == "keys" && p[1] == "create"))))
         usage_error("--name is only valid for account import or key creation");
+    if (!args.setup_backend.empty() && command != "setup")
+        usage_error("--backend is only valid for setup");
     if (args.yes &&
         !(command == "setup" || (command == "browser" && p.size() > 1 && p[1] == "update") || account_backend))
         usage_error("--yes is only valid for setup, browser update or accounts backend");
@@ -320,18 +325,18 @@ json::object execute(Arguments args) {
     }
     if (command == "setup" || command == "browser") {
         std::string backend;
-        if (command == "setup")
+        if (command == "setup") {
             count(1, 1);
-        else {
+            backend = args.setup_backend;
+        } else {
             count(2, 3);
             if (p[1] != "update" && p[1] != "rollback")
                 usage_error("Unknown browser command");
-            if (p.size() == 3) {
+            if (p.size() == 3)
                 backend = p[2];
-                if (backend != "cloakbrowser" && backend != "camoufox")
-                    usage_error("The browser backend must be cloakbrowser or camoufox");
-            }
         }
+        if (!backend.empty() && backend != "cloakbrowser" && backend != "camoufox" && backend != "spidermonkey")
+            usage_error("The browser backend must be cloakbrowser, camoufox or spidermonkey");
         require_offline(config);
         InstanceLock lock(config.data_dir);
         if (command == "browser" && p[1] == "rollback")

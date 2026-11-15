@@ -5,8 +5,10 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/store.hpp"
+#include "ais2api/backend_router.hpp"
 #include "ais2api/pricing.hpp"
 #include "ais2api/region.hpp"
+#include "ais2api/runtime.hpp"
 #include "ais2api/usage.hpp"
 #include "../browser/rate_policy.hpp"
 #include <algorithm>
@@ -499,6 +501,9 @@ void init_state(sqlite3 *db) {
     { Statement columns(db, "PRAGMA table_info(fingerprints)");
       while (columns.row()) account_backend |= columns.str(1) == "backend"; }
     if (!account_backend) exec(db, "ALTER TABLE fingerprints ADD COLUMN backend TEXT NOT NULL DEFAULT ''");
+    exec(db, "CREATE TABLE IF NOT EXISTS account_backend_switches("
+             "account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,"
+             "backend TEXT NOT NULL,until INTEGER NOT NULL)");
     if (version <= 1)
         exec(db, "PRAGMA user_version=1");
 }
@@ -508,11 +513,13 @@ fs::path secured(const fs::path &directory) {
 }
 } // namespace
 struct Store::Impl : Database {
+    fs::path directory;
     // Request history, price caches and discovered model catalogs. Kept apart
     // from accounts and credentials; see init_usage().
     std::unique_ptr<Database> usage;
     explicit Impl(const fs::path &directory)
         : Database(secured(directory) / "state.sqlite3", "state", init_state),
+          directory(directory),
           usage(std::make_unique<Database>(directory / "usage.sqlite3", "usage", init_usage)) {
         if (run([&] { return has_table(db, "request_history"); })) {
             // Each step commits on its own and is safe to repeat after a crash;
@@ -787,6 +794,8 @@ void Store::reset_account(std::string_view id) {
             f.row();
             Statement quota(impl_->db, "DELETE FROM quota_counters WHERE account=?");
             quota.text(1, id); quota.row();
+            Statement switched(impl_->db, "DELETE FROM account_backend_switches WHERE account_id=?");
+            switched.text(1, id); switched.row();
             exec(impl_->db, "COMMIT");
         } catch (...) {
             exec(impl_->db, "ROLLBACK");
@@ -894,7 +903,7 @@ ModelCatalog Store::save_models(std::string_view account_id, json::array models)
         return ModelCatalog{std::string(account_id), std::move(values), saved_at};
     });
 }
-json::object Store::rotation_status() {
+json::object Store::rotation_status(const std::optional<Config> &config) {
     auto result = impl_->run([&] {
         json::object out{{"preferred_account_id", nullptr}, {"next_account_id", nullptr}};
         Statement selected(impl_->db, "SELECT a.id FROM accounts a JOIN settings s ON s.v=a.id WHERE s.k='selected'");
@@ -905,7 +914,7 @@ json::object Store::rotation_status() {
         if (next.row()) out["next_account_id"] = next.str(0);
         return out;
     });
-    result["accounts"] = account_status();
+    result["accounts"] = account_status(config);
     return result;
 }
 std::string Store::rotate_account() {
@@ -944,6 +953,9 @@ void Store::clear_cooldown(std::string_view id, std::string_view model) {
             quota.text(1, id);
             if (!model.empty()) quota.text(2, model);
             quota.row();
+            Statement switched(impl_->db, "DELETE FROM account_backend_switches WHERE account_id=?");
+            switched.text(1, id);
+            switched.row();
             exec(impl_->db, "COMMIT");
         } catch (...) {
             exec(impl_->db, "ROLLBACK");
@@ -1702,11 +1714,69 @@ std::optional<std::string> Store::account_backend(std::string_view id) {
 }
 void Store::set_backend(std::string_view id, std::string_view backend) {
     impl_->run([&] {
-        read_fingerprint(impl_->db, id);
-        Statement s(impl_->db, "UPDATE fingerprints SET backend=? WHERE account=?");
-        s.text(1, backend);
-        s.text(2, id);
-        s.row();
+        exec(impl_->db, "BEGIN IMMEDIATE");
+        try {
+            read_fingerprint(impl_->db, id);
+            Statement s(impl_->db, "UPDATE fingerprints SET backend=? WHERE account=?");
+            s.text(1, backend);
+            s.text(2, id);
+            s.row();
+            Statement switched(impl_->db, "DELETE FROM account_backend_switches WHERE account_id=?");
+            switched.text(1, id);
+            switched.row();
+            exec(impl_->db, "COMMIT");
+        } catch (...) {
+            exec(impl_->db, "ROLLBACK");
+            throw;
+        }
+    });
+}
+std::optional<BackendSwitch> Store::backend_switch(std::string_view id) {
+    return impl_->run([&]() -> std::optional<BackendSwitch> {
+        Statement s(impl_->db,
+                    "SELECT backend,until FROM account_backend_switches WHERE account_id=? AND until>?");
+        s.text(1, id);
+        s.integer(2, unix_seconds());
+        if (!s.row()) return std::nullopt;
+        return BackendSwitch{s.str(0), sqlite3_column_int64(s.p, 1)};
+    });
+}
+void Store::switch_backend(std::string_view id, std::string_view backend, std::int64_t duration_seconds) {
+    if (backend != "camoufox" && backend != "spidermonkey")
+        throw Error(400, "invalid_backend", "Automatic switch target must be camoufox or spidermonkey");
+    impl_->run([&] {
+        exec(impl_->db, "BEGIN IMMEDIATE");
+        try {
+            Statement exists(impl_->db, "SELECT 1 FROM accounts WHERE id=?");
+            exists.text(1, id);
+            if (!exists.row()) throw Error(404, "account_not_found", "Account not found");
+            const auto now = unix_seconds();
+            Statement prune(impl_->db, "DELETE FROM account_backend_switches WHERE until<=? AND account_id<>?");
+            prune.integer(1, now);
+            prune.text(2, id);
+            prune.row();
+            Statement upsert(impl_->db,
+                             "INSERT INTO account_backend_switches(account_id,backend,until) VALUES(?,?,?) "
+                             "ON CONFLICT(account_id) DO UPDATE SET backend=excluded.backend,until=excluded.until");
+            upsert.text(1, id);
+            upsert.text(2, backend);
+            upsert.integer(3, duration_seconds > INT64_MAX - now ? INT64_MAX : now + duration_seconds);
+            upsert.row();
+            exec(impl_->db, "COMMIT");
+        } catch (...) {
+            exec(impl_->db, "ROLLBACK");
+            throw;
+        }
+    });
+}
+void Store::clear_backend_switch(std::string_view id) {
+    impl_->run([&] {
+        Statement exists(impl_->db, "SELECT 1 FROM accounts WHERE id=?");
+        exists.text(1, id);
+        if (!exists.row()) throw Error(404, "account_not_found", "Account not found");
+        Statement del(impl_->db, "DELETE FROM account_backend_switches WHERE account_id=?");
+        del.text(1, id);
+        del.row();
     });
 }
 std::size_t Store::adopt_backends(std::string_view backend) {
@@ -1754,17 +1824,30 @@ std::string Store::identity_secret() {
         return s.str(0);
     });
 }
-json::array Store::account_status() {
+json::array Store::account_status(const std::optional<Config> &config) {
+    Config effective_cfg;
+    if (config) effective_cfg = *config;
+    else effective_cfg.data_dir = impl_->directory;
+    const bool camoufox_ready = firefox_backend_ready("camoufox", effective_cfg);
+    const bool spidermonkey_ready = firefox_backend_ready("spidermonkey", effective_cfg);
     return impl_->run([&] {
+        const auto now = unix_seconds();
+        std::map<std::string, BackendSwitch, std::less<>> switches;
+        {
+            Statement sw(impl_->db, "SELECT account_id,backend,until FROM account_backend_switches WHERE until>?");
+            sw.integer(1, now);
+            while (sw.row()) switches.emplace(sw.str(0), BackendSwitch{sw.str(1), sqlite3_column_int64(sw.p, 2)});
+        }
         json::array rows;
         Statement s(impl_->db, "SELECT id,name,email,auth_user,state,disabled,expired FROM "
                                "accounts ORDER BY rowid");
         while (s.row()) {
+            const auto id = s.str(0);
             auto o = summary(decode(s));
             o["expired"] = sqlite3_column_int(s.p, 6) != 0;
             json::array failures;
             Statement f(impl_->db, "SELECT model,until,count,kind FROM failures WHERE account=?");
-            f.text(1, s.str(0));
+            f.text(1, id);
             while (f.row())
                 failures.push_back(json::object{{"model", f.str(0)},
                                                 {"until", sqlite3_column_int64(f.p, 1)},
@@ -1772,7 +1855,7 @@ json::array Store::account_status() {
                                                 {"kind", f.str(3)}});
             o["failures"] = failures;
             Statement fp(impl_->db, "SELECT seed,timezone,locale,firefox,backend FROM fingerprints WHERE account=?");
-            fp.text(1, s.str(0));
+            fp.text(1, id);
             if (fp.row()) {
                 o["fingerprint"] = json::object{{"seed", sqlite3_column_int64(fp.p, 0)},
                                                 {"timezone", fp.str(1)}, {"locale", fp.str(2)}};
@@ -1782,7 +1865,24 @@ json::array Store::account_status() {
                 const auto seed = identity.is_object() ? identity.as_object().if_contains("seed") : nullptr;
                 o["firefox_identity"] = !error && seed && (seed->is_int64() || seed->is_uint64()) &&
                                         seed->to_number<std::int64_t>() == sqlite3_column_int64(fp.p, 0);
-                o["backend"] = fp.str(4);
+                const auto stored = fp.str(4);
+                o["backend"] = stored;
+                if (stored == "auto") {
+                    const auto found = switches.find(id);
+                    if (found != switches.end() &&
+                        ((found->second.backend == "camoufox" && camoufox_ready) ||
+                         (found->second.backend == "spidermonkey" && spidermonkey_ready))) {
+                        o["effective_backend"] = found->second.backend;
+                        o["backend_switched_until"] = found->second.until;
+                    } else {
+                        o["effective_backend"] = std::string(default_firefox_backend());
+                    }
+                } else if (!stored.empty()) {
+                    o["effective_backend"] = std::string(effective_backend(stored, effective_cfg.browser_backend));
+                } else {
+                    o["effective_backend"] =
+                        config ? std::string(effective_backend("", config->browser_backend)) : std::string{};
+                }
             }
             rows.push_back(o);
         }

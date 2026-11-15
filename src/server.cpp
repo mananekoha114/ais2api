@@ -335,7 +335,7 @@ class Service {
             }
             return result;
         }
-        if (action == "rotation.status") return store_.rotation_status();
+        if (action == "rotation.status") return store_.rotation_status(config());
         if (action == "browser.diagnostics") return gateway_->diagnostics();
         if (action == "rotation.next") return {{"preferred_account_id", store_.rotate_account()},
             {"browser_prepared", false}};
@@ -363,7 +363,7 @@ class Service {
         catch (...) { sources.browser = {{"status", "unavailable"}}; }
         sources.runtime = doctor(cfg, Config::default_directory(), store_.stored_backends());
         sources.config = cfg;
-        sources.accounts = store_.account_status();
+        sources.accounts = store_.account_status(cfg);
         sources.events = store_.backend_events();
         sources.journal = recent_failure_records(journal_);
         sources.logs = log_sources(cfg.data_dir);
@@ -777,7 +777,10 @@ class Service {
             bool delivered = false;
             // One in-place session rebuild or browser restart per request.
             bool recovered = false;
-            for (unsigned attempt = 0; attempt < cfg.limits.max_attempts; ++attempt) {
+            // One automatic 6-hour Firefox backend switch per request.
+            bool switched_backend = false;
+            unsigned max_attempts = cfg.limits.max_attempts;
+            for (unsigned attempt = 0; attempt < max_attempts; ++attempt) {
                 ++trace.attempts;
                 check_cancel(token);
                 auto account = retry_account ? std::exchange(retry_account, std::nullopt) : store_.choose(request.model, excluded, true);
@@ -892,7 +895,8 @@ class Service {
                     count_error(backend, e.code);
                     if (token.stop_requested() || delivered || continuing)
                         throw;
-                    const bool last = attempt + 1 == cfg.limits.max_attempts;
+                    const bool last = attempt + 1 >= max_attempts;
+                    const bool was_recovered = recovered;
                     auto decision = classify_failure(e, attempt, recovered);
                     // Without an attempt left a recovery cannot run; judge the
                     // failure as if the recovery had already failed.
@@ -938,6 +942,25 @@ class Service {
                         continue;
                     }
                     case FailureAction::cool_and_switch:
+                        if (was_recovered && !switched_backend &&
+                            (decision.cooldown == "permission_temporary" || decision.cooldown == "permission")) {
+                            if (auto *router = dynamic_cast<BackendRouter *>(gateway_.get())) {
+                                if (const auto next_backend = router->alternate_firefox_backend(*account)) {
+                                    switched_backend = true;
+                                    store_.switch_backend(account->id, *next_backend, backend_switch_seconds);
+                                    count_event(backend, "backend_switch");
+                                    log({{"event", "backend_switch"},
+                                         {"request_id", work->usage->id()},
+                                         {"account_id", account->id},
+                                         {"from_backend", backend},
+                                         {"to_backend", *next_backend},
+                                         {"code", e.code}});
+                                    retry_account = account;
+                                    ++max_attempts;
+                                    continue;
+                                }
+                            }
+                        }
                         store_.failure(account->id, request.model, decision.cooldown, e.retry_after);
                         count_cooldown(backend, decision.cooldown);
                         log({{"event", "account_failure"}, {"request_id", work->usage->id()},

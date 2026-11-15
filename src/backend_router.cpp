@@ -7,10 +7,18 @@
 #include "ais2api/backend_router.hpp"
 #include "ais2api/browser.hpp"
 #include "ais2api/camoufox.hpp"
+#include "ais2api/runtime.hpp"
 #include "ais2api/spidermonkey.hpp"
 #include <algorithm>
 
 namespace ais2api {
+namespace {
+// Desktop/server default for "auto" pending Stage 4 experiment; 1-line switch.
+constexpr std::string_view default_desktop_firefox_backend = "camoufox";
+bool default_readiness(std::string_view backend, const Config &config) {
+    return firefox_backend_ready(backend, config);
+}
+} // namespace
 bool valid_account_backend(std::string_view backend) {
     return backend == "cloakbrowser" || backend == "auto" || backend == "camoufox" || backend == "spidermonkey";
 }
@@ -24,24 +32,39 @@ bool spidermonkey_available() {
     return false;
 #endif
 }
+std::string_view default_firefox_backend(std::string_view platform) {
+    if (platform == "termux-arm64" && spidermonkey_available()) return "spidermonkey";
+    return default_desktop_firefox_backend;
+}
+std::string_view default_firefox_backend() {
+    return default_firefox_backend(runtime_platform());
+}
 // Always one of the literals, never a view of the arguments.
-std::string_view effective_backend(std::string_view stored, std::string_view default_backend) {
+std::string_view effective_backend(std::string_view stored, std::string_view default_backend,
+                                   std::string_view platform) {
     if (stored == "cloakbrowser") return "cloakbrowser";
     if (stored == "spidermonkey") return spidermonkey_available() ? "spidermonkey" : "camoufox";
-    if (stored == "auto" || stored == "camoufox") return "camoufox";
-    return default_backend == "camoufox" ? "camoufox" : "cloakbrowser";
+    if (stored == "camoufox") return "camoufox";
+    if (stored == "auto") return default_firefox_backend(platform);
+    return default_backend == "camoufox" ? default_firefox_backend(platform) : "cloakbrowser";
+}
+std::string_view effective_backend(std::string_view stored, std::string_view default_backend) {
+    return effective_backend(stored, default_backend, runtime_platform());
 }
 std::string_view identity_family(std::string_view backend) {
     return backend == "cloakbrowser" ? "chrome" : "firefox";
 }
-std::vector<std::string> backends_needed(std::string_view default_backend, const std::vector<std::string> &stored) {
-    std::vector<std::string> result{std::string(effective_backend({}, default_backend))};
+std::vector<std::string> backends_needed(std::string_view default_backend, const std::vector<std::string> &stored,
+                                         std::string_view platform) {
+    std::vector<std::string> result{std::string(effective_backend({}, default_backend, platform))};
     for (const auto &backend : stored) {
-        std::string next(effective_backend(backend, default_backend));
-        if (next == "spidermonkey") next = "camoufox";
+        std::string next(effective_backend(backend, default_backend, platform));
         if (std::find(result.begin(), result.end(), next) == result.end()) result.push_back(std::move(next));
     }
     return result;
+}
+std::vector<std::string> backends_needed(std::string_view default_backend, const std::vector<std::string> &stored) {
+    return backends_needed(default_backend, stored, runtime_platform());
 }
 json::array backend_deprecations(std::string_view default_backend, const std::vector<std::string> &stored) {
     const bool by_default = effective_backend({}, default_backend) == "cloakbrowser";
@@ -65,8 +88,13 @@ std::unique_ptr<GenerationBackend> browser_gateway(std::string_view backend, con
 }
 } // namespace
 
-BackendRouter::BackendRouter(const Config &config, Store &store, Factory factory)
-    : store_(store), factory_(factory ? std::move(factory) : Factory(browser_gateway)), config_(config) {}
+BackendRouter::BackendRouter(const Config &config, Store &store, Factory factory, Readiness readiness,
+                             std::string platform)
+    : store_(store),
+      factory_(factory ? std::move(factory) : Factory(browser_gateway)),
+      readiness_(readiness ? std::move(readiness) : Readiness(default_readiness)),
+      platform_(platform.empty() ? runtime_platform() : std::move(platform)),
+      config_(config) {}
 BackendRouter::~BackendRouter() = default;
 
 GenerationBackend &BackendRouter::gateway(std::string_view backend) {
@@ -112,7 +140,7 @@ json::object BackendRouter::diagnostics() {
     std::string backend, fallback;
     {
         std::lock_guard lock(mutex_);
-        fallback = effective_backend({}, config_.browser_backend);
+        fallback = effective_backend({}, config_.browser_backend, platform_);
         backend = current_.empty() ? fallback : current_;
         target = &gateway(backend);
     }
@@ -123,8 +151,38 @@ json::object BackendRouter::diagnostics() {
 }
 std::string_view BackendRouter::backend_for(const Account &account) {
     const auto stored = account.id.empty() ? std::nullopt : store_.account_backend(account.id);
+    if (stored && *stored == "auto") {
+        if (const auto switched = store_.backend_switch(account.id)) {
+            Config cfg;
+            {
+                std::lock_guard lock(mutex_);
+                cfg = config_;
+            }
+            if (switched->backend == "spidermonkey" && spidermonkey_available() && readiness_("spidermonkey", cfg))
+                return "spidermonkey";
+            if (switched->backend == "camoufox" && readiness_("camoufox", cfg))
+                return "camoufox";
+        }
+        return default_firefox_backend(platform_);
+    }
     std::lock_guard lock(mutex_);
-    return effective_backend(stored.value_or(std::string{}), config_.browser_backend);
+    return effective_backend(stored.value_or(std::string{}), config_.browser_backend, platform_);
+}
+std::optional<std::string_view> BackendRouter::alternate_firefox_backend(const Account &account) {
+    if (account.id.empty()) return std::nullopt;
+    const auto stored = store_.account_backend(account.id);
+    if (!stored || *stored != "auto") return std::nullopt;
+    const auto active = backend_for(account);
+    if (active != "camoufox" && active != "spidermonkey") return std::nullopt;
+    const std::string_view alternate = active == "camoufox" ? "spidermonkey" : "camoufox";
+    if (alternate == "spidermonkey" && !spidermonkey_available()) return std::nullopt;
+    Config cfg;
+    {
+        std::lock_guard lock(mutex_);
+        cfg = config_;
+    }
+    if (!readiness_(alternate, cfg)) return std::nullopt;
+    return alternate;
 }
 void BackendRouter::reconfigure(const Config &config) {
     std::vector<GenerationBackend *> all;

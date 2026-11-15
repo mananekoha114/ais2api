@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { accountState, cloakbrowserNotice, cooldownReason } from './accounts'
+import { accountBackendSummary, accountState, cloakbrowserNotice, cooldownReason } from './accounts'
 import { formatRelative, formatTime, formatTimestamp } from './format'
 
 // The backend stores INT64_MAX as the deadline of permission cooldowns; after
@@ -55,5 +55,24 @@ describe('cloakbrowserNotice', () => {
     const both = cloakbrowserNotice([{ code: 'cloakbrowser_backend', default_backend: true, accounts: true }])
     expect(both).toContain('浏览器后端改为 Camoufox')
     expect(both).toContain('accounts backend --all auto --yes')
+  })
+})
+
+describe('accountBackendSummary', () => {
+  it('shows effective backend and temporary 6-hour switch state for auto accounts', () => {
+    expect(accountBackendSummary({ id: 'a', backend: 'camoufox', effective_backend: 'camoufox' }, NOW).text).toBe('Camoufox')
+    expect(accountBackendSummary({ id: 'a', backend: 'auto', effective_backend: 'camoufox' }, NOW).text).toBe('自动（Firefox）（Camoufox）')
+    const switched = accountBackendSummary(
+      { id: 'a', backend: 'auto', effective_backend: 'spidermonkey', backend_switched_until: NOW + 3600 },
+      NOW,
+    )
+    expect(switched.text).toBe('自动（Firefox） → SpiderMonkey')
+    expect(switched.title).toContain('已临时切换至 SpiderMonkey')
+    expect(
+      accountBackendSummary(
+        { id: 'a', backend: 'auto', effective_backend: 'camoufox', backend_switched_until: NOW - 1 },
+        NOW,
+      ).text,
+    ).toBe('自动（Firefox）（Camoufox）')
   })
 })

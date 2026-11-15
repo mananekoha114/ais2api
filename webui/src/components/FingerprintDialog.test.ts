@@ -201,6 +201,21 @@ describe('browser fingerprint dialog', () => {
     expect(calls.at(-1)?.body).toEqual({ backend: 'spidermonkey', confirm_identity_change: false })
   })
 
+  it('shows active temporary 6-hour backend failover notice for auto accounts', async () => {
+    stored = {
+      ...stored,
+      backend: 'auto',
+      effective_backend: 'spidermonkey',
+      backend_switched_until: 1_800_021_600,
+      identity: 'firefox',
+      firefox_identity_saved: true,
+      spidermonkey_available: true,
+    }
+    await mountDialog()
+    expect(body()).toContain('已临时切换至 SpiderMonkey')
+    expect(body()).toContain('原后端重复返回 403')
+  })
+
   it('shows the service error and stays open when saving fails', async () => {
     await mountDialog()
     segment('时区来源', '自定义').click()

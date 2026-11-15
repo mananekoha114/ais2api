@@ -34,6 +34,7 @@ const eventNames: Record<string, { label: string; hint: string }> = {
   terms_required: { label: '需要同意条款', hint: 'AI Studio 要求账号同意条款；ais2api 只会自动继续欢迎对话框' },
   session_rebuild: { label: '就地重建会话', hint: '失败后在同一浏览器内重建页面会话' },
   browser_restart: { label: '重启浏览器', hint: '失败后重启了整个浏览器进程' },
+  backend_switch: { label: '自动切换后端', hint: '自动后端账号在就地重建会话后仍遇 403，已临时切换到另一 Firefox 后端 6 小时' },
 }
 
 const data = ref<Diagnostics | null>(null)
