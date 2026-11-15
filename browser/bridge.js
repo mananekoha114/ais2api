@@ -5,8 +5,10 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 /* ais2api page bridge. No credentials, snapshots or response bodies are persisted. */
-(() => {
-  if (globalThis.__ais2bridge) return;
+(function(publish) {
+  if (typeof publish === 'function') {
+    if (globalThis.top && globalThis.top !== globalThis) return;
+  } else if (globalThis.__ais2bridge) return;
   const nativeFetch = globalThis.fetch.bind(globalThis);
   const state = { template: null, snapshotCall: null, models: [], transfer: null, discoveryRequest: null, templateTransport: null, snapshotCandidates: 0, snapshotHooked: 0 };
   const fail = message => { throw new Error(message); };
@@ -608,11 +610,14 @@
     const resolve = t.credit; t.credit = null; resolve();
     return true;
   }
-  globalThis.__ais2bridge = {
+  const bridge = {
     identity, bootstrap, finishBootstrap, run, snapshot, append, start, ack, next, abort, discoverModels,
     poll: () => relayState(state.transfer),
     capability: () => ({ benefitTier: Date.now() < benefit.expires ? benefit.tier : 'unknown', template: state.template ? { body: state.template.body } : null, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', snapshot: !!state.snapshotCall, discovery: !!state.discoveryRequest, templateTransport: state.templateTransport, snapshotCandidates: state.snapshotCandidates, snapshotHooked: state.snapshotHooked }),
+    experimentContext: () => state.template ? { url: state.template.url, body: state.template.body, apiKey: state.template.headers['x-goog-api-key'] || '', visitId: state.template.headers['x-aistudio-visit-id'] || '', extension: state.template.headers['x-goog-ext-519733851-bin'] || '', tier: Date.now() < benefit.expires ? benefit.tier : 'unknown', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' } : null,
     models: () => state.models,
     dispose: () => { abort(); benefit.controller?.abort(); clearInterval(installTimer); }
   };
-})()
+  if (typeof publish === 'function') publish(bridge);
+  else globalThis.__ais2bridge = bridge;
+})(typeof arguments !== 'undefined' ? arguments[0] : undefined)

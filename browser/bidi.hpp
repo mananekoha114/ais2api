@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <concepts>
 #include <condition_variable>
 #include <deque>
 #include <map>
@@ -24,6 +25,7 @@
 #include <optional>
 #include <set>
 #include <thread>
+#include <vector>
 namespace ais2api::browser_detail {
 namespace bidi_net {
 namespace asio = boost::asio;
@@ -129,29 +131,79 @@ public:
         message += "},\"awaitPromise\":true,\"resultOwnership\":\"none\"}}";
         return script_value("script.evaluate", transact(std::move(message), id, token, timeout, context));
     }
-    // Calls `declaration` in the context's page realm. The arguments travel as
-    // protocol string values, never as script source.
-    json::value call_function(std::string_view declaration, std::initializer_list<std::string_view> arguments, const std::string& context,
+    // An argument to script.callFunction: a string escaped once from its view,
+    // a scalar BiDi LocalValue, or a serialized BiDi LocalValue / RemoteReference
+    // object such as {{"handle", bridge_handle}}.
+    struct Argument {
+        std::string_view string;
+        std::string raw;
+        bool is_raw = false;
+        Argument(std::string_view value) : string(value) {}
+        Argument(const std::string& value) : string(value) {}
+        Argument(const char* value) : string(value) {}
+        template<std::integral Integer>
+            requires (!std::same_as<Integer, bool> && !std::same_as<Integer, char>)
+        Argument(Integer value) : raw("{\"type\":\"number\",\"value\":" + std::to_string(value) + "}"), is_raw(true) {}
+        template<std::same_as<bool> Bool>
+        Argument(Bool value) : raw(value ? "{\"type\":\"boolean\",\"value\":true}" : "{\"type\":\"boolean\",\"value\":false}"), is_raw(true) {}
+        Argument(const json::object& object) : raw(json::serialize(object)), is_raw(true) {}
+    };
+    // Calls `declaration` in the context's page realm. Arguments travel as
+    // protocol values and remote references, never as interpolated script source.
+    json::value call_function(std::string_view declaration, const Argument* arguments, std::size_t count, const std::string& context,
                               std::stop_token token, std::chrono::seconds timeout = std::chrono::seconds(30)) {
         const auto id = next_id();
         auto size = json_size(json::string_view(declaration)) + json_size(json::string_view(context)) + 160;
-        for (auto argument : arguments) size += json_size(json::string_view(argument)) + 28;
+        for (std::size_t index = 0; index < count; ++index)
+            size += arguments[index].is_raw ? arguments[index].raw.size() + 2 : json_size(json::string_view(arguments[index].string)) + 28;
         std::string message = "{\"id\":" + std::to_string(id) + ",\"method\":\"script.callFunction\",\"params\":{\"functionDeclaration\":";
         message.reserve(message.size() + size);
         append_quoted(message, declaration);
         message += ",\"arguments\":[";
-        bool first = true;
-        for (auto argument : arguments) {
-            if (!first) message += ',';
-            first = false;
-            message += "{\"type\":\"string\",\"value\":";
-            append_quoted(message, argument);
-            message += '}';
+        for (std::size_t index = 0; index < count; ++index) {
+            if (index > 0) message += ',';
+            if (arguments[index].is_raw) {
+                message += arguments[index].raw;
+            } else {
+                message += "{\"type\":\"string\",\"value\":";
+                append_quoted(message, arguments[index].string);
+                message += '}';
+            }
         }
         message += "],\"target\":{\"context\":";
         append_quoted(message, context);
         message += "},\"awaitPromise\":true,\"resultOwnership\":\"none\"}}";
         return script_value("script.callFunction", transact(std::move(message), id, token, timeout, context));
+    }
+    json::value call_function(std::string_view declaration, std::initializer_list<Argument> arguments, const std::string& context,
+                              std::stop_token token, std::chrono::seconds timeout = std::chrono::seconds(30)) {
+        return call_function(declaration, arguments.begin(), arguments.size(), context, token, timeout);
+    }
+    json::value call_function(std::string_view declaration, const std::vector<Argument>& arguments, const std::string& context,
+                              std::stop_token token, std::chrono::seconds timeout = std::chrono::seconds(30)) {
+        return call_function(declaration, arguments.data(), arguments.size(), context, token, timeout);
+    }
+    // Returns the latest RemoteReference handle sent over a preload channel for
+    // `context`, waiting up to `wait` when none has arrived yet.
+    std::string channel_handle(std::string_view channel, const std::string& context, std::stop_token token = {},
+                               std::chrono::milliseconds wait = std::chrono::milliseconds(0)) {
+        check_cancel(token);
+        std::unique_lock lock(mutex_);
+        const std::pair<std::string, std::string> key{std::string(channel), context};
+        if (wait.count() > 0 && !channels_.contains(key) && !failure_ && (context.empty() || !destroyed_.contains(context))) {
+            cv_.wait_until(lock, token, Clock::now() + wait, [&] {
+                return channels_.contains(key) || failure_ || (!context.empty() && destroyed_.contains(context));
+            });
+        }
+        if (failure_) throw *failure_;
+        if (!context.empty() && destroyed_.contains(context)) throw lost();
+        if (wait.count() > 0) check_cancel(token);
+        const auto found = channels_.find(key);
+        return found == channels_.end() ? std::string{} : found->second;
+    }
+    void clear_channel(std::string_view channel, const std::string& context) {
+        std::lock_guard lock(mutex_);
+        channels_.erase({std::string(channel), context});
     }
     // A page or user context that no longer exists is a lost browser page.
     // Anything else means the browser did not do what was asked, including a
@@ -189,6 +241,7 @@ private:
     std::set<std::uint64_t> waiting_;
     std::map<std::uint64_t, json::object> replies_;
     std::set<std::string> destroyed_;
+    std::map<std::pair<std::string, std::string>, std::string> channels_;
     std::optional<Error> failure_;
     static Error lost() { return Error(502, "browser_disconnected", "Browser page was closed or crashed"); }
     std::uint64_t next_id() { std::lock_guard lock(mutex_); return ++next_; }
@@ -228,12 +281,33 @@ private:
         auto& object = value.as_object();
         const auto type = string_or(object, "type");
         if (type == "event") {
-            if (string_or(object, "method") == "browsingContext.contextDestroyed") {
+            const auto method = string_or(object, "method");
+            if (method == "browsingContext.contextDestroyed") {
                 const auto* params = object.if_contains("params");
                 const auto context = params && params->is_object() ? string_or(params->as_object(), "context") : std::string{};
                 if (!context.empty()) {
-                    { std::lock_guard lock(mutex_); destroyed_.insert(context); }
+                    {
+                        std::lock_guard lock(mutex_);
+                        destroyed_.insert(context);
+                        std::erase_if(channels_, [&](const auto& entry) { return entry.first.second == context; });
+                    }
                     cv_.notify_all();
+                }
+            } else if (method == "script.message") {
+                const auto* params = object.if_contains("params");
+                if (params && params->is_object()) {
+                    const auto channel = string_or(params->as_object(), "channel");
+                    const auto* sent = params->as_object().if_contains("data");
+                    const auto* source = params->as_object().if_contains("source");
+                    const auto handle = sent && sent->is_object() ? string_or(sent->as_object(), "handle") : std::string{};
+                    const auto context = source && source->is_object() ? string_or(source->as_object(), "context") : std::string{};
+                    if (!channel.empty() && !handle.empty() && !context.empty()) {
+                        {
+                            std::lock_guard lock(mutex_);
+                            if (!destroyed_.contains(context)) channels_[{channel, context}] = handle;
+                        }
+                        cv_.notify_all();
+                    }
                 }
             }
             return true;
