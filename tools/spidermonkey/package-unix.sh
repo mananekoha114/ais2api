@@ -43,7 +43,6 @@ case "$target" in
         mozconfig_file="$here/mozconfig-linux-x64"
         cxx="$state/clang/bin/clang++"
         llvm_ar="$state/clang/bin/llvm-ar"
-        extra_shim_flags=""
         sys_libs='"pthread", "dl", "m"'
         toolchain_extra='"glibc": "'"$(ldd --version 2>/dev/null | head -n 1 | sed 's/.* //')"'"'
         ;;
@@ -52,7 +51,6 @@ case "$target" in
         mozconfig_file="$here/mozconfig-linux-arm64"
         cxx="$state/clang/bin/clang++"
         llvm_ar="$state/clang/bin/llvm-ar"
-        extra_shim_flags=""
         sys_libs='"pthread", "dl", "m"'
         toolchain_extra='"glibc": "'"$(ldd --version 2>/dev/null | head -n 1 | sed 's/.* //')"'"'
         ;;
@@ -63,10 +61,10 @@ case "$target" in
         fi
         rust_target=aarch64-linux-android
         mozconfig_file="$here/mozconfig-android-arm64"
-        ndk_bin="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-        cxx="$ndk_bin/aarch64-linux-android24-clang++"
-        llvm_ar="$ndk_bin/llvm-ar"
-        extra_shim_flags="-DANDROID -D__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__ -fno-short-enums"
+        ndk_toolchain="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+        ndk_sysroot="$ndk_toolchain/sysroot"
+        cxx="$state/clang/bin/clang++"
+        llvm_ar="$state/clang/bin/llvm-ar"
         sys_libs='"dl", "m", "log"'
         ndk_rev=$(sed -n 's/^Pkg\.Revision = //p' "$ANDROID_NDK_HOME/source.properties" 2>/dev/null | tr -d '\r' || true)
         toolchain_extra='"androidNdk": "'"$ndk_rev"'", "androidApi": 24'
@@ -97,10 +95,17 @@ mkdir -p "$out/include" "$out/lib" "$out/licenses" "$out/obj"
 cp "$objdir/$rust_target/release/libjsrust.a" "$out/lib/libjsrust.a"
 
 # Compile the pure extern "C" embedding shim with -fPIC and matching ABI flags.
-# shellcheck disable=SC2086
-"$cxx" -std=gnu++20 -O2 -fPIC -fno-rtti -fno-exceptions -fno-sized-deallocation \
+set -- -std=gnu++20 -O2 -fPIC -fno-rtti -fno-exceptions -fno-sized-deallocation \
     -ffunction-sections -fdata-sections -DNDEBUG -DSTATIC_JS_API -DJS_STANDALONE \
-    -DXP_UNIX -DXP_LINUX $extra_shim_flags \
+    -DXP_UNIX -DXP_LINUX
+if [ "$target" = "android-arm64" ]; then
+    set -- "$@" \
+        "--target=aarch64-linux-android24" \
+        "--sysroot=$ndk_sysroot" \
+        "--gcc-toolchain=$ndk_toolchain" \
+        -DANDROID -D__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__ -fno-short-enums
+fi
+"$cxx" "$@" \
     -I "$objdir/dist/include" -I "$shim" \
     -c "$shim/mozjs.cpp" -o "$out/obj/mozjs.o"
 "$llvm_ar" rcs "$out/lib/libmozjs_shim.a" "$out/obj/mozjs.o"
