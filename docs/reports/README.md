@@ -6,6 +6,7 @@
 
 | 日期 | 报告 | 内容 |
 |---|---|---|
+| 2026-11-15 | [SpiderMonkey 主线收尾与对照实验（P4）](spidermonkey-experiment-2026-11-15.md) | 四平台静态库与网络指纹收尾、无浏览器身份生成、BiDi 通道隐藏、6 小时自动切换与 Termux NDK 路由、三格对照实验与默认路由决策 |
 | 2026-11-14 | [SpiderMonkey 升级到 158.0.1（P4 第二项）](spidermonkey-158-2026-11-14.md) | 构建与引擎补丁、宿主与页面行为的移植、对象结构表的采集工具与核对、Camoufox 的全局键顺序等发现 |
 | 2026-11-14 | [Firefox 网络指纹实现（P4 第一步）](firefox-network-stack-2026-11-14.md) | curl-impersonate 的接入与参数、离线指纹测试、与 Camoufox 并排的实盘抓包、抓包后的修正与剩下的差异 |
 | 2026-11-12 | [SpiderMonkey 原型（P3）](spidermonkey-prototype-2026-11-12.md) | 嵌入 SpiderMonkey 运行 WAA 的真实账号验证、资源占用、四格对照实验的中止与分析、已知差异与 P4 遗留事项 |
