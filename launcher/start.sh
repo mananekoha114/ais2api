@@ -4,7 +4,8 @@
 # One-click launcher at the root of the Linux and Termux runtime archives.
 # It initializes config.json and data/ beside the executable on first use,
 # offers to run setup when no browser is available, and then runs the service
-# in this terminal until Ctrl+C. --background starts it detached instead.
+# in this terminal until Ctrl+C. --background starts it detached instead, and
+# --skip-setup skips running setup when checking browser readiness.
 # Every other argument (for example --port 18452) is passed to each command.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -17,10 +18,19 @@ if [ ! -x "$program" ]; then
   exit 1
 fi
 background=0
-if [ "${1:-}" = --background ]; then
-  background=1
+skip_setup=0
+arg_count=$#
+arg_index=0
+while [ "$arg_index" -lt "$arg_count" ]; do
+  arg=$1
   shift
-fi
+  case $arg in
+    --background) background=1 ;;
+    --skip-setup) skip_setup=1 ;;
+    *) set -- "$@" "$arg" ;;
+  esac
+  arg_index=$((arg_index + 1))
+done
 
 # Captured stdout is single-line JSON; errors still reach the terminal readably.
 # Prints a string or number field; JSON-escaped backslashes are unescaped.
@@ -48,24 +58,26 @@ case $init in
 esac
 
 doctor=$("$program" doctor "$@")
-case $doctor in
-  *'"browser_exists":true'*) ;;
-  *)
-    echo "浏览器尚未准备或需要更新。setup 会下载浏览器，并安装所需的系统依赖（Linux 可能通过 sudo 使用 apt-get，Termux 会创建 proot Ubuntu 容器）。"
-    if [ ! -t 0 ]; then
-      echo "请在终端中确认后运行：\"$program\" setup --yes" >&2
-      exit 1
-    fi
-    printf '是否现在运行 setup？[y/N] '
-    read -r answer || answer=
-    case $answer in
-      [yY] | [yY][eE][sS]) ;;
-      *) echo "已取消。"; exit 1 ;;
-    esac
-    "$program" setup --yes "$@" >/dev/null
-    echo "浏览器已准备完成。"
-    ;;
-esac
+if [ "$skip_setup" = 0 ]; then
+  case $doctor in
+    *'"browser_exists":true'*) ;;
+    *)
+      echo "浏览器尚未准备或需要更新。setup 会下载浏览器，并安装所需的系统依赖（Linux 可能通过 sudo 使用 apt-get，Termux 会创建 proot Ubuntu 容器）。"
+      if [ ! -t 0 ]; then
+        echo "请在终端中确认后运行：\"$program\" setup --yes" >&2
+        exit 1
+      fi
+      printf '是否现在运行 setup？[y/N] '
+      read -r answer || answer=
+      case $answer in
+        [yY] | [yY][eE][sS]) ;;
+        *) echo "已取消。"; exit 1 ;;
+      esac
+      "$program" setup --yes "$@" >/dev/null
+      echo "浏览器已准备完成。"
+      ;;
+  esac
+fi
 
 if [ "$background" = 1 ]; then
   "$program" start "$@" >/dev/null

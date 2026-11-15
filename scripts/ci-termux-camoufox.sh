@@ -26,7 +26,7 @@ export LD_PRELOAD="$PREFIX/lib/libtermux-exec-ld-preload.so"
 test -f "$LD_PRELOAD"
 apt-get update
 apt-get upgrade -y -o Dpkg::Options::=--force-confnew
-pkg install -y clang cmake ninja git curl pkg-config boost boost-headers libcurl openssl libarchive libsqlite zstd python tar
+pkg install -y clang cmake ninja git curl pkg-config boost boost-headers libnghttp2 openssl libarchive libsqlite zlib zstd xz-utils python tar
 # libc++ supplies syncstream declarations through its experimental feature gate.
 CC=clang CXX=clang++ CXXFLAGS=-fexperimental-library sh scripts/build.sh termux --jobs "$(nproc)"
 

@@ -107,9 +107,9 @@ class RuntimeArchiveTests(unittest.TestCase):
         Path(str(path) + '.sha256').write_text(hashlib.sha256(path.read_bytes()).hexdigest() + '\n')
         return path
 
-    def verify(self, path=None, target='termux-aarch64', dev=False, with_browser=False):
+    def verify(self, path=None, target='termux-aarch64', dev=False):
         with contextlib.redirect_stdout(io.StringIO()):
-            return checker.check(path or self.archive(), with_browser, target, dev)
+            return checker.check(path or self.archive(), target, dev)
 
     def camoufox(self, version='158.0.1-beta.41', **marker):
         """A dev bundle's Camoufox for a manifest pinning `version`."""
@@ -171,8 +171,10 @@ class RuntimeArchiveTests(unittest.TestCase):
         self.files['bin/ais2api'] = executable()
         with self.assertRaisesRegex(ValueError, 'not_a_dev_build'):
             self.verify(self.archive(metadata=False, windows=True), target='desktop', dev=True)
-        with self.assertRaisesRegex(ValueError, 'dev_bundle_cannot_carry_cloakbrowser'):
-            self.verify(self.dev_archive(), target='desktop', dev=True, with_browser=True)
+        self.files['bin/browser-runtime/windows-x64/chrome.exe'] = b'chrome'
+        with self.assertRaisesRegex(ValueError, 'unexpected_browser_bundle'):
+            self.verify(self.archive(metadata=False, windows=True), target='desktop')
+        del self.files['bin/browser-runtime/windows-x64/chrome.exe']
         with self.assertRaisesRegex(ValueError, 'termux_requires_backend_tar_gz'):
             self.verify(dev=True)
 
