@@ -5,7 +5,7 @@
 阅读时请注意区分四类证据，它们不能互相替代：
 
 - **离线合成**：合成样例、模拟页面或合成生成源，不连接 Google。
-- **真实浏览器**：真实启动 CloakBrowser/Chromium，但使用合成 Cookie 或拦截页面。
+- **真实浏览器**：真实启动浏览器（当前为 Camoufox，早期记录为 CloakBrowser/Chromium），但使用合成 Cookie 或拦截页面。
 - **真实账号**：使用真实 Google 账号 Cookie 访问 AI Studio。
 - **真实设备**：在目标平台的真实环境（如 Android 手机）上运行。
 
@@ -21,7 +21,7 @@
 | Cookie 导入与专用脚本 | Windows / Debian 离线 HTTP 测试及 Node VM 测试通过 | 原版推送格式、独立密钥、元数据转换、分区过滤、身份检查、事务更新、队列限额、超时、取消与保存前撤销检查；未使用真实 Cookie |
 | Linux sanitizer 与模糊测试 | Debian 13 GCC 14.2 与 Clang 19 ASan/UBSan 均为 105 个用例、1,591 条断言通过；Clang ASan/UBSan 下 21 秒完成 878,837 次输入，无 sanitizer 错误 | 本机 WSL 2 原生 Linux；短时线路解析器冒烟，不是长期稳定性或完整覆盖证明 |
 
-C++ HTTP 测试使用真实的回环 TCP、HTTP 分块编码、SQLite 和本地 IPC，生成源是合成的 `GenerationBackend`。它们验证了多轮、Gemini 聚合、OpenAI SSE usage 数据块、正常结束、首个内容后出错不重试以及客户端断开取消。生产程序始终使用 BrowserGateway，没有模拟生成开关。
+C++ HTTP 测试使用真实的回环 TCP、HTTP 分块编码、SQLite 和本地 IPC，生成源是合成的 `GenerationBackend`。它们验证了多轮、Gemini 聚合、OpenAI SSE usage 数据块、正常结束、首个内容后出错不重试以及客户端断开取消。生产程序始终使用真实的后端路由（Camoufox / SpiderMonkey），没有模拟生成开关。
 
 其他回归覆盖：任意网络分块、UTF-8、XSSI、截断与对象限额；函数值与 schema、逐块签名、重复工具调用 ID 与扩展往返；账号隔离元数据、冷却与持久化；归档越界、重复文件、Windows 设备路径；32 个半请求头连接上限；累计媒体预算；超大及已完成的下载残片处理；`probe all` 在单个账号过期时继续检查其他账号、过期账号不参与调度、无可用账号时 `/ready` 返回 503；Cookie 文件/管道末尾的 CRLF 与 UTF-8 BOM。
 

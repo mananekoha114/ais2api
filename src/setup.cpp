@@ -8,7 +8,6 @@
 #include "ais2api/backend_router.hpp"
 #include "ais2api/media.hpp"
 #include "ais2api/browser.hpp"
-#include "ais2api/bundle.hpp"
 #include "ais2api/camoufox.hpp"
 #include "ais2api/console.hpp"
 #include "ais2api/firefox_identity.hpp"
@@ -99,14 +98,6 @@ void checked_process(const std::vector<std::string> &args) {
         throw Error(502, "system_prepare",
                     "System preparation failed; inspect the preceding package-manager output and "
                     "rerun setup");
-}
-json::object verify_browser(const Config &config, const fs::path &executable) {
-    auto verification = config;
-    verification.browser_executable = executable;
-    verification.headless = true;
-    Store store(config.data_dir);
-    BrowserGateway gateway(verification, store);
-    return gateway.verify_runtime();
 }
 const char *termux_prefix() {
     const char *prefix = std::getenv("TERMUX__PREFIX");
@@ -997,14 +988,6 @@ void check_distribution(std::string_view os_release) {
                     "manually configure browser_executable on other distributions");
 }
 } // namespace
-std::vector<std::string> linux_runtime_packages(std::string_view os_release) {
-    check_distribution(os_release);
-    // Ubuntu 24.04 and Debian 13 both use the t64 library package names.
-    return {"libnss3", "libnspr4", "libatk1.0-0t64", "libatk-bridge2.0-0t64",
-            "libcups2t64", "libdrm2", "libxkbcommon0", "libxcomposite1", "libxdamage1",
-            "libxfixes3", "libxrandr2", "libgbm1", "libasound2t64", "libgtk-3-0t64",
-            "fonts-noto-cjk", "fonts-noto-color-emoji", "ca-certificates"};
-}
 std::vector<std::string> camoufox_linux_packages(std::string_view os_release) {
     check_distribution(os_release);
     // Xvfb is the display a headless launch runs on, with Mesa's software
@@ -1012,148 +995,9 @@ std::vector<std::string> camoufox_linux_packages(std::string_view os_release) {
     return {"xvfb",           "libgtk-3-0t64", "libx11-xcb1", "libasound2t64", "libdbus-1-3",
             "libgl1-mesa-dri", "libegl1",       "fontconfig",  "ca-certificates"};
 }
-namespace {
-json::object setup_cloakbrowser(Config &config, bool approved) {
-    auto m = manifest();
-    auto system = platform();
-    if (!m.at("artifacts").as_object().contains(system))
-        throw Error(400, "unsupported_platform",
-                    "No CloakBrowser is pinned for " + system + "; use the camoufox backend");
-    auto version = string_or(m, "browser_version");
-    auto artifact = m.at("artifacts").as_object().at(system).as_object();
-    auto root = config.data_dir / "runtime";
-    secure_directory(config.data_dir);
-    secure_directory(root);
-    auto journal = root / "setup.json";
-    auto stage = [&](std::string name) {
-        console::emit_record({{"event", "setup_stage"},
-                              {"stage", name},
-                              {"browser_version", version},
-                              {"platform", system}});
-        atomic_write(journal,
-                     json::serialize(json::object{{"version", 1},
-                                                  {"stage", name},
-                                                  {"browser_version", version},
-                                                  {"platform", system}}),
-                     true);
-    };
-    auto prepared = [&](const fs::path &launcher, bool bundled) -> json::object {
-        stage("verify");
-        auto browser_verification = verify_browser(config, launcher);
-        if (!config.browser_executable.empty() && config.browser_executable != launcher)
-            atomic_write(root / "previous.json",
-                         json::serialize(json::object{{"browser_executable",
-                             config.to_json(true).at("browser_executable")}}), true);
-        auto previous = config.browser_executable;
-        config.browser_executable = launcher;
-        try {
-            atomic_write(config.config_file, json::serialize(config.to_json(true)), true);
-        } catch (...) {
-            config.browser_executable = previous;
-            throw;
-        }
-        stage("complete");
-        return {{"status", "prepared"}, {"browser_version", version},
-                {"browser_executable", path_utf8(launcher)}, {"bundled", bundled},
-                {"verified", "local_cdp_and_isolated_context"},
-                {"browser_verification", browser_verification},
-                {"note", "Run accounts probe and an actual generation to verify Google access"}};
-    };
-    stage("system-check");
-    if (system != "windows-x64" && !approved)
-        throw Error(409, "system_confirmation_required",
-                    "System packages may be installed. Review the setup documentation and run "
-                    "setup --yes to approve package-manager changes");
-    if (system == "linux-x64") {
-        auto packages = linux_runtime_packages(read_file("/etc/os-release", 65536));
-        std::vector<std::string> prefix;
-#ifndef _WIN32
-        if (geteuid() != 0)
-            prefix = {"sudo", "--"};
-#endif
-        auto command = prefix;
-        command.insert(command.end(), {"apt-get", "update"});
-        checked_process(command);
-        command = prefix;
-        command.insert(command.end(), {"apt-get", "install", "-y"});
-        command.insert(command.end(), packages.begin(), packages.end());
-        checked_process(command);
-    } else if (system == "termux-arm64") {
-        prepare_termux_container(root);
-        install_container_packages(linux_runtime_packages(container_os_release));
-        mark_termux_container_ready(root);
-    }
-    if (auto bundle = bundled_browser(Config::default_directory()); !bundle.empty()) {
-        stage("bundle-check");
-        verify_browser_bundle(bundle);
-        return prepared(bundle, true);
-    }
-    auto target = root / ("chromium-" + version + "-" + system);
-    auto executable = target / (system == "windows-x64" ? "chrome.exe" : "chrome");
-    if (!fs::is_regular_file(executable)) {
-        if (fs::exists(target))
-            throw Error(409, "incomplete_runtime",
-                        "An incomplete final runtime directory exists; preserve it and rerun with "
-                        "a clean version directory");
-        if (fs::space(root).available < 2ull * 1024 * 1024 * 1024)
-            throw Error(507, "disk_space",
-                        "At least two GiB of free space is required for browser staging");
-        stage("download");
-        auto cache =
-            root / "downloads" / (system == "windows-x64" ? "browser.zip" : "browser.tar.gz");
-        download_verified(string_or(artifact, "url"), cache, string_or(artifact, "sha256"),
-                          config.proxy, json::value_to<std::uint64_t>(artifact.at("size")));
-        stage("extract");
-        auto staging = root / ("staging-" + random_hex(8));
-        try {
-            extract_archive(cache, staging);
-            auto binary = staging / executable.filename();
-            if (!fs::is_regular_file(binary))
-                throw Error(502, "archive_layout",
-                            "Runtime archive does not contain the expected executable");
-            atomic_write(staging / ".ais2api-runtime.json",
-                         json::serialize(json::object{{"browser_version", version},
-                                                      {"sha256", string_or(artifact, "sha256")}}),
-                         true);
-            fs::rename(staging, target);
-        } catch (...) {
-            std::error_code ec;
-            fs::remove_all(staging, ec);
-            throw;
-        }
-    }
-    auto ownership = target / ".ais2api-runtime.json";
-    if (!fs::is_regular_file(ownership))
-        throw Error(409, "unknown_runtime",
-                    "Existing browser directory has no project ownership marker");
-    auto owner = json::parse(read_file(ownership, 65536)).as_object();
-    if (string_or(owner, "browser_version") != version ||
-        string_or(owner, "sha256") != string_or(artifact, "sha256"))
-        throw Error(409, "unknown_runtime",
-                    "Existing browser directory does not match the locked artifact");
-    fs::path launcher = executable;
-    if (system == "termux-arm64") {
-        auto prefix = std::getenv("PREFIX");
-        if (!prefix)
-            throw Error(400, "environment", "Missing Termux PREFIX");
-        launcher = target / "run-browser.sh";
-        auto target_string = fs::absolute(target).string(),
-             data = fs::absolute(config.data_dir).string();
-        auto text = "#!" + std::string(prefix) + "/bin/sh\nexec proot-distro login --bind " +
-                    sh_quote(target_string + ":" + target_string) + " --bind " +
-                    sh_quote(data + ":" + data) + " " + std::string(termux_container) + " -- " +
-                    sh_quote(fs::absolute(executable).string()) + " \"$@\"\n";
-        atomic_write(launcher, text, true);
-#ifndef _WIN32
-        fs::permissions(launcher, fs::perms::owner_all);
-#endif
-    }
-    return prepared(launcher, false);
-}
-} // namespace
 json::object setup_runtime(Config &config, bool approved, std::string_view backend) {
-    if (!backend.empty() && backend != "cloakbrowser" && backend != "camoufox" && backend != "spidermonkey")
-        throw Error(400, "invalid_backend", "backend must be cloakbrowser, camoufox or spidermonkey");
+    if (!backend.empty() && backend != "camoufox" && backend != "spidermonkey")
+        throw Error(400, "invalid_backend", "backend must be camoufox or spidermonkey");
     const auto accounts = stored_backends(config.data_dir);
     const auto backends = backend.empty() ? backends_needed(config.browser_backend, accounts)
                                           : std::vector<std::string>{std::string(backend)};
@@ -1161,19 +1005,14 @@ json::object setup_runtime(Config &config, bool approved, std::string_view backe
     json::object result;
     json::array prepared;
     for (const auto &name : backends) {
-        auto next = name == "camoufox"     ? setup_camoufox(config, approved)
-                  : name == "spidermonkey" ? setup_spidermonkey(config)
-                                           : setup_cloakbrowser(config, approved);
+        auto next = name == "spidermonkey" ? setup_spidermonkey(config)
+                                           : setup_camoufox(config, approved);
         if (result.empty()) result = std::move(next);
         else result[name] = std::move(next);
         prepared.emplace_back(name);
     }
     result["backends"] = std::move(prepared);
-    // CloakBrowser prepared on request alone is deprecated all the same.
-    auto deprecations = backend_deprecations(config.browser_backend, accounts);
-    if (deprecations.empty() && backend == "cloakbrowser")
-        deprecations.push_back(json::object{{"code", "cloakbrowser_backend"}, {"default_backend", false}, {"accounts", false}});
-    result["deprecations"] = std::move(deprecations);
+    result["deprecations"] = backend_deprecations(config.browser_backend, accounts);
     return result;
 }
 namespace {
@@ -1204,36 +1043,13 @@ json::object rollback_camoufox(const Config &config, const fs::path &program_dir
 }
 } // namespace
 json::object rollback_runtime(Config &config, const fs::path &program_directory, std::string_view backend) {
-    if (!backend.empty() && backend != "cloakbrowser" && backend != "camoufox" && backend != "spidermonkey")
-        throw Error(400, "invalid_backend", "backend must be cloakbrowser, camoufox or spidermonkey");
+    if (!backend.empty() && backend != "camoufox" && backend != "spidermonkey")
+        throw Error(400, "invalid_backend", "backend must be camoufox or spidermonkey");
     const auto target = backend.empty() ? effective_backend({}, config.browser_backend) : backend;
     if (target == "spidermonkey")
         throw Error(409, "rollback_missing",
                     "SpiderMonkey is built into ais2api and has no separate runtime to roll back");
-    if (target == "camoufox")
-        return rollback_camoufox(config, program_directory);
-    auto file = config.data_dir / "runtime/previous.json";
-    auto previous = json::parse(read_file(file, 65536)).as_object();
-    auto path = fs::u8path(string_or(previous, "browser_executable"));
-    if (path.is_relative())
-        path = (config.config_file.parent_path() / path).lexically_normal();
-    if (!fs::is_regular_file(path))
-        throw Error(409, "rollback_missing", "Previous browser executable no longer exists");
-    auto browser_verification = verify_browser(config, path);
-    auto current = config.browser_executable;
-    auto stored_current = config.to_json(true).at("browser_executable");
-    config.browser_executable = path;
-    try {
-        atomic_write(config.config_file, json::serialize(config.to_json(true)), true);
-    } catch (...) {
-        config.browser_executable = current;
-        throw;
-    }
-    atomic_write(file, json::serialize(json::object{{"browser_executable", stored_current}}),
-                 true);
-    return {{"status", "rolled_back"},
-            {"browser_executable", path_utf8(path)},
-            {"browser_verification", browser_verification}};
+    return rollback_camoufox(config, program_directory);
 }
 json::object doctor(const Config &config, const fs::path &program_directory,
                     std::optional<std::vector<std::string>> stored) {
@@ -1263,10 +1079,6 @@ json::object doctor(const Config &config, const fs::path &program_directory,
             {"google_access", "not_checked"}};
     // Ready only when every backend the accounts need is.
     bool configured = true, exists = true;
-    if (needs("cloakbrowser")) {
-        configured = !config.browser_executable.empty();
-        exists = fs::is_regular_file(config.browser_executable);
-    }
     std::string model_state;
     if (needs("camoufox") || needs("spidermonkey")) {
         const auto model = fpgen_model_pin(m);

@@ -82,15 +82,13 @@ json::object fingerprint_view(Store& store, const Config& config, std::string_vi
         }
     }
     const auto firefox = store.firefox_identity(id);
-    // A Firefox identity presents the OS it was generated on, CloakBrowser
-    // the platform it fakes.
+    // Firefox identities present the host OS they were generated on.
 #ifdef _WIN32
     std::string platform = "windows";
 #else
     std::string platform = "linux";
 #endif
-    if (identity_family(effective) == "chrome") platform = fingerprint_platform();
-    else if (firefox && !string_or(*firefox, "os").empty()) platform = string_or(*firefox, "os");
+    if (firefox && !string_or(*firefox, "os").empty()) platform = string_or(*firefox, "os");
     json::object result{{"seed", fingerprint.seed}, {"platform", platform},
                         {"timezone", fingerprint.timezone}, {"locale", fingerprint.locale},
                         {"effective_timezone", fingerprint.timezone.empty() ? timezone : fingerprint.timezone},
@@ -107,29 +105,15 @@ json::object fingerprint_view(Store& store, const Config& config, std::string_vi
 std::string backend_value(const json::object& command) {
     const auto value = command.if_contains("backend");
     if (!value || !value->is_string() || !valid_account_backend(value->as_string()))
-        throw Error(400, "invalid_backend", "backend must be cloakbrowser, auto, camoufox or spidermonkey");
+        throw Error(400, "invalid_backend", "backend must be auto, camoufox or spidermonkey");
     if (value->as_string() == "spidermonkey" && !spidermonkey_available())
         throw Error(400, "backend_unavailable", "This build does not include the SpiderMonkey backend");
     return std::string(value->as_string());
 }
-bool identity_change_confirmed(const json::object& command) {
+void validate_legacy_confirmation(const json::object& command) {
     const auto value = command.if_contains("confirm_identity_change");
     if (value && !value->is_bool())
         throw Error(400, "invalid_command", "confirm_identity_change must be a boolean");
-    return value && value->as_bool();
-}
-// Whether moving the account to `backend` swaps its Chrome identity for a
-// Firefox one or back.
-bool changes_identity(const BrowserFingerprint& fingerprint, const Config& config, std::string_view backend) {
-    const std::string_view current = fingerprint.backend.empty() ? adopted_backend(config.browser_backend)
-                                                                 : std::string_view(fingerprint.backend);
-    return identity_family(effective_backend(current, config.browser_backend)) !=
-           identity_family(effective_backend(backend, config.browser_backend));
-}
-[[noreturn]] void identity_change_unconfirmed() {
-    throw Error(409, "identity_change_unconfirmed",
-                "Switching between CloakBrowser and a Firefox backend gives the account a new browser identity, "
-                "which Google sees as a new device; confirm the change");
 }
 }
 
@@ -164,32 +148,27 @@ json::object manage(Store& store, Config& config, const json::object& command) {
         }
         if (!any) throw Error(400, "invalid_command", "Fingerprint update requires timezone, locale or backend");
         const auto id = identifier(command);
-        const bool confirmed = identity_change_confirmed(command);
-        if (backend && changes_identity(store.fingerprint(id), config, *backend) && !confirmed)
-            identity_change_unconfirmed();
+        validate_legacy_confirmation(command);
         if (timezone || locale) store.set_fingerprint_region(id, timezone, locale);
         if (backend) store.set_backend(id, *backend);
         return fingerprint_view(store, config, id);
     }
-    // Moves every account to one backend: the explicit migration between
-    // CloakBrowser and Firefox identities.
+    // Moves every account to one backend (all Firefox-family backends share
+    // the same identity family).
     if (name == "accounts.backend.all") {
         for (const auto& field : command)
             if (field.key() != "command" && field.key() != "backend" && field.key() != "confirm_identity_change")
                 throw Error(400, "invalid_command", "Unknown account backend field");
         const auto backend = backend_value(command);
-        const bool confirmed = identity_change_confirmed(command);
-        std::size_t identities = 0, updated = 0;
+        validate_legacy_confirmation(command);
+        std::size_t updated = 0;
         const auto accounts = store.accounts();
-        for (const auto& account : accounts)
-            identities += changes_identity(store.fingerprint(account.id), config, backend);
-        if (identities && !confirmed) identity_change_unconfirmed();
         for (const auto& account : accounts)
             if (store.fingerprint(account.id).backend != backend) {
                 store.set_backend(account.id, backend);
                 ++updated;
             }
-        return {{"backend", backend}, {"updated", updated}, {"identity_changed", identities}};
+        return {{"backend", backend}, {"updated", updated}, {"identity_changed", 0}};
     }
     if (name == "accounts.list") {
         json::array accounts;

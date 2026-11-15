@@ -83,6 +83,6 @@ CXXFLAGS=-fexperimental-library sh scripts/build.sh termux --install-deps
 
 工作原理参考了 [aistudio-api-termux](https://github.com/ReedSein/aistudio-api-termux/tree/84b50663fcae79058fe33e0e45b5c3452da7c461)；本项目的实现代码与测试样例为独立编写。
 
-Copyright (c) 2026 Mana Nekoha (mananekoha114)。本项目自有源码、脚本、schema、测试与文档采用 [Mozilla Public License 2.0](LICENSE)，许可声明见 [NOTICE](NOTICE)。第三方依赖与浏览器保留各自的许可，其中可选 `Browser-Local` 包内的 CloakBrowser 仅限个人或内部使用，详见 [第三方说明](THIRD_PARTY_NOTICES.md)。
+Copyright (c) 2026 Mana Nekoha (mananekoha114)。本项目自有源码、脚本、schema、测试与文档采用 [Mozilla Public License 2.0](LICENSE)，许可声明见 [NOTICE](NOTICE)。第三方依赖与浏览器保留各自的许可，详见 [第三方说明](THIRD_PARTY_NOTICES.md)。
 
 请勿将真实 Cookie、API Key 或数据目录提交到任何仓库。

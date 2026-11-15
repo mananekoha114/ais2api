@@ -52,13 +52,13 @@
     },
     "browser_executable": {
       "type": "string",
-      "description": "Explicit browser path, or empty to auto-detect the locked browser-runtime bundle beside the executable."
+      "description": "Explicit Camoufox executable path, or empty to auto-detect bundled or setup-installed Camoufox."
     },
     "browser_backend": {
       "type": "string",
-      "enum": ["cloakbrowser", "camoufox"],
+      "enum": ["camoufox"],
       "default": "camoufox",
-      "description": "Default browser backend: the one new accounts are stored with (camoufox stores them as auto) and the one Cookie import verifies with. New configurations start on camoufox; a file without this field is an older installation and stays on cloakbrowser. Stored accounts keep their own backend, which changes only explicitly (accounts backend, or the fingerprint API). camoufox drives Camoufox over WebDriver BiDi with a Firefox identity generated per account. cloakbrowser is deprecated and will be removed in a later release. Applies without a restart."
+      "description": "Default browser configuration: new accounts are stored as auto (Camoufox on desktop/server, SpiderMonkey on Termux when compiled in) and switch temporarily between Firefox backends for 6 hours on repeated post-recovery 403s when both are ready. Stored accounts keep their own backend (auto, camoufox or spidermonkey). Applies without a restart."
     },
     "proxy": {
       "type": "string",
@@ -68,16 +68,6 @@
       "type": "boolean",
       "default": false,
       "description": "Route the browser through a local relay that authenticates to proxy (http:// or socks5://, with or without credentials) and only opens tunnels to port 443. Requires a restart."
-    },
-    "browser_remote_allow_origins": {
-      "type": "boolean",
-      "default": false,
-      "description": "Launch the browser with --remote-allow-origins=* so pages of any origin may open its loopback DevTools WebSocket. The gateway does not need it; only for external CDP tools. Requires a restart."
-    },
-    "browser_site_isolation": {
-      "type": "boolean",
-      "default": true,
-      "description": "Keep Chromium site isolation. false disables it to save renderer memory on small hosts, at the cost of cross-site process separation. Requires a restart."
     },
     "headless": {
       "type": "boolean",

@@ -1,6 +1,6 @@
 # Docker 部署
 
-本文说明如何构建、运行和升级 ais2api 容器镜像。镜像以 Debian 13 为运行时，提供 `linux/amd64` 与 `linux/arm64` 两种架构。新容器默认使用 Camoufox（Firefox 身份），第一次启动时下载到数据卷；镜像还内置 Debian Chromium，供已弃用的 CloakBrowser 后端使用，不包含 CloakBrowser。
+本文说明如何构建、运行和升级 ais2api 容器镜像。镜像以 Debian 13 为运行时，提供 `linux/amd64` 与 `linux/arm64` 两种架构。容器默认使用 Camoufox（Firefox 身份），第一次启动时下载到数据卷。
 
 ## 构建
 
@@ -134,28 +134,6 @@ docker exec ais2api /app/bin/ais2api config reload --config /data/config.json
   - 安装失败时服务照常启动，但不就绪；在容器里运行 `ais2api browser update camoufox --yes` 可以重试。
 - Firefox 需要较大的共享内存，请加上 `--shm-size=1g`（`compose.yaml` 已设置 `shm_size`）。
 
-### Chromium 与 CloakBrowser（已弃用）
-
-CloakBrowser 后端已弃用，将在以后的版本中移除。升级前创建的数据目录保持原来的后端：它的配置和账号不会被自动换成 Firefox 身份，`doctor` 和 Web 控制台会给出弃用提示。迁移方法见 [按账号选择后端](browser.md#按账号选择后端)；账号换成 Firefox 身份后重启容器，入口脚本会在那时安装 Camoufox。
-
-新容器要继续用这个后端，在第一次启动时加上 `-e AIS2API_BROWSER_BACKEND=cloakbrowser`。
-
-镜像内的 Chromium 是 Debian Chromium，路径 `/usr/bin/chromium`。程序支持其他 Chromium 构建，但 CloakBrowser 的指纹参数会被其他构建忽略；需要固定账号指纹时使用 CloakBrowser。挂载的 CloakBrowser 必须与容器架构一致。
-
-CloakBrowser 的二进制许可不允许再分发，公开镜像不能包含它。已有 CloakBrowser 时，把目录只读挂载进容器并指定可执行文件：
-
-```sh
-docker run -d --name ais2api \
-  -p 18451:18451 \
-  -v "$PWD/data:/data" \
-  -v /opt/cloakbrowser:/opt/cloakbrowser:ro \
-  -e AIS2API_BROWSER_BACKEND=cloakbrowser \
-  -e AIS2API_BROWSER_EXECUTABLE=/opt/cloakbrowser/chrome \
-  ais2api:local
-```
-
-浏览器必须从 CloakHQ 官方渠道获取。不要把自己构建的含 CloakBrowser 镜像上传到公共仓库。
-
 ## 发布镜像
 
 `.github/workflows/docker.yml` 在 amd64 与 arm64 原生 runner 上分别构建并运行冒烟测试，PR 只构建不推送。推送到 `main`、标签或手动触发时，先把各架构镜像推送到 `ghcr.io/mananekoha114/ais2api`，再合并为 multi-arch manifest。
@@ -187,7 +165,7 @@ docker run -d --name ais2api \
 ## 限制
 
 - 提供 `linux/amd64` 与 `linux/arm64` 镜像。
-- 容器内以 root 运行，浏览器以 `--no-sandbox` 启动；容器内无法提供 Chromium 沙箱。
-- 容器没有系统 D-Bus，浏览器日志会出现 `Failed to connect to the bus`；它不影响 CDP 和生成。
+- 容器内以 root 运行，浏览器在无系统沙箱的隔离用户命名空间外启动。
+- 容器没有系统 D-Bus，浏览器或 Xvfb 日志可能会提示总线不可用，不影响 BiDi 与生成。
 - 生成请求串行处理，超过队列上限返回 `429 queue_full`。
 - 构建和冒烟测试只验证程序启动、配置生成、随机管理密码、嵌入式 Web 控制台和 `/health`，不验证 Google 登录、账号探测或真实生成。Camoufox 的首次安装由 `camoufox-runtime.yml` 单独验证（见 [持续集成](platforms.md#持续集成)）。

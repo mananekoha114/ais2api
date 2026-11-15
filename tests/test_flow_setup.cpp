@@ -541,17 +541,11 @@ TEST_CASE("the Camoufox bundled beside the program comes before setup's", "[setu
     fs::remove(bundle / "application.ini");
     CHECK(camoufox_executable(config, program).source == "setup");
 }
-TEST_CASE("Linux setup accepts exact supported os-release identities", "[setup]") {
-    auto debian = linux_runtime_packages("PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\n"
-                                         "VERSION_ID=\"13\"\nID=debian\n");
-    REQUIRE(debian == linux_runtime_packages("ID=\"ubuntu\"\nVERSION_ID=24.04\n"));
-    REQUIRE(debian == linux_runtime_packages("# metadata\r\nID='debian'\r\nVERSION_ID='13'\r\n"));
-    for (auto package : {"libasound2t64", "libcups2t64", "libgtk-3-0t64",
-                         "libatk1.0-0t64", "libatk-bridge2.0-0t64"})
-        REQUIRE(std::find(debian.begin(), debian.end(), package) != debian.end());
+TEST_CASE("Camoufox Linux dependency selection normalizes Debian 13 and Ubuntu 24.04", "[setup]") {
     // Camoufox runs on Xvfb with Mesa, and brings its own fonts.
     const auto camoufox = camoufox_linux_packages("ID=debian\nVERSION_ID=13\n");
     REQUIRE(camoufox == camoufox_linux_packages("ID=ubuntu\nVERSION_ID=\"24.04\"\n"));
+    REQUIRE(camoufox == camoufox_linux_packages("# metadata\r\nID='debian'\r\nVERSION_ID='13'\r\n"));
     for (auto package : {"xvfb", "libgtk-3-0t64", "libasound2t64", "libgl1-mesa-dri"})
         REQUIRE(std::find(camoufox.begin(), camoufox.end(), package) != camoufox.end());
     for (const auto &package : camoufox) REQUIRE_FALSE(package.starts_with("fonts-"));
@@ -576,7 +570,6 @@ TEST_CASE("Linux setup rejects unsupported distributions and substring lookalike
                          "NAME=ubuntu 24.04\n", "# ID=ubuntu\nVERSION_ID=24.04\n",
                          "ID=ubuntu-derivative\nVERSION_ID=24.04\n",
                          "ID=ubuntu\nVERSION_ID=\"24.04\n", "ID=debian\n"}) {
-        REQUIRE_THROWS_AS(linux_runtime_packages(release), Error);
         REQUIRE_THROWS_AS(camoufox_linux_packages(release), Error);
     }
 }

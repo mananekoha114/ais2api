@@ -8,7 +8,6 @@ import { api, describeError } from '../api/client'
 import type { BackendEvents, BrowserDiagnostics, Capabilities, ConfigView, LogSource, Status } from '../api/types'
 import { refreshStatus } from '../stores/service'
 import { confirm, copyText, downloadFile, notify, notifyError } from '../stores/ui'
-import { cloakbrowserNotice } from '../utils/accounts'
 import { browserPhase, browserStatus, cookieRefreshLabel, modelDiscoveryLabel, proxyModeLabel } from '../utils/browser'
 import { formatBytes, formatDuration, formatTimestamp } from '../utils/format'
 
@@ -24,7 +23,7 @@ interface Diagnostics {
   google_verified?: boolean
 }
 
-const backendNames: Record<string, string> = { cloakbrowser: 'CloakBrowser', camoufox: 'Camoufox', spidermonkey: 'SpiderMonkey', custom: '其他' }
+const backendNames: Record<string, string> = { camoufox: 'Camoufox', spidermonkey: 'SpiderMonkey', custom: '其他' }
 const eventNames: Record<string, { label: string; hint: string }> = {
   permission_denied: { label: '403（Code 7）', hint: '上游以 permission_denied 拒绝了生成，包括随后被就地重建救回的' },
   login_redirect: { label: '跳转登录页', hint: '页面被重定向到 Google 登录，Cookie 可能已失效' },
@@ -44,7 +43,6 @@ const loadError = ref('')
 const exporting = ref(false)
 const showRaw = ref(false)
 const stopping = ref(false)
-const deprecation = computed(() => cloakbrowserNotice(data.value?.status?.deprecations))
 
 async function load() {
   loading.value = true
@@ -135,7 +133,6 @@ const capabilityList = computed(() =>
       <FInfoBar v-if="loadError" severity="error" title="加载失败" :message="loadError" />
 
       <template v-if="data">
-        <FInfoBar v-if="deprecation" severity="warning" title="CloakBrowser 已弃用" :message="deprecation" />
         <FInfoBar
           v-if="data.google_verified === false"
           severity="info"

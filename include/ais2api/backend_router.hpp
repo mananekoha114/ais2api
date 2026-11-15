@@ -12,13 +12,11 @@
 #include <mutex>
 
 namespace ais2api {
-// An account's stored browser backend is "cloakbrowser", "auto", "camoufox"
-// or "spidermonkey"; empty means not settled yet. Accounts and new ones
-// follow config.browser_backend only until adopt_backends() settles them, so
-// changing the configuration never moves an account to another identity.
+// An account's stored browser backend is "auto", "camoufox"
+// or "spidermonkey"; empty means not settled yet. New accounts
+// settle onto "auto" via adopt_backends().
 bool valid_account_backend(std::string_view backend);
-// What adopt_backends() stores for config.browser_backend: "cloakbrowser"
-// keeps the Chrome identity, "camoufox" becomes "auto".
+// What adopt_backends() stores for unsettled accounts ("auto").
 std::string_view adopted_backend(std::string_view default_backend);
 // Whether this build includes the SpiderMonkey backend (AIS2API_SPIDERMONKEY).
 bool spidermonkey_available();
@@ -27,15 +25,13 @@ bool spidermonkey_available();
 // server platforms.
 std::string_view default_firefox_backend();
 std::string_view default_firefox_backend(std::string_view platform);
-// The gateway that serves a stored backend: "auto" runs on
-// default_firefox_backend(), and "spidermonkey" falls back to Camoufox in a
-// build without SpiderMonkey; an empty or unknown value follows
-// `default_backend`.
+// The gateway that serves a stored backend: "auto" (and empty/unknown/legacy
+// values) runs on default_firefox_backend(), and "spidermonkey" falls back to
+// Camoufox in a build without SpiderMonkey.
 std::string_view effective_backend(std::string_view stored, std::string_view default_backend);
 std::string_view effective_backend(std::string_view stored, std::string_view default_backend,
                                    std::string_view platform);
-// "chrome" for CloakBrowser, "firefox" for every Firefox backend. Moving an
-// account between them gives Google a new device, so it needs confirmation.
+// Every remaining backend uses the Firefox identity family ("firefox").
 std::string_view identity_family(std::string_view backend);
 // The runtimes setup installs for new accounts and the stored ones, the
 // default first.
@@ -43,9 +39,8 @@ std::vector<std::string> backends_needed(std::string_view default_backend, const
 std::vector<std::string> backends_needed(std::string_view default_backend, const std::vector<std::string> &stored,
                                          std::string_view platform);
 // What this installation still uses that a later release removes, for
-// doctor, the service status and the diagnostics report. CloakBrowser gives
-// {"code":"cloakbrowser_backend"} with whether new accounts ("default_backend")
-// and stored ones ("accounts") are on it; empty when nothing is deprecated.
+// doctor, the service status and the diagnostics report. Empty now that
+// CloakBrowser has been removed.
 json::array backend_deprecations(std::string_view default_backend, const std::vector<std::string> &stored);
 // Settles every unsettled account on adopted_backend(config.browser_backend).
 void adopt_backends(Store &store, const Config &config);

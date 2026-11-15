@@ -7,8 +7,7 @@
 
 """Portable executable defaults and relocation smoke test; Python is dev-only.
 
-Use an installed bin/ais2api executable. Optional --browser-bundle accepts a
-clean bundle root, its browser-runtime directory, or its platform directory.
+Use an installed bin/ais2api executable.
 No browser or Google request is performed. Child output and secrets stay in memory.
 --require-webui also checks embedded pages and their entry assets before and after relocation.
 """
@@ -65,7 +64,7 @@ class WebAssets(HTMLParser):
 
 
 class PortableSmoke:
-    def __init__(self, executable: Path, workspace: Path, bundle: Path | None,
+    def __init__(self, executable: Path, workspace: Path,
                  require_webui: bool = False) -> None:
         self.current = "initialize"
         self.checks: list[str] = []
@@ -102,18 +101,6 @@ class PortableSmoke:
         (self.program / "browser").mkdir()
         shutil.copy2(executable.parent / "browser" / "bridge.js", self.program / "browser" / "bridge.js")
         self.platform = "windows-x64" if os.name == "nt" else "linux-x64"
-        self.has_bundle = bundle is not None
-        if bundle:
-            source = bundle.resolve(strict=True)
-            if (source / "browser-runtime" / self.platform).is_dir():
-                source = source / "browser-runtime" / self.platform
-            elif (source / self.platform).is_dir():
-                source = source / self.platform
-            if not (source / ".ais2api-runtime.json").is_file():
-                raise Failure("bundle_marker_missing")
-            # Only a clean explicit bundle is copied, never the source program's data.
-            shutil.copytree(source, self.program / "browser-runtime" / self.platform,
-                            symlinks=True)
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
     def check(self, label: str, condition: bool) -> None:
@@ -227,15 +214,9 @@ class PortableSmoke:
         configuration = self.cli("config", "show").get("config", {})
         self.check(prefix + "_resolved_data_directory",
                    Path(configuration.get("data_dir", "")).resolve() == (self.program / "data").resolve())
-        if self.has_bundle:
-            binary = "chrome.exe" if os.name == "nt" else "chrome"
-            expected = self.program / "browser-runtime" / self.platform / binary
-            self.check(prefix + "_resolved_bundled_browser",
-                       Path(configuration.get("browser_executable", "")).resolve() == expected.resolve())
-        # A new installation starts on Camoufox, unless the package carries CloakBrowser.
         if "AIS2API_BROWSER_BACKEND" not in self.environment:
             self.check(prefix + "_new_installation_backend",
-                       configuration.get("browser_backend") == ("cloakbrowser" if self.has_bundle else "camoufox"))
+                       configuration.get("browser_backend") == "camoufox")
         self.check(prefix + "_offline_status", self.cli("status").get("running") is False)
         self.port = free_port()
         self.current = prefix + "_start"
@@ -272,9 +253,6 @@ class PortableSmoke:
         configuration["api_key"] = secret
         (self.program / "config.json").write_text(json.dumps(configuration), encoding="utf-8")
         self.check("persisted_data_directory_relative", configuration.get("data_dir") == "data")
-        if self.has_bundle:
-            browser = configuration.get("browser_executable", "")
-            self.check("persisted_bundled_browser_relative", bool(browser) and not Path(browser).is_absolute())
         repeated = self.cli("init")
         self.check("init_does_not_output_configured_key", "api_key" not in repeated and repeated.get("api_key_configured") is True)
         self.check("init_preserves_configured_key", json.loads((self.program / "config.json").read_text(encoding="utf-8")).get("api_key") == secret)
@@ -310,7 +288,6 @@ def main() -> int:
     workspace = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exe", type=Path, required=True)
-    parser.add_argument("--browser-bundle", type=Path)
     parser.add_argument("--require-webui", action="store_true",
                         help="fail unless embedded pages and entry scripts/styles survive relocation")
     args = parser.parse_args()
@@ -319,7 +296,7 @@ def main() -> int:
     try:
         # Assign before __init__ so even failed setup retains cleanup ownership.
         smoke = PortableSmoke.__new__(PortableSmoke)
-        smoke.__init__(args.exe, workspace, args.browser_bundle, args.require_webui)
+        smoke.__init__(args.exe, workspace, args.require_webui)
         smoke.run()
     except Exception:
         failure = getattr(smoke, "current", "initialize")

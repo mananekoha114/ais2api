@@ -14,8 +14,7 @@ namespace ais2api {
 std::string host_timezone();
 std::string host_locale();
 
-// CloakBrowser's fingerprint platform: macOS hosts keep their own platform;
-// every other host presents the most common desktop platform, Windows.
+// Legacy platform label helper for hosts: macOS keeps "macos"; other hosts report "windows".
 std::string_view fingerprint_platform();
 
 // IANA zone names such as "Asia/Tokyo", "America/Argentina/Buenos_Aires" or "UTC".

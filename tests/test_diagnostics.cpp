@@ -34,9 +34,7 @@ DiagnosticsSources planted() {
                                      {"droppedProperties", json::array{"a", "b", "c"}}}}};
     sources.runtime = {{"build_mode", "release"}, {"browser_backend", "camoufox"}, {"browser_exists", true},
                        {"config_file", "C:/Users/PlantedUser/config.json"},
-                       {"deprecations", json::array{json::object{{"code", "cloakbrowser_backend"}, {"default_backend", false},
-                                                                 {"accounts", true}, {"note", "planted note"}},
-                                                    json::object{{"code", "planted_code"}}}},
+                       {"deprecations", json::array{json::object{{"code", "planted_code"}}}},
                        {"data_directory", "C:/Users/PlantedUser/data"},
                        {"fpgen_model", {{"tag", "model-2/2026"}, {"source", "setup"}, {"state", "installed"},
                                         {"directory", "C:/Users/PlantedUser/data/runtime/fpgen"}}},
@@ -47,7 +45,7 @@ DiagnosticsSources planted() {
     sources.config.api_key = "sk-planted-api-key";
     sources.config.admin_key = "planted-admin-key";
     sources.config.data_dir = "C:/Users/PlantedUser/data";
-    sources.config.browser_executable = "C:/Users/PlantedUser/chrome.exe";
+    sources.config.browser_executable = "C:/Users/PlantedUser/camoufox.exe";
     sources.config.model_aliases = {{"planted-alias", "gemini-x"}};
     sources.accounts = {
         json::object{{"id", "acc_secretid0001"}, {"name", "Planted Name"}, {"email", "planted@example.com"},
@@ -83,8 +81,7 @@ TEST_CASE("the diagnostics report holds allowlisted fields only", "[diagnostics]
     CHECK(report.at("config").at("proxy") == "socks5");
     CHECK(report.at("runtime").at("camoufox").at("bundle_state") == "installed");
     CHECK(report.at("runtime").at("fpgen_model").at("state") == "installed");
-    CHECK(report.at("runtime").at("deprecations") ==
-          json::array{json::object{{"code", "cloakbrowser_backend"}, {"default_backend", false}, {"accounts", true}}});
+    CHECK(report.at("runtime").at("deprecations").as_array().empty());
     CHECK(report.at("browser").at("identity").at("droppedProperties") == 3);
     CHECK(report.at("browser").at("browser").at("version") == "158.0.1-beta.41");
     CHECK(report.at("events").at("backends").at("camoufox").at("permission_denied").at("total") == 3);
@@ -156,7 +153,7 @@ TEST_CASE("backend events count per day and reset with the statistics", "[diagno
         Store store(dir.path);
         store.record_backend_event("camoufox", "permission_denied");
         store.record_backend_event("camoufox", "permission_denied");
-        store.record_backend_event("cloakbrowser", "login_redirect");
+        store.record_backend_event("spidermonkey", "login_redirect");
     }
     Store store(dir.path);
     auto events = store.backend_events();
@@ -164,7 +161,7 @@ TEST_CASE("backend events count per day and reset with the statistics", "[diagno
     CHECK(camoufox.at("total") == 2);
     CHECK(camoufox.at("today") == 2);
     CHECK(camoufox.at("last_7_days") == 2);
-    CHECK(events.at("backends").at("cloakbrowser").at("login_redirect").at("total") == 1);
+    CHECK(events.at("backends").at("spidermonkey").at("login_redirect").at("total") == 1);
     store.reset_stats();
     CHECK(store.backend_events().at("backends").as_object().empty());
 }

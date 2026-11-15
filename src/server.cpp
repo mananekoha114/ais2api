@@ -82,16 +82,12 @@ class Service {
     explicit Service(Config config, std::unique_ptr<GenerationBackend> backend)
         : config_(std::move(config)), journal_(config_.data_dir), store_(config_.data_dir),
           prices_(store_, [this] { return this->config(); }, !backend),
+          custom_backend_(bool(backend)),
           gateway_(backend ? std::move(backend) : std::make_unique<BackendRouter>(config_, store_)),
           worker_([this](std::stop_token token) { work_loop(token); }) {
         store_.recover_requests();
-        // Accounts from before per-account backends keep the one they used.
+        // Unsettled accounts settle onto "auto".
         adopt_backends(store_, config_);
-        for (const auto &item : backend_deprecations(config_.browser_backend, store_.stored_backends())) {
-            json::object record{{"event", "backend_deprecated"}};
-            for (const auto &field : item.as_object()) record.insert_or_assign(field.key(), field.value());
-            log(std::move(record));
-        }
         // serve() holds the instance lock, so no other process uses them.
         try {
             if (const auto removed = remove_profile_leftovers(config_.data_dir))
@@ -231,8 +227,14 @@ class Service {
             // Every backend the accounts need must be installed.
             const auto cfg = config();
             const auto runtime = doctor(cfg, Config::default_directory(), store_.stored_backends());
-            const bool ready = (!cfg.api_key.empty() || !store_.managed_keys().empty()) && store_.choose("readiness").has_value() &&
-                               bool_or(runtime, "browser_exists");
+            bool browser_exists = bool_or(runtime, "browser_exists");
+            // Injected test backends supply only a regular-file placeholder for /ready.
+            if (!browser_exists && custom_backend_ && !cfg.browser_executable.empty()) {
+                std::error_code ec;
+                browser_exists = fs::is_regular_file(cfg.browser_executable, ec);
+            }
+            const bool ready = (!cfg.api_key.empty() || !store_.managed_keys().empty()) &&
+                               store_.choose("readiness").has_value() && browser_exists;
             std::lock_guard lock(queue_mutex_);
             return {{"running", true},
                     {"version", "0.1.0"},
@@ -480,6 +482,7 @@ class Service {
     Store store_;
     PriceService prices_;
     std::atomic<bool> usage_healthy_{true};
+    const bool custom_backend_;
     std::unique_ptr<GenerationBackend> gateway_;
     std::mutex queue_mutex_, operations_mutex_;
     std::condition_variable available_;

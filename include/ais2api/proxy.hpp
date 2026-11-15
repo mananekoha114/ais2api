@@ -21,8 +21,8 @@ struct ProxyEndpoint {
     bool credentials = false;
 };
 
-// Parses a single proxy URL the way curl and Chromium read it. Returns nothing
-// for anything else, including Chromium proxy-rule lists.
+// Parses a single upstream proxy URL (http, https, socks4, socks5). Returns
+// nothing for unsupported forms or multi-rule lists.
 inline std::optional<ProxyEndpoint> parse_proxy(std::string_view text) {
     auto decode = [](std::string_view value) -> std::optional<std::string> {
         auto hex = [](char c) {
@@ -80,7 +80,7 @@ inline std::optional<ProxyEndpoint> parse_proxy(std::string_view text) {
             return std::nullopt;
     }
     if (port.empty()) {
-        // Chromium's defaults when the port is omitted.
+        // Standard scheme defaults when the port is omitted.
         result.port = result.scheme == "http" ? 80 : result.scheme == "https" ? 443 : 1080;
     } else {
         unsigned value = 0;

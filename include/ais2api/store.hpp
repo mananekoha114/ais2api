@@ -18,9 +18,9 @@ struct Account {
 };
 // Permanent per-account browser identity. The seed is assigned when the
 // account is first stored and only changes on explicit regeneration; the
-// CloakBrowser fingerprint and the Firefox identity both derive from it. Empty
-// timezone or locale follow the host's region settings. `backend` is the
-// account's browser backend (see backend_router.hpp); empty until settled.
+// Firefox identity derives from it. Empty timezone or locale follow the host's
+// region settings. `backend` is the account's browser backend (see
+// backend_router.hpp); empty until settled.
 struct BrowserFingerprint {
     unsigned seed = 0;
     std::string timezone, locale, backend;
@@ -111,6 +111,9 @@ public:
     // Stores `backend` for every account whose backend is not settled yet.
     // Returns how many changed.
     std::size_t adopt_backends(std::string_view backend);
+    // Count of legacy CloakBrowser accounts migrated to "auto" when opening
+    // this store (0 on subsequent opens).
+    std::size_t migrated_cloakbrowser_backends() const;
     // The distinct backends the stored accounts name, "" for unsettled ones.
     std::vector<std::string> stored_backends();
     // A random secret of this installation, created on first use, that keeps
