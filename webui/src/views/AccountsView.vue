@@ -13,7 +13,7 @@ import { api, describeError, enc, runOperation } from '../api/client'
 import type { Account, ProbeResult, Rotation } from '../api/types'
 import { refreshStatus, service } from '../stores/service'
 import { confirm, notify, notifyError } from '../stores/ui'
-import { accountLabel, accountState, backendLabel, cloakbrowserNotice, cooldownReason, now } from '../utils/accounts'
+import { accountBackendSummary, accountLabel, accountState, cloakbrowserNotice, cooldownReason, now } from '../utils/accounts'
 import { formatRelative, formatTimestamp, isIndefinite } from '../utils/format'
 import { usePolling } from '../utils/media'
 
@@ -178,7 +178,12 @@ function menuFor(a: Account): MenuItem[] {
     { label: '检测并更新邮箱', icon: 'mail', action: () => probe(a, 'detect-email') },
     { label: '浏览器指纹…', icon: 'desktop', action: () => (fingerprintTarget.value = a) },
     { divider: true },
-    { label: '清除全部冷却', icon: 'timer', disabled: !(a.failures?.length ?? 0), action: () => clearCooldown(a) },
+    {
+      label: '清除全部冷却',
+      icon: 'timer',
+      disabled: !(a.failures?.length ?? 0) && !(a.backend_switched_until && a.backend_switched_until > clock.value),
+      action: () => clearCooldown(a),
+    },
     { label: '重置失败与禁用状态', icon: 'arrow_reset', action: () => reset(a) },
     { divider: true },
     { label: '删除账号', icon: 'delete', danger: true, action: () => remove(a) },
@@ -253,7 +258,16 @@ function menuFor(a: Account): MenuItem[] {
                 >
                   <FIcon name="desktop" :size="12" /> #{{ account.fingerprint.seed }}
                 </span>
-                <span v-if="account.backend" :title="`浏览器后端：${backendLabel(account.backend)}`">{{ backendLabel(account.backend) }}</span>
+                <span
+                  v-if="account.backend"
+                  :title="
+                    account.backend_switched_until && account.backend_switched_until > clock
+                      ? `${accountBackendSummary(account, clock).title}，至 ${formatTimestamp(account.backend_switched_until)}`
+                      : accountBackendSummary(account, clock).title
+                  "
+                >
+                  {{ accountBackendSummary(account, clock).text }}
+                </span>
               </div>
             </div>
             <span class="badge state" :class="accountState(account, clock).tone !== 'neutral' ? accountState(account, clock).tone : ''">

@@ -470,7 +470,7 @@ TEST_CASE("doctor tells the launcher when Camoufox needs setup", "[setup]") {
     Config config;
     config.data_dir = d.root;
     config.browser_backend = "camoufox";
-    auto result = doctor(config);
+    auto result = doctor(config, Config::default_directory(), std::vector<std::string>{"camoufox"});
     CHECK(string_or(result, "build_mode") == build_mode());
     CHECK_FALSE(bool_or(result, "browser_configured"));
     CHECK_FALSE(bool_or(result, "browser_exists"));
@@ -478,7 +478,7 @@ TEST_CASE("doctor tells the launcher when Camoufox needs setup", "[setup]") {
 
     fake_camoufox(d.root, "1.0");
     select_camoufox(d.root, "1.0-windows-x64");
-    result = doctor(config);
+    result = doctor(config, Config::default_directory(), std::vector<std::string>{"camoufox"});
     CHECK(bool_or(result, "browser_configured"));
     // The fpgen model is still missing.
     CHECK_FALSE(bool_or(result, "browser_exists"));
@@ -511,7 +511,7 @@ TEST_CASE("the Camoufox bundled beside the program comes before setup's", "[setu
     const auto found = camoufox_executable(config, program);
     CHECK(found.source == "bundle");
     CHECK(found.path == bundle / camoufox_program(pin->platform));
-    auto result = doctor(config, program);
+    auto result = doctor(config, program, std::vector<std::string>{"camoufox"});
     CHECK(string_or(result, "program_directory") == path_utf8(program));
     auto camoufox = result.at("camoufox").as_object();
     CHECK(string_or(camoufox, "source") == "bundle");
@@ -519,7 +519,7 @@ TEST_CASE("the Camoufox bundled beside the program comes before setup's", "[setu
     CHECK(string_or(camoufox.at("bundle").as_object(), "state") == "installed");
     // It ships with the program: rolling back means the previous package.
     try {
-        rollback_runtime(config, program);
+        rollback_runtime(config, program, "camoufox");
         FAIL("a rollback replaced the bundled Camoufox");
     } catch (const Error &error) {
         CHECK(error.code == "bundled_runtime");
@@ -533,7 +533,7 @@ TEST_CASE("the Camoufox bundled beside the program comes before setup's", "[setu
     owner["kept"] = json::array{};
     atomic_write(bundle / ".ais2api-runtime.json", json::serialize(owner));
     CHECK(camoufox_executable(config, program).source == "setup");
-    camoufox = doctor(config, program).at("camoufox").as_object();
+    camoufox = doctor(config, program, std::vector<std::string>{"camoufox"}).at("camoufox").as_object();
     CHECK(string_or(camoufox, "source") == "setup");
     CHECK(string_or(camoufox.at("bundle").as_object(), "state") == "damaged");
     install_camoufox(archive, bundle, *pin);

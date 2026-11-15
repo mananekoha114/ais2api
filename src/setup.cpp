@@ -832,27 +832,18 @@ json::object prepare_camoufox_system(const fs::path &runtime, bool approved) {
     for (const auto &package : missing) installed.emplace_back(package);
     return {{"status", "installed"}, {"installed", std::move(installed)}};
 }
-// The Camoufox backend needs the fpgen model and Camoufox: the pinned build
-// for this platform, unless browser_executable names one, and on Linux the
-// system packages it runs with. setup changes neither browser_executable nor
-// anything CloakBrowser uses.
-json::object setup_camoufox(const Config &config, bool approved) {
+} // namespace
+json::object setup_fpgen_model(const Config &config) {
     const auto model = fpgen_model_pin();
-    const auto camoufox = camoufox_pin();
     const auto root = config.data_dir / "runtime";
     secure_directory(config.data_dir);
     secure_directory(root);
     const auto directory = fpgen_model_directory(config.data_dir, model);
-    const auto stage = [&](std::string name, bool browser) {
-        json::object record{{"event", "setup_stage"}, {"stage", name}, {"browser_backend", config.browser_backend}};
-        if (!browser)
-            record["fpgen_model"] = model.tag;
-        else if (camoufox) {
-            record["browser"] = "camoufox";
-            record["browser_version"] = camoufox->version;
-            record["platform"] = camoufox->platform;
-        }
-        console::emit_record(record);
+    const auto stage = [&](std::string name) {
+        console::emit_record({{"event", "setup_stage"},
+                              {"stage", std::move(name)},
+                              {"browser_backend", config.browser_backend},
+                              {"fpgen_model", model.tag}});
     };
     json::object model_record{{"tag", model.tag}, {"source", "embedded"}};
     if (!fpgen_model_embedded(model)) {
@@ -861,10 +852,10 @@ json::object setup_camoufox(const Config &config, bool approved) {
             throw Error(409, "unknown_runtime",
                         path_utf8(directory) + " was not created by setup; move it away and rerun setup");
         if (state != "installed") {
-            stage("model-download", false);
+            stage("model-download");
             const auto archive = root / "downloads" / "fpgen-model.zip";
             download_verified(model.url, archive, model.sha256, config.proxy, model.size);
-            stage("model-install", false);
+            stage("model-install");
             install_fpgen_model(archive, directory, model);
         }
         model_record = {{"tag", model.tag},
@@ -872,7 +863,53 @@ json::object setup_camoufox(const Config &config, bool approved) {
                         {"directory", path_utf8(directory)},
                         {"installed_now", state != "installed"}};
     }
-    stage("model-complete", false);
+    stage("model-complete");
+    return model_record;
+}
+bool firefox_backend_ready(std::string_view backend, const Config &config,
+                           const fs::path &program_directory) {
+    if (backend == "spidermonkey") return spidermonkey_available();
+    if (backend != "camoufox") return false;
+    const auto executable = camoufox_executable(config, program_directory);
+    std::error_code error;
+    if (executable.path.empty() || !fs::is_regular_file(executable.path, error)) return false;
+    if (runtime_platform() == "termux-arm64" && termux_container_rootfs().empty()) return false;
+    return true;
+}
+namespace {
+// The SpiderMonkey backend is compiled into ais2api and generates Firefox
+// identities from the pinned fpgen model without a browser archive or proot.
+json::object setup_spidermonkey(const Config &config) {
+    if (!spidermonkey_available())
+        throw Error(400, "backend_unavailable", "This build does not include the SpiderMonkey backend");
+    auto model_record = setup_fpgen_model(config);
+    console::emit_record({{"event", "setup_stage"},
+                          {"stage", "complete"},
+                          {"browser_backend", config.browser_backend},
+                          {"browser", "spidermonkey"}});
+    return {{"status", "prepared"},
+            {"browser_backend", config.browser_backend},
+            {"fpgen_model", std::move(model_record)},
+            {"spidermonkey", json::object{{"available", true}, {"state", "ready"}}},
+            {"note", "Run accounts probe and an actual generation to verify Google access"}};
+}
+// The Camoufox backend needs the fpgen model and Camoufox: the pinned build
+// for this platform, unless browser_executable names one, and on Linux the
+// system packages it runs with. setup changes neither browser_executable nor
+// anything CloakBrowser uses.
+json::object setup_camoufox(const Config &config, bool approved) {
+    auto model_record = setup_fpgen_model(config);
+    const auto camoufox = camoufox_pin();
+    const auto root = config.data_dir / "runtime";
+    const auto stage = [&](std::string name) {
+        json::object record{{"event", "setup_stage"}, {"stage", std::move(name)}, {"browser_backend", config.browser_backend}};
+        if (camoufox) {
+            record["browser"] = "camoufox";
+            record["browser_version"] = camoufox->version;
+            record["platform"] = camoufox->platform;
+        }
+        console::emit_record(record);
+    };
     json::object result{{"status", "prepared"},
                         {"browser_backend", config.browser_backend},
                         {"fpgen_model", std::move(model_record)},
@@ -883,9 +920,9 @@ json::object setup_camoufox(const Config &config, bool approved) {
     // Neither browser_executable nor a bundle is installed; both are verified.
     if (const auto configured = camoufox_executable(config);
         configured.source == "browser_executable" || configured.source == "bundle") {
-        stage("verify", true);
+        stage("verify");
         auto verification = verify_camoufox(config, configured.path);
-        stage("complete", true);
+        stage("complete");
         result["camoufox"] = json::object{{"source", configured.source},
                                           {"executable", path_utf8(configured.path)},
                                           {"browser_verification", std::move(verification)}};
@@ -910,17 +947,17 @@ json::object setup_camoufox(const Config &config, bool approved) {
             throw Error(507, "disk_space",
                         "Installing Camoufox needs about " + std::to_string(((downloaded ? 0 : 2 * camoufox->size) >> 20) + 512) +
                             " MiB of free space in the data directory");
-        stage("download", true);
+        stage("download");
         download_verified(camoufox->url, archive, camoufox->sha256, config.proxy, camoufox->size);
-        stage("extract", true);
+        stage("extract");
         install_camoufox(archive, install, *camoufox);
         fs::remove(archive, error);
     }
-    stage("verify", true);
+    stage("verify");
     const auto executable = install / camoufox_program(camoufox->platform);
     auto verification = verify_camoufox(config, executable);
     select_camoufox(config.data_dir, path_utf8(install.filename()));
-    stage("complete", true);
+    stage("complete");
     result["camoufox"] = json::object{{"source", "setup"},
                                       {"version", camoufox->version},
                                       {"directory", path_utf8(install)},
@@ -1115,6 +1152,8 @@ json::object setup_cloakbrowser(Config &config, bool approved) {
 }
 } // namespace
 json::object setup_runtime(Config &config, bool approved, std::string_view backend) {
+    if (!backend.empty() && backend != "cloakbrowser" && backend != "camoufox" && backend != "spidermonkey")
+        throw Error(400, "invalid_backend", "backend must be cloakbrowser, camoufox or spidermonkey");
     const auto accounts = stored_backends(config.data_dir);
     const auto backends = backend.empty() ? backends_needed(config.browser_backend, accounts)
                                           : std::vector<std::string>{std::string(backend)};
@@ -1122,7 +1161,9 @@ json::object setup_runtime(Config &config, bool approved, std::string_view backe
     json::object result;
     json::array prepared;
     for (const auto &name : backends) {
-        auto next = name == "camoufox" ? setup_camoufox(config, approved) : setup_cloakbrowser(config, approved);
+        auto next = name == "camoufox"     ? setup_camoufox(config, approved)
+                  : name == "spidermonkey" ? setup_spidermonkey(config)
+                                           : setup_cloakbrowser(config, approved);
         if (result.empty()) result = std::move(next);
         else result[name] = std::move(next);
         prepared.emplace_back(name);
@@ -1163,7 +1204,13 @@ json::object rollback_camoufox(const Config &config, const fs::path &program_dir
 }
 } // namespace
 json::object rollback_runtime(Config &config, const fs::path &program_directory, std::string_view backend) {
-    if ((backend.empty() ? effective_backend({}, config.browser_backend) : backend) == "camoufox")
+    if (!backend.empty() && backend != "cloakbrowser" && backend != "camoufox" && backend != "spidermonkey")
+        throw Error(400, "invalid_backend", "backend must be cloakbrowser, camoufox or spidermonkey");
+    const auto target = backend.empty() ? effective_backend({}, config.browser_backend) : backend;
+    if (target == "spidermonkey")
+        throw Error(409, "rollback_missing",
+                    "SpiderMonkey is built into ais2api and has no separate runtime to roll back");
+    if (target == "camoufox")
         return rollback_camoufox(config, program_directory);
     auto file = config.data_dir / "runtime/previous.json";
     auto previous = json::parse(read_file(file, 65536)).as_object();
@@ -1190,13 +1237,18 @@ json::object rollback_runtime(Config &config, const fs::path &program_directory,
 }
 json::object doctor(const Config &config, const fs::path &program_directory,
                     std::optional<std::vector<std::string>> stored) {
+    return doctor(config, program_directory, std::move(stored), runtime_platform());
+}
+json::object doctor(const Config &config, const fs::path &program_directory,
+                    std::optional<std::vector<std::string>> stored, std::string_view platform) {
     const auto accounts = stored ? *stored : stored_backends(config.data_dir);
-    const auto backends = backends_needed(config.browser_backend, accounts);
+    const auto backends = backends_needed(config.browser_backend, accounts, platform);
     const auto needs = [&](std::string_view backend) {
         return std::find(backends.begin(), backends.end(), backend) != backends.end();
     };
     json::array needed;
     for (const auto &backend : backends) needed.emplace_back(backend);
+    const auto m = manifest();
     json::object result{{"config_version", config.version},
             {"build_mode", build_mode()},
             {"program_directory", path_utf8(program_directory)},
@@ -1204,7 +1256,7 @@ json::object doctor(const Config &config, const fs::path &program_directory,
             {"download_directory", path_utf8(config.data_dir / "runtime/downloads")},
             {"service_log", path_utf8(config.data_dir / "service.log")},
             {"data_directory", path_utf8(config.data_dir)},
-            {"manifest_available", !manifest().empty()},
+            {"manifest_available", !m.empty()},
             {"browser_backend", config.browser_backend},
             {"backends_needed", std::move(needed)},
             {"deprecations", backend_deprecations(config.browser_backend, accounts)},
@@ -1215,17 +1267,20 @@ json::object doctor(const Config &config, const fs::path &program_directory,
         configured = !config.browser_executable.empty();
         exists = fs::is_regular_file(config.browser_executable);
     }
-    if (needs("camoufox")) {
-        const auto model = fpgen_model_pin();
+    std::string model_state;
+    if (needs("camoufox") || needs("spidermonkey")) {
+        const auto model = fpgen_model_pin(m);
         const bool embedded = fpgen_model_embedded(model);
         const auto directory = fpgen_model_directory(config.data_dir, model);
-        const auto model_state = embedded ? std::string("installed") : fpgen_model_state(directory, model);
+        model_state = embedded ? std::string("installed") : fpgen_model_state(directory, model);
         json::object fpgen{{"tag", model.tag}, {"source", embedded ? "embedded" : "setup"}, {"state", model_state}};
         if (!embedded) fpgen["directory"] = path_utf8(directory);
         result["fpgen_model"] = std::move(fpgen);
+    }
+    if (needs("camoufox")) {
         const auto executable = camoufox_executable(config, program_directory);
         const auto selection = camoufox_selection(config.data_dir);
-        const auto pin = camoufox_pin();
+        const auto pin = platform.empty() ? std::nullopt : camoufox_pin(m, platform);
         json::object camoufox{{"source", executable.source},
                               {"executable", path_utf8(executable.path)},
                               {"current", selection.current},
@@ -1253,6 +1308,15 @@ json::object doctor(const Config &config, const fs::path &program_directory,
         exists = exists && !executable.path.empty() && fs::is_regular_file(executable.path, error) &&
                  model_state == "installed" && (!outdated || selection.held);
         result["camoufox"] = std::move(camoufox);
+    }
+    if (needs("spidermonkey")) {
+        const bool available = spidermonkey_available();
+        const std::string state = !available ? "unavailable" : (model_state == "installed" ? "ready" : model_state);
+        result["spidermonkey"] = json::object{{"available", available},
+                                              {"state", state},
+                                              {"setup_needed", available && model_state != "installed"}};
+        configured = configured && available;
+        exists = exists && available && model_state == "installed";
     }
     result["browser_configured"] = configured;
     result["browser_exists"] = exists;

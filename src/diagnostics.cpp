@@ -47,7 +47,7 @@ std::string proxy_scheme(std::string_view proxy) {
 bool failure_record(const json::object &record) {
     const auto event = string_or(record, "event");
     if (event == "generation") return !string_or(record, "error").empty();
-    for (auto name : {"account_failure", "session_recovery", "template_refresh", "browser_failure",
+    for (auto name : {"account_failure", "backend_switch", "session_recovery", "template_refresh", "browser_failure",
                       "cookie_import_failed", "maintenance_failed"})
         if (event == name) return true;
     return false;
@@ -64,7 +64,8 @@ json::object runtime_part(const json::object &doctor) {
     if (auto needed = doctor.if_contains("backends_needed"); needed && needed->is_array()) {
         json::array backends;
         for (const auto &backend : needed->as_array())
-            if (backend == "cloakbrowser" || backend == "camoufox") backends.push_back(backend);
+            if (backend == "cloakbrowser" || backend == "camoufox" || backend == "spidermonkey")
+                backends.push_back(backend);
         out["backends_needed"] = std::move(backends);
     }
     if (auto deprecations = doctor.if_contains("deprecations"); deprecations && deprecations->is_array()) {
@@ -88,6 +89,11 @@ json::object runtime_part(const json::object &doctor) {
         if (auto bundle = object_at(*source, "bundle"))
             if (auto state = bundle->if_contains("state"); state && safe_scalar(*state)) camoufox["bundle_state"] = *state;
         out["camoufox"] = std::move(camoufox);
+    }
+    if (auto source = object_at(doctor, "spidermonkey")) {
+        json::object spidermonkey;
+        copy(spidermonkey, *source, {"available", "state", "setup_needed"});
+        out["spidermonkey"] = std::move(spidermonkey);
     }
     return out;
 }
@@ -176,9 +182,14 @@ json::object safe_report(const DiagnosticsSources &sources) {
         auto label = "account-" + std::to_string(accounts.size() + 1);
         labels.emplace(string_or(account, "id"), label);
         json::object out{{"label", label}};
-        copy(out, account, {"disabled", "expired", "firefox_identity"});
+        copy(out, account, {"disabled", "expired", "firefox_identity", "backend_switched_until"});
         if (auto backend = account.if_contains("backend"); backend && backend->is_string() && valid_account_backend(backend->as_string()))
             out["backend"] = *backend;
+        if (auto effective = account.if_contains("effective_backend");
+            effective && effective->is_string() &&
+            (effective->as_string() == "cloakbrowser" || effective->as_string() == "camoufox" ||
+             effective->as_string() == "spidermonkey"))
+            out["effective_backend"] = *effective;
         json::array cooldowns;
         if (auto failures = account.if_contains("failures"); failures && failures->is_array())
             for (const auto &item : failures->as_array()) {
@@ -199,7 +210,7 @@ json::object safe_report(const DiagnosticsSources &sources) {
         const auto &record = value.as_object();
         json::object out;
         copy(out, record, {"timestamp", "event", "code", "kind", "action", "attempt", "attempts", "error",
-                           "reason", "status", "phase"});
+                           "reason", "status", "phase", "from_backend", "to_backend"});
         if (auto model = record.if_contains("model"); model && model->is_string())
             out["model"] = model_name(model->as_string());
         if (auto id = record.if_contains("account_id"); id && id->is_string()) {

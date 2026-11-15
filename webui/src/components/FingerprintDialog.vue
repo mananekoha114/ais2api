@@ -11,7 +11,8 @@ import ProgressRing from './ProgressRing.vue'
 import { api, describeError, enc } from '../api/client'
 import type { Account, AccountBackend, FingerprintView } from '../api/types'
 import { notify } from '../stores/ui'
-import { backendIdentity } from '../utils/accounts'
+import { backendIdentity, backendLabel } from '../utils/accounts'
+import { formatTimestamp } from '../utils/format'
 
 const props = defineProps<{ account: Account | null }>()
 const open = defineModel<boolean>('open', { default: false })
@@ -31,7 +32,11 @@ const confirmingRegenerate = ref(false)
 // SpiderMonkey is only offered by a build that includes it.
 const BACKENDS = computed<{ value: AccountBackend; label: string; hint: string; disabled?: boolean }[]>(() => [
   { value: 'cloakbrowser', label: 'CloakBrowser', hint: 'Chrome 身份。已弃用，将在以后的版本中移除' },
-  { value: 'auto', label: '自动', hint: 'Firefox 身份，由 ais2api 选择 Firefox 后端（目前即 Camoufox）' },
+  {
+    value: 'auto',
+    label: '自动',
+    hint: 'Firefox 身份，由 ais2api 自动选择后端（桌面与服务器默认 Camoufox，Termux 默认 SpiderMonkey）；就地重建会话后仍遇 403 时，若另一 Firefox 后端已就绪则自动临时切换 6 小时',
+  },
   { value: 'camoufox', label: 'Camoufox', hint: 'Firefox 身份，固定使用 Camoufox' },
   view.value?.spidermonkey_available
     ? {
@@ -183,7 +188,15 @@ const identityLabel = (identity: string | undefined) => (identity === 'firefox' 
           :title="backendIdentity(backend) === 'firefox' ? '换成 Firefox 身份？' : '换回 Chrome 身份？'"
           message="Google 会把该账号视为在一台新设备上登录，可能触发额外的安全验证。保存即确认切换。"
         />
-        <span v-else class="hint">{{ BACKENDS.find((option) => option.value === backend)?.hint }}</span>
+        <template v-else>
+          <span class="hint">{{ BACKENDS.find((option) => option.value === backend)?.hint }}</span>
+          <FInfoBar
+            v-if="backend === 'auto' && view.backend_switched_until"
+            severity="info"
+            :title="`已临时切换至 ${backendLabel(view.effective_backend)}`"
+            :message="`原后端重复返回 403，当前账号在 ${formatTimestamp(view.backend_switched_until)} 前临时使用 ${backendLabel(view.effective_backend)}。手动改选后端、清除冷却或重置账号会提前解除。`"
+          />
+        </template>
       </fieldset>
 
       <fieldset class="field">

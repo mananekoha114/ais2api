@@ -50,6 +50,10 @@ export interface Account {
   firefox_identity?: boolean
   /** Stored browser backend; empty only before the account settles. */
   backend?: AccountBackend | ''
+  /** Gateway currently serving the account. */
+  effective_backend?: 'cloakbrowser' | 'camoufox' | 'spidermonkey' | ''
+  /** Unix seconds until an automatic 6-hour failover switch expires. */
+  backend_switched_until?: number
   /** Stored per-account browser identity; empty timezone/locale follow the host. */
   fingerprint?: { seed: number; timezone: string; locale: string }
 }
@@ -61,8 +65,10 @@ export interface FingerprintView {
   seed: number
   platform: string
   backend: AccountBackend
-  /** Gateway that serves the account; auto runs on Camoufox. */
+  /** Gateway that serves the account now. */
   effective_backend: 'cloakbrowser' | 'camoufox' | 'spidermonkey'
+  /** Unix seconds until an automatic 6-hour failover switch expires. */
+  backend_switched_until?: number
   identity: 'chrome' | 'firefox'
   firefox_identity_saved: boolean
   /** Whether this build includes the experimental SpiderMonkey backend. */

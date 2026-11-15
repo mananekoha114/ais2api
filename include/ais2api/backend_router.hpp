@@ -22,17 +22,26 @@ bool valid_account_backend(std::string_view backend);
 std::string_view adopted_backend(std::string_view default_backend);
 // Whether this build includes the SpiderMonkey backend (AIS2API_SPIDERMONKEY).
 bool spidermonkey_available();
-// The gateway that serves a stored backend: "auto" runs on Camoufox, and so
-// does "spidermonkey" in a build without that backend; an empty or unknown
-// value follows `default_backend`.
+// The Firefox backend an "auto" account uses when no temporary failover switch
+// is active: SpiderMonkey on Termux when compiled in, Camoufox on desktop and
+// server platforms.
+std::string_view default_firefox_backend();
+std::string_view default_firefox_backend(std::string_view platform);
+// The gateway that serves a stored backend: "auto" runs on
+// default_firefox_backend(), and "spidermonkey" falls back to Camoufox in a
+// build without SpiderMonkey; an empty or unknown value follows
+// `default_backend`.
 std::string_view effective_backend(std::string_view stored, std::string_view default_backend);
+std::string_view effective_backend(std::string_view stored, std::string_view default_backend,
+                                   std::string_view platform);
 // "chrome" for CloakBrowser, "firefox" for every Firefox backend. Moving an
 // account between them gives Google a new device, so it needs confirmation.
 std::string_view identity_family(std::string_view backend);
 // The runtimes setup installs for new accounts and the stored ones, the
-// default first. The SpiderMonkey backend is built in and serves the Firefox
-// identities Camoufox's setup provides, so it needs "camoufox".
+// default first.
 std::vector<std::string> backends_needed(std::string_view default_backend, const std::vector<std::string> &stored);
+std::vector<std::string> backends_needed(std::string_view default_backend, const std::vector<std::string> &stored,
+                                         std::string_view platform);
 // What this installation still uses that a later release removes, for
 // doctor, the service status and the diagnostics report. CloakBrowser gives
 // {"code":"cloakbrowser_backend"} with whether new accounts ("default_backend")
@@ -47,7 +56,9 @@ void adopt_backends(Store &store, const Config &config);
 class BackendRouter final : public GenerationBackend {
   public:
     using Factory = std::function<std::unique_ptr<GenerationBackend>(std::string_view backend, const Config &, Store &)>;
-    BackendRouter(const Config &config, Store &store, Factory factory = {});
+    using Readiness = std::function<bool(std::string_view backend, const Config &)>;
+    BackendRouter(const Config &config, Store &store, Factory factory = {}, Readiness readiness = {},
+                  std::string platform = {});
     ~BackendRouter() override;
     void generate(const Request &, const Account &, const EventSink &, std::stop_token) override;
     json::array models(const Account &, std::stop_token = {}) override;
@@ -59,6 +70,9 @@ class BackendRouter final : public GenerationBackend {
     // An account the store does not know (one being imported) uses the
     // default backend.
     std::string_view backend_for(const Account &) override;
+    // For an "auto" account, returns the alternate Firefox backend
+    // ("camoufox" <-> "spidermonkey") when compiled in and ready on this host.
+    std::optional<std::string_view> alternate_firefox_backend(const Account &account);
     void reconfigure(const Config &) override;
     void close() override;
     void reset_session() override;
@@ -71,6 +85,8 @@ class BackendRouter final : public GenerationBackend {
     GenerationBackend *current();
     Store &store_;
     Factory factory_;
+    Readiness readiness_;
+    std::string platform_;
     std::mutex mutex_;
     Config config_;
     std::map<std::string, std::unique_ptr<GenerationBackend>, std::less<>> gateways_;

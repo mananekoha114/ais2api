@@ -2932,6 +2932,21 @@
             ],
             "description": "Stored browser backend; empty only before the account settles"
           },
+          "effective_backend": {
+            "type": "string",
+            "enum": [
+              "",
+              "cloakbrowser",
+              "camoufox",
+              "spidermonkey"
+            ],
+            "description": "Gateway currently serving the account; empty only when unsettled without an active config"
+          },
+          "backend_switched_until": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Unix seconds until an automatic 6-hour backend failover for an auto account expires; omitted when not switched"
+          },
           "firefox_identity": {
             "type": "boolean"
           }
@@ -3593,7 +3608,12 @@
               "camoufox",
               "spidermonkey"
             ],
-            "description": "Gateway that serves the account now; auto runs on Camoufox, and so does spidermonkey in a build without that backend"
+            "description": "Gateway that serves the account now, taking any active 6-hour automatic failover switch into account"
+          },
+          "backend_switched_until": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Unix seconds until an automatic 6-hour backend failover for an auto account expires; omitted when not switched"
           },
           "identity": {
             "type": "string",

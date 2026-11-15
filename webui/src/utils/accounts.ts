@@ -55,6 +55,23 @@ export const backendLabel = (backend: string | undefined) => (backend ? backendN
 /** CloakBrowser presents Chrome; every other backend a Firefox identity. */
 export const backendIdentity = (backend: string) => (backend === 'cloakbrowser' ? 'chrome' : 'firefox')
 
+/** Human-readable backend summary for an account row, including any active 6-hour failover switch. */
+export function accountBackendSummary(account: Account, at = now()): { text: string; title: string } {
+  if (!account.backend) return { text: '—', title: '' }
+  const stored = backendLabel(account.backend)
+  if (account.backend !== 'auto' || !account.effective_backend) {
+    return { text: stored, title: `浏览器后端：${stored}` }
+  }
+  const active = backendLabel(account.effective_backend)
+  if (account.backend_switched_until && account.backend_switched_until > at) {
+    return {
+      text: `${stored} → ${active}`,
+      title: `浏览器后端：${stored}（已临时切换至 ${active}）`,
+    }
+  }
+  return { text: `${stored}（${active}）`, title: `浏览器后端：${stored}，当前生效：${active}` }
+}
+
 /** What to do about the deprecated CloakBrowser backend; empty when the installation no longer uses it. */
 export function cloakbrowserNotice(deprecations: Deprecation[] | undefined): string {
   const entry = deprecations?.find((d) => d.code === 'cloakbrowser_backend')

@@ -23,7 +23,8 @@ std::string identifier(const json::object& command) {
 
 json::object account_summary(const json::object& input) {
     json::object output;
-    for (auto key : {"id", "name", "email", "auth_user", "disabled", "expired", "failures", "fingerprint", "firefox_identity", "backend"}) {
+    for (auto key : {"id", "name", "email", "auth_user", "disabled", "expired", "failures", "fingerprint",
+                     "firefox_identity", "backend", "effective_backend", "backend_switched_until"}) {
         if (auto value = input.if_contains(key)) output[key] = *value;
     }
     return output;
@@ -70,7 +71,16 @@ void redact(json::value& value) {
 json::object fingerprint_view(Store& store, const Config& config, std::string_view id, const BrowserFingerprint& fingerprint) {
     const auto timezone = host_timezone(), locale = host_locale();
     const std::string backend = fingerprint.backend.empty() ? std::string(adopted_backend(config.browser_backend)) : fingerprint.backend;
-    const auto effective = effective_backend(backend, config.browser_backend);
+    std::string effective(effective_backend(backend, config.browser_backend));
+    std::optional<std::int64_t> switched_until;
+    if (backend == "auto") {
+        if (const auto switched = store.backend_switch(id)) {
+            if (firefox_backend_ready(switched->backend, config)) {
+                effective = switched->backend;
+                switched_until = switched->until;
+            }
+        }
+    }
     const auto firefox = store.firefox_identity(id);
     // A Firefox identity presents the OS it was generated on, CloakBrowser
     // the platform it fakes.
@@ -81,13 +91,15 @@ json::object fingerprint_view(Store& store, const Config& config, std::string_vi
 #endif
     if (identity_family(effective) == "chrome") platform = fingerprint_platform();
     else if (firefox && !string_or(*firefox, "os").empty()) platform = string_or(*firefox, "os");
-    return {{"seed", fingerprint.seed}, {"platform", platform},
-            {"timezone", fingerprint.timezone}, {"locale", fingerprint.locale},
-            {"effective_timezone", fingerprint.timezone.empty() ? timezone : fingerprint.timezone},
-            {"effective_locale", fingerprint.locale.empty() ? locale : fingerprint.locale},
-            {"host_timezone", timezone}, {"host_locale", locale},
-            {"backend", backend}, {"effective_backend", effective}, {"identity", identity_family(effective)},
-            {"firefox_identity_saved", firefox.has_value()}, {"spidermonkey_available", spidermonkey_available()}};
+    json::object result{{"seed", fingerprint.seed}, {"platform", platform},
+                        {"timezone", fingerprint.timezone}, {"locale", fingerprint.locale},
+                        {"effective_timezone", fingerprint.timezone.empty() ? timezone : fingerprint.timezone},
+                        {"effective_locale", fingerprint.locale.empty() ? locale : fingerprint.locale},
+                        {"host_timezone", timezone}, {"host_locale", locale},
+                        {"backend", backend}, {"effective_backend", effective}, {"identity", identity_family(effective)},
+                        {"firefox_identity_saved", firefox.has_value()}, {"spidermonkey_available", spidermonkey_available()}};
+    if (switched_until) result["backend_switched_until"] = *switched_until;
+    return result;
 }
 json::object fingerprint_view(Store& store, const Config& config, std::string_view id) {
     return fingerprint_view(store, config, id, store.fingerprint(id));
@@ -181,7 +193,7 @@ json::object manage(Store& store, Config& config, const json::object& command) {
     }
     if (name == "accounts.list") {
         json::array accounts;
-        for (auto& item : store.account_status()) accounts.push_back(account_summary(item.as_object()));
+        for (auto& item : store.account_status(config)) accounts.push_back(account_summary(item.as_object()));
         return {{"accounts", accounts}};
     }
     if (name == "accounts.import") {
@@ -192,7 +204,11 @@ json::object manage(Store& store, Config& config, const json::object& command) {
         json::array accounts;
         for (auto& item : imported) {
             auto summary = account_summary(item.as_object());
-            if (auto backend = store.account_backend(string_or(summary, "id"))) summary["backend"] = *backend;
+            const auto id = string_or(summary, "id");
+            if (auto backend = store.account_backend(id)) {
+                summary["backend"] = *backend;
+                summary["effective_backend"] = effective_backend(*backend, config.browser_backend);
+            }
             accounts.push_back(std::move(summary));
         }
         return {{"imported", accounts.size()}, {"accounts", accounts}};
@@ -240,7 +256,7 @@ json::object manage(Store& store, Config& config, const json::object& command) {
         DiagnosticsSources sources;
         sources.runtime = doctor(config, Config::default_directory(), store.stored_backends());
         sources.config = config;
-        sources.accounts = store.account_status();
+        sources.accounts = store.account_status(config);
         sources.events = store.backend_events();
         sources.journal = recent_failure_records(logs::Journal(config.data_dir));
         sources.logs = log_sources(config.data_dir);

@@ -39,9 +39,15 @@ class ControlServer {
 int serve(Config config);
 class GenerationBackend;
 int serve_with_backend(Config config, std::unique_ptr<GenerationBackend> backend);
-// Prepares `backend` ("cloakbrowser" or "camoufox"), or by default every
-// backend the default and the stored accounts need.
+// Prepares `backend` ("cloakbrowser", "camoufox" or "spidermonkey"), or by
+// default every backend the default and the stored accounts need.
 json::object setup_runtime(Config &config, bool approve_system_changes = false, std::string_view backend = {});
+// Installs the pinned fpgen model under `config.data_dir` unless embedded.
+json::object setup_fpgen_model(const Config &config);
+// Whether `backend` ("camoufox" or "spidermonkey") is compiled in and its
+// local runtime assets are installed and ready to launch.
+bool firefox_backend_ready(std::string_view backend, const Config &config,
+                           const fs::path &program_directory = Config::default_directory());
 // The Ubuntu 24.04 or Debian 13 packages each backend runs with; another
 // os-release is rejected.
 std::vector<std::string> linux_runtime_packages(std::string_view os_release);
@@ -49,8 +55,8 @@ std::vector<std::string> camoufox_linux_packages(std::string_view os_release);
 // Those of `packages` a dpkg status file (var/lib/dpkg/status) does not record
 // as installed, in their order.
 std::vector<std::string> missing_packages(std::string_view dpkg_status, const std::vector<std::string> &packages);
-// On Termux both backends' browsers run in this proot-distro container,
-// Ubuntu 24.04, which setup creates.
+// On Termux browser processes (CloakBrowser and Camoufox) run in this
+// proot-distro container, Ubuntu 24.04, which setup creates.
 inline constexpr std::string_view termux_container = "ais2api-browser";
 // The container's rootfs; empty when there is none.
 fs::path termux_container_rootfs();
@@ -58,6 +64,8 @@ fs::path termux_container_rootfs();
 // defaults to the stored_backends() of the data directory.
 json::object doctor(const Config &config, const fs::path &program_directory = Config::default_directory(),
                     std::optional<std::vector<std::string>> stored = std::nullopt);
+json::object doctor(const Config &config, const fs::path &program_directory,
+                    std::optional<std::vector<std::string>> stored, std::string_view platform);
 // Removes the per-launch browser profiles (runtime/browser-<hex> and
 // runtime/camoufox-<hex>) a forcibly ended service left behind; installs and
 // other runtime directories are never touched. Call it only while holding

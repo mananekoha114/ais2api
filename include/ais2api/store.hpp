@@ -25,6 +25,12 @@ struct BrowserFingerprint {
     unsigned seed = 0;
     std::string timezone, locale, backend;
 };
+// Duration for automatic "auto" backend failover after repeated 403.
+inline constexpr std::int64_t backend_switch_seconds = 6 * 3600;
+struct BackendSwitch {
+    std::string backend;
+    std::int64_t until = 0;
+};
 // Store::stored_backends() of the state database in `directory`, read
 // without opening a Store, so it works while the service runs. Empty when
 // there is no database or it cannot be read.
@@ -78,7 +84,7 @@ public:
     ModelCatalog model_catalog();
     bool has_model_catalog(std::string_view account_id);
     ModelCatalog save_models(std::string_view account_id, json::array models);
-    json::object rotation_status();
+    json::object rotation_status(const std::optional<Config>& config = std::nullopt);
     std::string rotate_account();
     void clear_cooldown(std::string_view id, std::string_view model = {});
     void reset_stats();
@@ -97,6 +103,11 @@ public:
     // account the store does not know.
     std::optional<std::string> account_backend(std::string_view id);
     void set_backend(std::string_view id, std::string_view backend);
+    // Temporary 6-hour backend override for an "auto" account after repeated 403.
+    std::optional<BackendSwitch> backend_switch(std::string_view id);
+    void switch_backend(std::string_view id, std::string_view backend,
+                        std::int64_t duration_seconds = backend_switch_seconds);
+    void clear_backend_switch(std::string_view id);
     // Stores `backend` for every account whose backend is not settled yet.
     // Returns how many changed.
     std::size_t adopt_backends(std::string_view backend);
@@ -138,7 +149,7 @@ public:
     // download schedule and last error.
     void seed_price_source(std::string_view source, const json::object &catalog);
     json::object price_quote(std::string_view model);
-    json::array account_status();
+    json::array account_status(const std::optional<Config>& config = std::nullopt);
     json::object create_key(std::string name);
     json::array keys();
     void revoke_key(std::string_view id);
