@@ -1,0 +1,125 @@
+Subject: [PATCH] Allow Android NDK r27+ API 24 and Clang 18 for standalone js
+
+Termux on Android ARM64 targets Bionic API 24 with Android NDK r27 LTS
+(Clang 18). Relax the Firefox-for-Android r30 / API 26 / Clang 19 checks
+and skip libmozglue.so's APK-only BionicGlue.cpp override when building
+standalone SpiderMonkey (--enable-project=js).
+
+diff --git a/build/moz.configure/android-ndk.configure b/build/moz.configure/android-ndk.configure
+index 2a76811..14b80fb 100644
+--- a/build/moz.configure/android-ndk.configure
++++ b/build/moz.configure/android-ndk.configure
+@@ -31,8 +31,10 @@ option(
+ )
+ 
+ 
+-@dependable
+-def min_android_version():
++@depends(build_project)
++def min_android_version(build_project):
++    if build_project == "js":
++        return "24"
+     # Sync with android_sdk_version.min_sdk_version
+     return "26"
+ 
+@@ -95,13 +97,13 @@ def ndk(value, want_bootstrap):
+ set_config("ANDROID_NDK", ndk)
+ 
+ 
+-@depends(ndk)
++@depends(ndk, build_project)
+ @checking("for android ndk version")
+ @imports(_from="__builtin__", _import="open")
+ @imports(_from="mozboot.android", _import="NDK_VERSION")
+ @imports(_from="mozboot.android", _import="get_ndk_version")
+ @imports(_from="mozboot.android", _import="GetNdkVersionError")
+-def ndk_version(ndk):
++def ndk_version(ndk, build_project):
+     if not ndk:
+         # Building 'js/src' for non-Android.
+         return
+@@ -111,7 +113,13 @@ def ndk_version(ndk):
+     except GetNdkVersionError as e:
+         die(str(e))
+ 
+-    if NDK_VERSION != human:
++    if build_project == "js":
++        if major < 27:
++            die(
++                "Standalone SpiderMonkey requires Android NDK r27 or newer (have %s)."
++                % human
++            )
++    elif NDK_VERSION != human:
+         die(
+             "The only supported version of the NDK is %s (have %s)\n"
+             "Please run |mach bootstrap| "
+@@ -180,14 +188,14 @@ def android_sysroot(target, android_toolchain):
+     )
+ 
+ 
+-@depends(target, host, ndk, "--with-android-lldb-server")
++@depends(target, host, ndk, "--with-android-lldb-server", build_project)
+ @checking("for the Android LLDB server", lambda x: x or "not found")
+ @imports(_from="os", _import="listdir")
+ @imports(_from="os.path", _import="isdir")
+ @imports(_from="os.path", _import="isfile")
+ @imports(_from="mozshellutil", _import="quote")
+-def android_lldb_server(target, host, ndk, lldb):
+-    if not ndk:
++def android_lldb_server(target, host, ndk, lldb, build_project):
++    if not ndk or build_project == "js":
+         return
+     if lldb:
+         return lldb[0]
+diff --git a/build/moz.configure/toolchain.configure b/build/moz.configure/toolchain.configure
+index fad2010..9a77094 100644
+--- a/build/moz.configure/toolchain.configure
++++ b/build/moz.configure/toolchain.configure
+@@ -1471,6 +1471,7 @@ def compiler(
+         winsysroot,
+         host,
+         sccache_environment,
++        build_project,
+     )
+     @checking("whether %s can be used" % what, lambda x: bool(x))
+     @imports(_from="mozshellutil", _import="quote")
+@@ -1490,6 +1491,7 @@ def compiler(
+         winsysroot,
+         host,
+         sccache_environment,
++        build_project,
+     ):
+         # This is only a dependency for its side effect of setting the sccache
+         # variables in the environment, which needs to happen before the
+@@ -1644,10 +1646,15 @@ def compiler(
+         # This version can be no higher than the version used in
+         # src/bootstrap/src/core/build_steps/llvm.rs's check_llvm_version in the source
+         # code of the minimum supported Rust version.
+-        if info.type in ("clang", "clang-cl") and info.version < "19.0":
++        min_clang = "18.0" if build_project == "js" else "19.0"
++        if info.type in ("clang", "clang-cl") and info.version < min_clang:
+             raise FatalCheckError(
+-                "Only %s 19.0 or newer is supported (found version %s)."
+-                % (("clang/llvm" if info.type == "clang" else "clang-cl"), info.version)
++                "Only %s %s or newer is supported (found version %s)."
++                % (
++                    ("clang/llvm" if info.type == "clang" else "clang-cl"),
++                    min_clang,
++                    info.version,
++                )
+             )
+ 
+         if host_or_target.kernel == "WASI" and info.type != "clang":
+diff --git a/mozglue/build/moz.build b/mozglue/build/moz.build
+index f8f01e9..04de3ba 100644
+--- a/mozglue/build/moz.build
++++ b/mozglue/build/moz.build
+@@ -12,7 +12,7 @@ elif CONFIG["OS_TARGET"] in ("WINNT", "Darwin", "Android"):
+ else:
+     Library("mozglue")
+ 
+-if CONFIG["OS_TARGET"] == "Android":
++if CONFIG["OS_TARGET"] == "Android" and not CONFIG["JS_STANDALONE"]:
+     LDFLAGS += ["-Wl,--version-script,%s/mozglue.ver" % SRCDIR]
+     SOURCES += [
+         "BionicGlue.cpp",

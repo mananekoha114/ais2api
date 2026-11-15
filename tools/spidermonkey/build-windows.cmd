@@ -4,16 +4,18 @@ rem SPDX-License-Identifier: MPL-2.0
 rem
 rem Builds SpiderMonkey for ais2api on windows-x64: runs build-windows.sh in
 rem the MozillaBuild shell with every download, cache and toolchain below the
-rem work directory (a short path without spaces, such as E:\sm).
+rem work directory (a short path without spaces, such as D:\sm).
 rem
-rem Usage: build-windows.cmd <work directory>
+rem Usage: build-windows.cmd <work directory> [archive.tar.xz]
 rem MozillaBuild must be installed in <work directory>\mozilla-build.
 setlocal
 if "%~1"=="" (
-  echo usage: build-windows.cmd ^<work directory^>
+  echo usage: build-windows.cmd ^<work directory^> [archive.tar.xz]
   exit /b 2
 )
 set "WORK=%~f1"
+set "AIS2API_SM_ARCHIVE="
+if not "%~2"=="" set "AIS2API_SM_ARCHIVE=%~f2"
 set "MOZILLABUILD=%WORK%\mozilla-build\"
 if not exist "%MOZILLABUILD%msys2\msys2_shell.cmd" (
   echo MozillaBuild is not installed in %MOZILLABUILD%

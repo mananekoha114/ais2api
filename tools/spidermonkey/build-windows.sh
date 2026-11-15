@@ -6,17 +6,21 @@
 # shell; build-windows.cmd sets up that shell. Everything goes below the work
 # directory:
 #
-#   downloads/   the Firefox source tarball and the Rust installer
-#   src/         the patched source
+#   downloads/             the Firefox source tarball and the Rust installer
+#   src/                   the patched source
 #   obj-win64-<version>/   the build
-#   dist/windows-x64/   the artifact (package-windows.sh)
+#   dist/windows-x64/      the artifact (package-windows.sh)
 #
-# Usage: build-windows.sh <work directory>
+# Usage: build-windows.sh <work directory> [archive.tar.xz]
 set -eu
 
 version=158.0.1
 rust=1.95.0  # the Rust Firefox 158 is built with (win64-rust-1.95 in taskcluster/kinds/toolchain/rust.yml)
 work=$(cygpath -u "$1")
+archive=${2:-${AIS2API_SM_ARCHIVE:-}}
+if [ -n "$archive" ]; then
+    archive=$(cygpath -u "$archive")
+fi
 here=$(cd "$(dirname "$0")" && pwd)
 downloads="$work/downloads"
 source="$work/src/firefox-$version"
@@ -77,4 +81,4 @@ cd "$source"
 ./mach configure < /dev/null
 ./mach build < /dev/null
 
-sh "$here/package-windows.sh" "$objdir" "$(cygpath -u "$MOZBUILD_STATE_PATH")" "$work/dist/windows-x64" "$tarball"
+sh "$here/package-windows.sh" "$objdir" "$(cygpath -u "$MOZBUILD_STATE_PATH")" "$work/dist/windows-x64" "$tarball" "$archive"
