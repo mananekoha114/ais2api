@@ -21,7 +21,7 @@ test -f "$LD_PRELOAD"
 # A fresh container must have a coherent package set from the rolling repository.
 apt-get update
 apt-get upgrade -y -o Dpkg::Options::=--force-confnew
-pkg install -y clang cmake ninja git curl pkg-config boost boost-headers libcurl openssl libarchive libsqlite zstd python tar nodejs npm
+pkg install -y clang cmake ninja git curl pkg-config boost boost-headers libnghttp2 openssl libarchive libsqlite zlib zstd xz-utils python tar nodejs npm
 python -m unittest discover -s tests -p test_portable_smoke.py
 # libc++ supplies syncstream declarations through its experimental feature gate.
 CC=clang CXX=clang++ CXXFLAGS=-fexperimental-library sh scripts/build.sh termux --webui --jobs 2
@@ -70,7 +70,42 @@ def owner(path):
         raise ValueError('unknown_dependency_owner')
     return name
 
+def cmake_cache(path):
+    entries = {}
+    for line in path.read_text(encoding='utf-8').splitlines():
+        if not line or line.startswith(('#', '//')) or '=' not in line:
+            continue
+        left, value = line.split('=', 1)
+        entries[left.split(':', 1)[0]] = value
+    return entries
+
+def license_inventory(subdir):
+    folder = stage / 'share/doc/ais2api/licenses' / subdir
+    if not folder.is_dir():
+        raise ValueError(f'missing_{subdir}_licenses')
+    files = sorted(item.relative_to(stage).as_posix() for item in folder.iterdir() if item.is_file())
+    if not files:
+        raise ValueError(f'empty_{subdir}_licenses')
+    return files
+
+def prebuilt_provenance(directory, subdir):
+    info = json.loads((directory / 'BUILDINFO.json').read_bytes())
+    archives = {
+        rel: hashlib.sha256((directory / rel).read_bytes()).hexdigest()
+        for rel in info['link']
+        if rel.startswith('lib/')
+    }
+    if not archives:
+        raise ValueError(f'missing_{subdir}_static_archives')
+    marker = directory / '.ais2api-unpacked'
+    digest = (marker.read_text(encoding='ascii').strip() if marker.is_file()
+              else hashlib.sha256(json.dumps(archives, sort_keys=True).encode('ascii')).hexdigest())
+    return info, digest, archives, license_inventory(subdir)
+
 executable = checker.elf_runtime((stage / 'bin/ais2api').read_bytes())
+direct_needed = {checker.termux_soname(item) for item in executable['needed']}
+if any(name.startswith(('libcurl.', 'libmozjs')) for name in direct_needed):
+    raise ValueError('unexpected_dynamic_spidermonkey_or_curl_dependency')
 libraries = {}
 pending = list(executable['needed'])
 while pending:
@@ -92,6 +127,37 @@ static_components = {'libc++experimental.a': {
     'package': owner(experimental),
     'sha256': hashlib.sha256(experimental.read_bytes()).hexdigest(),
 }}
+cache = cmake_cache(Path('build/termux/CMakeCache.txt'))
+if cache.get('AIS2API_SPIDERMONKEY') == 'ON':
+    ada_tarball = Path('build/deps/ada-4.0.0.tar.gz')
+    ada_archive = Path('build/deps/ada-install/lib/libada.a')
+    static_components['ada-url'] = {
+        'provider': 'source-archive',
+        'version': '4.0.0',
+        'source_sha512': hashlib.sha512(ada_tarball.read_bytes()).hexdigest(),
+        'sha256': hashlib.sha256(ada_archive.read_bytes()).hexdigest(),
+        'license_files': license_inventory('ada-url'),
+    }
+    sm_info, sm_sha, sm_archives, sm_licenses = prebuilt_provenance(
+        Path(cache['AIS2API_RESOLVED_SPIDERMONKEY_DIR']), 'spidermonkey')
+    static_components['spidermonkey'] = {
+        'provider': 'prebuilt-archive',
+        'version': sm_info['spidermonkey'],
+        'sha256': sm_sha,
+        'archives': sm_archives,
+        'license_files': sm_licenses,
+    }
+if cache.get('AIS2API_CURL_IMPERSONATE') == 'ON':
+    ci_info, ci_sha, ci_archives, ci_licenses = prebuilt_provenance(
+        Path(cache['AIS2API_RESOLVED_CURL_IMPERSONATE_DIR']), 'curl-impersonate')
+    static_components['curl-impersonate'] = {
+        'provider': 'prebuilt-archive',
+        'version': ci_info['version'],
+        'boringssl_prefix': ci_info['boringssl_prefix'],
+        'sha256': ci_sha,
+        'archives': ci_archives,
+        'license_files': ci_licenses,
+    }
 # Ship notices only for code inside the executable and for the packages providing
 # its runtime libraries; check-package.py requires this same set. Boost's notice
 # also covers its headers. Build-only tools in the container are not distributed.
@@ -108,6 +174,9 @@ for package in sorted(notice_packages):
         notices[package] = 'included'
     else:
         notices[package] = 'external-system-package'
+for component_name, component_entry in static_components.items():
+    if 'provider' in component_entry:
+        notices[component_name] = 'included'
 metadata = {
     'schema_version': 1, 'target': 'termux-aarch64',
     'source_commit': commit, 'container_image': image,
