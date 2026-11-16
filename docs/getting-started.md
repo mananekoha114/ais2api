@@ -4,12 +4,13 @@
 
 ## 1. 获取程序
 
-GitHub Actions 每次构建都会生成运行包（保留 28 天）：
+发布的版本在 [GitHub Releases](https://github.com/mananekoha114/ais2api/releases) 下载，每个运行包都附带 `.sha256`。GitHub Actions 每次构建也会生成运行包（保留 28 天）：
 
 | 平台 | 运行包 | 一键启动脚本 |
 |---|---|---|
 | Windows 10/11 x64 | `.zip` | `start.cmd` |
 | Ubuntu 24.04 / Debian 13 x86_64 | `.tar.gz` | `start.sh` |
+| Ubuntu 24.04 ARM64 | `.tar.gz` | `start.sh` |
 | Android ARM64（Termux） | `.tar.gz` | `start.sh` |
 
 把运行包解压到**当前用户可写的新目录**（Termux 需放在其私有存储内，Android 共享存储不能执行程序）。目录结构大致如下：
@@ -137,6 +138,21 @@ ais2api stop
 | `data/runtime/` | 浏览器安装目录、下载缓存和临时资料 |
 
 整个程序目录可以一起移动。不要把 `config.json` 或 `data/` 提交到仓库或分享给他人。
+
+## 从旧版本升级
+
+1. 执行 `ais2api stop` 停止旧服务（在前台运行时按 Ctrl+C）。
+2. 把新运行包解压到新目录，再把旧目录里的 `config.json` 和 `data/` 复制到新目录的同一位置。
+3. 运行一键启动脚本。旧的配置和数据库会在读取时自动迁移；运行环境需要准备或更新时，脚本会提示执行 `setup`，下载所需的浏览器或 fpgen 模型（Linux 与 Termux 会先询问确认）。
+4. 确认新版本正常后，再删除旧目录。
+
+从使用 CloakBrowser 的版本（v0.1.0 及更早）升级时：
+
+- 配置中的 `browser_backend: "cloakbrowser"` 迁移为 `"camoufox"`，账号的 `cloakbrowser` 后端迁移为 `"auto"`，环境变量 `AIS2API_BROWSER_BACKEND=cloakbrowser` 同样按 `camoufox` 处理。
+- 配置中指向 CloakBrowser 的 `browser_executable` 会被忽略，不需要手动修改。
+- 旧浏览器不再使用，确认新版本正常后可以删除 `data/runtime/chromium-*` 目录和 `data/runtime/downloads/` 下的 `browser.zip` 或 `browser.tar.gz`。
+
+Docker 的升级见 [Docker 部署](docker.md#升级)。
 
 ## 下一步
 
