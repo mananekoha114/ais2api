@@ -145,7 +145,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 
 请求记录、累计、价格缓存和模型清单保存在 `data/usage.sqlite3`，与账号数据库 `state.sqlite3` 分开。请求记录在后台按顺序写入，HTTP 处理不等待数据库；随后的查询总能看到之前排队的写入。写入失败时记录 `request_history_error` 日志，`/status` 中的 `usage_healthy` 变为 `false`，请求本身不受影响；开始生成时的写入仍同步进行，失败则以 503 `request_history_unavailable` 拒绝该请求。来自过渡版本（版本 2）的记录在移入时会沿用原尝试的价格和金额，修正可查历史的费用与内容拦截分类，并按贡献差额更新累计。已到期删除的明细无法补回未知部分，原累计继续保留；不会用当前价格重估旧请求。
 
-`POST /pricing/refresh` 不带参数或提交空对象，返回 202 和当前刷新状态。价格更新在独立后台线程中运行，不占生成队列。唯一来源是本项目仓库的 GitHub Actions 每 6 小时从 [Google 官方价格页](https://ai.google.dev/gemini-api/docs/pricing) 抓取、发布在 `pricing-data` 分支的 [gemini.json](https://raw.githubusercontent.com/mananekoha114/ais2api/pricing-data/gemini.json)，只在价格变化时提交；页面结构无法识别时抓取失败，不会发布残缺目录。下载使用配置代理，不发送请求正文或凭据。每个版本内置构建时的快照（源码 `pricing/gemini.json`），从未联网成功时也能估算；联网后保留发布时间较新的一份，落后的下载不会覆盖较新的价格。目录缺失或超过 24 小时自动更新，失败保留旧有效版本并显示错误，最早一小时后自动重试。单次下载最多 4 MiB、30 秒，停止服务可取消。
+`POST /pricing/refresh` 不带参数或提交空对象，返回 202 和当前刷新状态。价格更新在独立后台线程中运行，不占生成队列。唯一来源是本项目仓库的 GitHub Actions 每 6 小时从 [Google 官方价格页](https://aistudio.google.com/docs/pricing) 抓取、发布在 `pricing-data` 分支的 [gemini.json](https://raw.githubusercontent.com/mananekoha114/ais2api/pricing-data/gemini.json)，只在价格变化时提交；页面结构无法识别时抓取失败，不会发布残缺目录。下载使用配置代理，不发送请求正文或凭据。每个版本内置构建时的快照（源码 `pricing/gemini.json`），从未联网成功时也能估算；联网后保留发布时间较新的一份，落后的下载不会覆盖较新的价格。目录缺失或超过 24 小时自动更新，失败保留旧有效版本并显示错误，最早一小时后自动重试。单次下载最多 4 MiB、30 秒，停止服务可取消。
 
 `GET /pricing` 的 `sources` 只有一项 `google`：`url` 为下载地址，`published_at` 为该价格目录的抓取时间（ISO 8601 UTC），`embedded` 为 `true` 表示仍在使用内置快照，`fetched_at` / `attempted_at` 为最近一次成功和尝试的下载时间（Unix 秒），`error` 为最近一次失败的代码。
 

@@ -20,16 +20,26 @@ import re
 import sys
 import urllib.request
 
-SOURCE = "https://ai.google.dev/gemini-api/docs/pricing"
-MARKDOWN = SOURCE + ".md.txt"
+# ai.google.dev/gemini-api/docs/pricing moved here in November 2026.
+SOURCE = "https://aistudio.google.com/docs/pricing"
+MARKDOWN = SOURCE + ".md"
 SCHEMA_VERSION = 1
 # Long-listed models; a scrape without them means the page layout changed and
-# must not replace a published catalog.
-REQUIRED_MODELS = ("gemini-2.5-pro", "gemini-2.5-flash")
+# must not replace a published catalog. Pick models that are not deprecated:
+# the page drops a model some time after it is retired.
+REQUIRED_MODELS = ("gemini-3.1-flash-lite", "gemini-3.8-flash")
 MINIMUM_MODELS = 8
 MAXIMUM_BYTES = 4 * 1024 * 1024
 
 MODEL_ID = re.compile(r"`([a-z0-9][a-z0-9.\-]*)`")
+# The model ids: an emphasized run of code links, possibly over several
+# lines, between the heading and the first price table.
+ID_LINE = re.compile(r"^[ \t]*\*(\[`[^*]*)\*[ \t]*$", re.M)
+HEADER_END = re.compile(r"^[ \t]*(?:\{%\s*(?:tabs|table)\s*%\}|### |\|)", re.M)
+# Markdoc tags ({% id="..." %}, {% sup %}*{% /sup %}) carry no price.
+MARKDOC_TAG = re.compile(r"\{%.*?%\}", re.S)
+MARKDOC_TABLE = re.compile(r"\{%\s*table\s*%\}(.*?)\{%\s*/table\s*%\}", re.S)
+MARKDOC_STANDARD = re.compile(r"\{%\s*tab\s+title=\"Standard\"\s*%\}(.*?)\{%\s*/tab\s*%\}", re.S)
 PRICE = re.compile(r"\$\s*([0-9]+(?:\.[0-9]+)?)")
 # "$3.00 or $0.005/min (audio)": the per-minute alternative is not a token price.
 PER_MINUTE = re.compile(r"\s+or\s+\$[0-9.]+\s*/\s*min\S*")
@@ -95,15 +105,54 @@ def parse_cell(cell):
     return entries
 
 
+def pipe_rows(text):
+    """The cells of each row of a Markdown pipe table."""
+    for line in text.splitlines():
+        if line.startswith("|"):
+            yield line.strip().strip("|").split("|")
+
+
+def markdoc_rows(table):
+    """The cells of each row of a Markdoc table: rows are separated by "---"
+    and cells are list items, whose text may continue on the next lines."""
+    for block in re.split(r"^[ \t]*---[ \t]*$", table, flags=re.M):
+        cells, indent = [], None
+        for line in block.splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            depth = len(line) - len(line.lstrip())
+            if text.startswith("* ") and (indent is None or depth <= indent):
+                indent = depth if indent is None else indent
+                cells.append(text[2:])
+            elif cells:
+                cells[-1] += " " + text
+        yield cells
+
+
 def standard_table(section):
-    match = re.search(r"^### Standard\s*\n(.*?)(?=^#{2,3} |\Z)", section, re.M | re.S)
-    if not match:
-        return None
+    """The Standard paid tier's rows: its Markdoc tab's table, the one table of
+    a section without tabs (Live models have no other tier), or the pipe table
+    under "### Standard" of the earlier layout."""
+    tab = MARKDOC_STANDARD.search(section)
+    if tab:
+        tables = MARKDOC_TABLE.findall(tab.group(1))
+    elif re.search(r"\{%\s*tabs\s*%\}", section):
+        tables = []  # Other tiers only.
+    else:
+        tables = MARKDOC_TABLE.findall(section)
+    if len(tables) > 1:
+        raise PricingError("more than one Standard price table")
+    if tables:
+        lines = markdoc_rows(tables[0])
+    else:
+        match = re.search(r"^### Standard\s*\n(.*?)(?=^#{2,3} |\Z)", section, re.M | re.S)
+        if not match:
+            return None
+        lines = pipe_rows(match.group(1))
     rows = {}
-    for line in match.group(1).splitlines():
-        if not line.startswith("|"):
-            continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+    for cells in lines:
+        cells = [" ".join(MARKDOC_TAG.sub("", cell).split()) for cell in cells]
         if len(cells) < 2:
             continue
         label = cells[0].lower()
@@ -162,11 +211,13 @@ def parse(markdown):
     models, skipped = {}, {}
     for section in re.split(r"^## ", markdown, flags=re.M)[1:]:
         heading, _, body = section.partition("\n")
-        # The model ids are on the line(s) right below the heading.
-        ids = [value for value in MODEL_ID.findall("\n".join(body.splitlines()[:4]))
+        end = HEADER_END.search(body)
+        line = ID_LINE.search(body, 0, end.start() if end else len(body))
+        ids = [value for value in MODEL_ID.findall(line.group(1) if line else "")
                if value.startswith(("gemini-", "gemma-"))]
         if not ids:
             continue
+        heading = MARKDOC_TAG.sub("", heading)
         name = re.sub(r"[^\x20-\x7e]", "", re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", heading)).strip()
         try:
             rows = standard_table(body)
