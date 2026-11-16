@@ -117,7 +117,8 @@ target_link_libraries(ais2api_bidi INTERFACE ais2api_common)
 add_subdirectory(waa)
 add_library(ais2api_core src/config.cpp src/store.cpp src/pricing.cpp src/cookie_import.cpp src/schema.cpp src/protocol.cpp src/responses.cpp src/browser.cpp src/browser_process.cpp src/camoufox.cpp src/backend_router.cpp src/fpgen.cpp src/firefox_identity.cpp src/runtime.cpp src/setup.cpp src/download.cpp src/server.cpp src/control.cpp src/management.cpp src/diagnostics.cpp src/logs.cpp src/console.cpp src/log_sources.cpp src/webui.cpp src/region.cpp)
 set(browser_bridge_inc "${CMAKE_CURRENT_BINARY_DIR}/generated/browser_bridge.inc")
-target_sources(ais2api_core PRIVATE src/price_service.cpp src/usage.cpp src/continuation.cpp src/browser_generation.cpp src/firefox_http.cpp src/spidermonkey_page.cpp)
+target_sources(ais2api_core PRIVATE src/price_service.cpp src/usage.cpp src/continuation.cpp src/browser_generation.cpp src/firefox_http.cpp src/spidermonkey_page.cpp
+  src/tokenizer.cpp)
 # The SpiderMonkey backend itself only exists in a build with the engine.
 if(AIS2API_SPIDERMONKEY)
   target_sources(ais2api_core PRIVATE src/spidermonkey.cpp)
@@ -133,6 +134,12 @@ add_custom_command(OUTPUT "${pricing_snapshot_inc}"
     "-DOUTPUT=${pricing_snapshot_inc}" -P "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-pricing.cmake"
   DEPENDS pricing/gemini.json scripts/embed-pricing.cmake VERBATIM)
 target_sources(ais2api_core PRIVATE "${pricing_snapshot_inc}")
+set(gemma4_tokenizer_inc "${CMAKE_CURRENT_BINARY_DIR}/generated/gemma4_tokenizer.inc")
+add_custom_command(OUTPUT "${gemma4_tokenizer_inc}"
+  COMMAND "${CMAKE_COMMAND}" "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/third_party/gemma4-tokenizer/gemma4-bpe.zst"
+    "-DOUTPUT=${gemma4_tokenizer_inc}" -P "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-tokenizer.cmake"
+  DEPENDS third_party/gemma4-tokenizer/gemma4-bpe.zst scripts/embed-tokenizer.cmake VERBATIM)
+target_sources(ais2api_core PRIVATE "${gemma4_tokenizer_inc}")
 set(camoufox_catalog_inc "${CMAKE_CURRENT_BINARY_DIR}/generated/camoufox_catalog.inc")
 file(GLOB camoufox_catalog_files CONFIGURE_DEPENDS browser/camoufox/*.json)
 add_custom_command(OUTPUT "${camoufox_catalog_inc}"
@@ -253,6 +260,7 @@ endif()
 install(FILES LICENSE docs/platforms.md DESTINATION share/doc/ais2api)
 install(FILES NOTICE THIRD_PARTY_NOTICES.md docs/github-publishing.md DESTINATION share/doc/ais2api)
 install(FILES licenses/fpgen-LICENSE.txt licenses/camoufox-launcher-LICENSE.txt licenses/AIStudio2API-LICENSE.txt
+  licenses/gemma4-tokenizer-LICENSE.txt
   DESTINATION share/doc/ais2api/licenses)
 install(FILES docs/README.md docs/getting-started.md docs/clients.md docs/configuration.md docs/troubleshooting.md
               docs/cli.md docs/protocol.md docs/responses.md docs/true-role.md docs/browser.md
