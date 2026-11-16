@@ -225,6 +225,20 @@ struct FailoverServer {
         return parser.release();
     }
 
+    // The service writes its journal after responding; journal-backed views
+    // such as the export's recent events lag until the writer catches up.
+    bool drain_logs() {
+        for (const auto deadline = Clock::now() + 10s; Clock::now() < deadline;) {
+            const auto status = local_call(config, {{"command", "status"}});
+            const auto pending = status.if_contains("pending_logs");
+            if (pending && ((pending->is_uint64() && pending->as_uint64() == 0) ||
+                            (pending->is_int64() && pending->as_int64() == 0)))
+                return true;
+            std::this_thread::sleep_for(10ms);
+        }
+        return false;
+    }
+
     http::response<http::string_body> generate_chat(std::string model = "gemini-2.5-pro") {
         const json::object payload{
             {"model", std::move(model)},
@@ -580,6 +594,7 @@ TEST_CASE("Service generate fails over auto Firefox accounts for 6 hours after r
             diag_json.at("events").as_object().at("backends").as_object().at("camoufox").as_object();
         CHECK(cam_events.at("backend_switch").as_object().at("total") == 1);
 
+        REQUIRE(server.drain_logs());
         const auto export_res = server.call("/api/admin/v1/diagnostics/export", "{}", http::verb::post);
         REQUIRE(export_res.result_int() == 200);
         const auto export_json = json::parse(export_res.body()).as_object();
