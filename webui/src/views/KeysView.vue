@@ -199,6 +199,12 @@ const clients = computed<{ name: string; hint: string; url: string; icon: IconNa
     icon: 'bot',
   },
   {
+    name: 'Claude Code 与 Anthropic 兼容客户端',
+    hint: 'ANTHROPIC_BASE_URL；密钥填 ANTHROPIC_API_KEY，接口为 /v1/messages。',
+    url: endpoint.value,
+    icon: 'bot',
+  },
+  {
     name: 'RikkaHub',
     hint: 'Google 提供商的 Base URL。',
     url: `${endpoint.value}/v1beta`,
@@ -223,7 +229,7 @@ const endpoint = computed(() => session.baseUrl || (import.meta.env.DEV ? __DEV_
 
 <template>
   <div>
-    <PageHeader title="API 密钥" subtitle="生成接口（OpenAI / Gemini 兼容）使用的密钥。与管理密钥相互独立。">
+    <PageHeader title="API 密钥" subtitle="生成接口（OpenAI / Anthropic / Gemini 兼容）使用的密钥。与管理密钥相互独立。">
       <button class="btn accent" @click="openCreate"><FIcon name="add" />创建密钥</button>
     </PageHeader>
 

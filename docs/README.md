@@ -17,7 +17,7 @@
 
 | 文档 | 内容 |
 |---|---|
-| [协议合同](protocol.md) | 三种数据 API 的支持范围、schema 转换、工具与搜索、扩展字段、流式解析 |
+| [协议合同](protocol.md) | 四种数据 API 的支持范围、schema 转换、工具与搜索、扩展字段、流式解析 |
 | [Responses 接口](responses.md) | OpenAI Responses 的无状态子集与示例 |
 | [真 role 与思考签名](true-role.md) | 消息边界保真与签名往返 |
 | [管理 API](management-api.md) | 管理接口的鉴权、路由、配置保存规则与日志流 |

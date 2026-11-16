@@ -3421,6 +3421,13 @@
             "default": true,
             "description": "Enable bounded retries of empty ordinary continuation HTTP 403 denials. Normal continuation remains available when false. Applies to the next generation without restarting."
           },
+          "nonstream_keepalive_seconds": {
+            "type": "integer",
+            "default": 0,
+            "minimum": 0,
+            "maximum": 120,
+            "description": "Seconds a non-streaming generation may wait before the response commits as 200 JSON with one newline per interval; 0 disables it. Takes effect without restarting."
+          },
           "model_aliases": {
             "type": "object",
             "additionalProperties": {
@@ -3942,6 +3949,7 @@
             "enum": [
               "chat_completions",
               "responses",
+              "messages",
               "gemini"
             ]
           },

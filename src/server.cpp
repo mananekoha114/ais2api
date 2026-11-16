@@ -13,6 +13,7 @@
 #include "ais2api/cookie_import.hpp"
 #include "ais2api/logs.hpp"
 #include "ais2api/log_sources.hpp"
+#include "ais2api/anthropic.hpp"
 #include "ais2api/responses.hpp"
 #include "ais2api/webui.hpp"
 #include "ais2api/usage.hpp"
@@ -45,6 +46,8 @@ struct Work {
     Protocol protocol = Protocol::gemini;
     std::string model, principal;
     bool stream = false, include_usage = false, responses = false;
+    // An Anthropic Messages request, lowered to Gemini in the worker.
+    bool anthropic = false;
     std::size_t input_bytes = 0;
     json::object body, response_options;
     std::shared_ptr<EventPipe> pipe;
@@ -94,7 +97,7 @@ class Service {
                 log({{"event", "runtime_leftovers_removed"}, {"count", removed}});
         } catch (...) {}
     }
-    ~Service() { shutdown(); log_writer_.join(); }
+    ~Service() { shutdown(); token_counter_.join(); log_writer_.join(); }
     void shutdown() {
         stop();
         worker_.request_stop();
@@ -112,6 +115,9 @@ class Service {
     }
     Store &store() { return store_; }
     PriceService &prices() { return prices_; }
+    // Local token counting runs here, off the HTTP thread and outside the
+    // generation queue.
+    net::thread_pool::executor_type count_executor() { return token_counter_.get_executor(); }
     // Diagnostic counters per browser backend; they never fail the work.
     void count_event(std::string_view backend, std::string_view event) {
         try { store_.record_backend_event(backend, event); } catch (...) {}
@@ -475,6 +481,7 @@ class Service {
     std::optional<Config> pending_config_;
     logs::Journal journal_;
     net::thread_pool log_writer_{1};
+    net::thread_pool token_counter_{1};
     std::atomic<unsigned> pending_logs_{0};
     std::mutex log_queue_mutex_;
     std::vector<json::object> log_queue_;
@@ -751,6 +758,11 @@ class Service {
             if (Clock::now() - work->queued > std::chrono::seconds(cfg.limits.queue_seconds))
                 throw Error(504, "queue_timeout", "Queue wait exceeded limit");
             json::array ignored_responses;
+            if (work->anthropic) {
+                auto lowered = anthropic_to_gemini(work->body, cfg.ignore_unsupported_parameters);
+                work->body = std::move(lowered.gemini);
+                ignored_responses = std::move(lowered.ignored);
+            }
             if (work->responses) {
                 if (cfg.ignore_unsupported_parameters)
                     discard_unsupported_responses(work->body, ignored_responses);
@@ -860,6 +872,7 @@ class Service {
                                     }
                             if (!request.include_thoughts)
                                 filter_thoughts(event);
+                            decode_json_text_args(event, request.json_text_args);
                             if (auto usage = event.if_contains("usageMetadata");
                                 usage && usage->is_object()) {
                                 *usage = add_usage(completed_usage, usage->as_object());
@@ -1122,43 +1135,84 @@ net::awaitable<void> json_sse(beast::tcp_stream &stream, const json::object &obj
     pending += "\n\n";
     co_await write(pending);
 }
-net::awaitable<std::optional<json::object>> next_event(const std::shared_ptr<Work> &work,
-                                                       unsigned queue_seconds) {
+struct NextEvent {
+    // Empty with `due` unset once generation has finished.
+    std::optional<json::object> event;
+    // `wake_at` passed before an event or the end arrived.
+    bool due = false;
+};
+net::awaitable<NextEvent> next_event_until(const std::shared_ptr<Work> &work, unsigned queue_seconds,
+                                           Clock::time_point wake_at) {
     while (true) {
         // Arm before inspecting the pipe. Producer notifications are posted to
         // this executor, so no notification can be lost before async_wait starts.
-        work->wakeup->expires_at(work->pipe->started
-                                     ? Clock::time_point::max()
-                                     : work->queued + std::chrono::seconds(queue_seconds));
+        work->wakeup->expires_at(std::min(wake_at, work->pipe->started
+                                                       ? Clock::time_point::max()
+                                                       : work->queued + std::chrono::seconds(queue_seconds)));
         check_cancel(work->pipe->cancellation.get_token());
         if (auto event = work->pipe->take())
-            co_return event;
+            co_return NextEvent{std::move(event)};
         if (work->pipe->done()) {
             if (auto error = work->pipe->error())
                 throw *error;
-            co_return std::nullopt;
+            co_return NextEvent{};
         }
         if (!work->pipe->started &&
             Clock::now() - work->queued > std::chrono::seconds(queue_seconds)) {
             work->pipe->cancel();
             throw Error(504, "queue_timeout", "Queue wait exceeded limit");
         }
+        if (Clock::now() >= wake_at)
+            co_return NextEvent{std::nullopt, true};
         boost::system::error_code ec;
         co_await work->wakeup->async_wait(net::redirect_error(net::use_awaitable, ec));
         if (ec && ec != net::error::operation_aborted)
             throw boost::system::system_error(ec);
     }
 }
+net::awaitable<std::optional<json::object>> next_event(const std::shared_ptr<Work> &work,
+                                                       unsigned queue_seconds) {
+    co_return (co_await next_event_until(work, queue_seconds, Clock::time_point::max())).event;
+}
+// Commits a non-streaming response whose JSON body follows in chunks, so a
+// keepalive newline can precede it.
+net::awaitable<void> write_json_header(beast::tcp_stream &stream) {
+    http::response<http::empty_body> response(http::status::ok, 11);
+    response.set(http::field::server, "ais2api");
+    response.set(http::field::content_type, "application/json; charset=utf-8");
+    response.set(http::field::cache_control, "no-store");
+    response.set("X-Accel-Buffering", "no");
+    response.keep_alive(false);
+    response.chunked(true);
+    http::response_serializer<http::empty_body> header(response);
+    stream.expires_after(15s);
+    co_await http::async_write_header(stream, header, net::use_awaitable);
+}
+net::awaitable<void> write_json_body(beast::tcp_stream &stream, const json::object &object) {
+    const auto body = json::serialize(object);
+    stream.expires_after(15s);
+    co_await net::async_write(stream, http::make_chunk(net::buffer(body)), net::use_awaitable);
+    co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+}
+// Which API shape errors and model listings take.
+enum class ApiFlavor { gemini, openai, anthropic };
 struct ConnectionState {
+    // SSE headers were sent; errors become stream events.
     bool committed = false;
-    bool openai = false;
+    // A keepalive JSON response was committed as 200; an error becomes its body.
+    bool keepalive_committed = false;
+    ApiFlavor flavor = ApiFlavor::gemini;
     bool audit = true;
     unsigned response_status = 200;
     std::string origin, category = "http";
     std::unique_ptr<ResponsesStream> responses_stream;
+    std::unique_ptr<AnthropicStream> anthropic_stream;
     std::shared_ptr<RequestUsage> usage;
     std::optional<json::object> partial_response;
 };
+json::object client_error(const Error &error, ApiFlavor flavor) {
+    return flavor == ApiFlavor::anthropic ? anthropic_error(error) : error_json(error, flavor == ApiFlavor::openai);
+}
 std::map<std::string, std::string> query_parameters(std::string_view target) {
     std::map<std::string, std::string> result;
     auto begin = target.find('?');
@@ -1484,7 +1538,13 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     auto request = parser.release();
     std::string target(request.target());
     auto path = normalize_gemini_path(std::string_view(target).substr(0, target.find('?')));
-    state.openai = path.starts_with("/v1/");
+    // Anthropic clients send anthropic-version, which also selects the
+    // Anthropic model list on the shared /v1/models route.
+    if (path.starts_with("/v1/messages") ||
+        (path.starts_with("/v1/models") && request.find("anthropic-version") != request.end()))
+        state.flavor = ApiFlavor::anthropic;
+    else if (path.starts_with("/v1/"))
+        state.flavor = ApiFlavor::openai;
     if (request.method() == http::verb::get || request.method() == http::verb::head) {
         if (auto asset = webui::find(path)) {
             http::response<http::string_body> response(http::status::ok, 11);
@@ -1604,9 +1664,11 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
                    path == "/v1beta/models" || path.starts_with("/v1beta/models/"));
     bool openai = request.method() == http::verb::post && path == "/v1/chat/completions";
     bool responses = request.method() == http::verb::post && path == "/v1/responses";
+    bool anthropic = request.method() == http::verb::post && path == "/v1/messages";
+    bool count_tokens = request.method() == http::verb::post && path == "/v1/messages/count_tokens";
     bool gemini = request.method() == http::verb::post && path.starts_with("/v1beta/models/") &&
                   (path.ends_with(":generateContent") || path.ends_with(":streamGenerateContent"));
-    if (!models && !openai && !responses && !gemini)
+    if (!models && !openai && !responses && !anthropic && !count_tokens && !gemini)
         throw Error(404, "route_not_found", "Route is not implemented");
     auto principal = service.authenticate_generation(token_from(request));
     if (!principal)
@@ -1649,7 +1711,18 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
                 id.erase(0, 7);
             if (id.empty())
                 continue;
-            if (state.openai)
+            if (state.flavor == ApiFlavor::anthropic) {
+                auto display = string_or(object, "displayName");
+                json::object model{{"type", "model"},
+                                   {"id", id},
+                                   {"display_name", display.empty() ? id : display},
+                                   {"created_at", "1970-01-01T00:00:00Z"}};
+                for (auto [from, to] : {std::pair{"inputTokenLimit", "max_input_tokens"},
+                                        std::pair{"outputTokenLimit", "max_tokens"}})
+                    if (auto limit = object.if_contains(from); limit && (limit->is_int64() || limit->is_uint64()))
+                        model[to] = *limit;
+                list.push_back(std::move(model));
+            } else if (state.flavor == ApiFlavor::openai)
                 list.push_back(
                     json::object{{"id", id},
                                  {"object", "model"},
@@ -1668,12 +1741,12 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
                 list.push_back(std::move(object));
             }
         }
-        auto prefix = state.openai ? std::string("/v1/models/") : std::string("/v1beta/models/");
+        auto prefix = state.flavor != ApiFlavor::gemini ? std::string("/v1/models/") : std::string("/v1beta/models/");
         if (path.starts_with(prefix)) {
             auto id = decode_url(path.substr(prefix.size()));
             for (auto &item : list) {
                 auto &object = item.as_object();
-                auto name = string_or(object, state.openai ? "id" : "name");
+                auto name = string_or(object, state.flavor != ApiFlavor::gemini ? "id" : "name");
                 if (name == id || name == "models/" + id) {
                     co_await send_json(stream, 200, object);
                     co_return;
@@ -1682,18 +1755,28 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
             throw Error(404, "model_not_found",
                         "Model not found in discovered or configured models");
         }
-        co_await send_json(stream, 200,
-                           state.openai
-                               ? json::object{{"object", "list"}, {"data", std::move(list)}}
-                               : json::object{{"models", std::move(list)}});
+        if (state.flavor == ApiFlavor::anthropic) {
+            json::object page{{"data", list}, {"has_more", false}, {"first_id", nullptr}, {"last_id", nullptr}};
+            if (!list.empty()) {
+                page["first_id"] = list.front().as_object().at("id");
+                page["last_id"] = list.back().as_object().at("id");
+            }
+            co_await send_json(stream, 200, page);
+        } else
+            co_await send_json(stream, 200,
+                               state.flavor == ApiFlavor::openai
+                                   ? json::object{{"object", "list"}, {"data", std::move(list)}}
+                                   : json::object{{"models", std::move(list)}});
         co_return;
     }
-    {
+    if (!count_tokens) {
         // History writes from this coroutine are queued so the reactor never
         // waits for SQLite; a failed write is logged from the database thread.
-        auto id = responses ? "resp_" + random_hex(16) : "chatcmpl-" + random_hex(12);
+        auto id = responses ? "resp_" + random_hex(16)
+                  : anthropic ? "msg_" + random_hex(12)
+                              : "chatcmpl-" + random_hex(12);
         state.usage = std::make_shared<RequestUsage>(service.store(), id,
-            responses ? "responses" : openai ? "chat_completions" : "gemini",
+            responses ? "responses" : anthropic ? "messages" : openai ? "chat_completions" : "gemini",
             [&service, id] { service.usage_failure(id); });
     }
     auto content_type = request[http::field::content_type];
@@ -1705,17 +1788,33 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     if (ec || !value.is_object())
         throw Error(400, "invalid_json", "Request body must be a JSON object");
     std::string().swap(request.body());
+    if (count_tokens) {
+        // Counted locally with the Gemma 4 tokenizer: no queue, no upstream
+        // and no request record.
+        auto body = std::make_shared<json::object>(std::move(value.as_object()));
+        const bool discard = cfg.ignore_unsupported_parameters;
+        auto tokens = co_await net::co_spawn(
+            service.count_executor(),
+            [body, discard]() -> net::awaitable<std::size_t> {
+                co_return anthropic_input_tokens(anthropic_to_gemini(*body, discard, true).gemini);
+            },
+            net::use_awaitable);
+        co_await send_json(stream, 200, {{"input_tokens", tokens}});
+        co_return;
+    }
     auto work = std::make_shared<Work>();
     work->usage = state.usage;
     work->input_bytes = input_bytes;
     work->protocol = (openai || responses) ? Protocol::openai : Protocol::gemini;
     work->responses = responses;
+    work->anthropic = anthropic;
+    const bool thinking = anthropic && anthropic_thinking(value.as_object());
     work->principal = *principal;
     work->body = std::move(value.as_object());
-    work->stream =
-        (openai || responses) ? bool_or(work->body, "stream") : path.ends_with(":streamGenerateContent");
-    work->model =
-        (openai || responses) ? string_or(work->body, "model") : decode_url(path.substr(15, path.find(':') - 15));
+    work->stream = (openai || responses || anthropic) ? bool_or(work->body, "stream")
+                                                      : path.ends_with(":streamGenerateContent");
+    work->model = (openai || responses || anthropic) ? string_or(work->body, "model")
+                                                     : decode_url(path.substr(15, path.find(':') - 15));
     work->usage->configure(work->model, work->stream);
     work->pipe = std::make_shared<EventPipe>(cfg.limits.object_bytes);
     auto executor = co_await net::this_coro::executor;
@@ -1750,20 +1849,40 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     if (!work->stream) {
         json::object aggregate;
         std::size_t aggregate_bound = 2;
+        std::size_t dropped = 0;
         auto adapt = [&](const json::object &value) {
             auto output = responses ? responses_response(value, work->model, work->usage->id(),
                                                          work->response_options, &service.store(),
                                                          work->principal)
                           : openai  ? openai_response(value, work->model, work->usage->id(),
                                                       &service.store(), work->principal)
+                          : anthropic ? anthropic_response(value, work->model, work->usage->id(), thinking, &dropped)
                                     : value;
-            if (!responses && !openai)
+            if (!responses && !openai && !anthropic)
                 official_usage(output);
             return output;
         };
+        // Behind a reverse proxy a long silent wait can be cut off; once the
+        // interval passes, commit 200 and write a newline per interval.
+        const auto keepalive = std::chrono::seconds(cfg.nonstream_keepalive_seconds);
+        auto wake_at = keepalive.count() ? Clock::now() + keepalive : Clock::time_point::max();
         try {
-            while (auto event = co_await next_event(work, cfg.limits.queue_seconds)) {
-                merge_event(aggregate, *event, cfg.limits.object_bytes, &aggregate_bound);
+            while (true) {
+                auto next = co_await next_event_until(work, cfg.limits.queue_seconds, wake_at);
+                if (next.due) {
+                    if (!state.keepalive_committed) {
+                        co_await write_json_header(stream);
+                        state.keepalive_committed = true;
+                    }
+                    stream.expires_after(30s);
+                    co_await net::async_write(stream, http::make_chunk(net::buffer("\n", 1)),
+                                              net::use_awaitable);
+                    wake_at = Clock::now() + keepalive;
+                    continue;
+                }
+                if (!next.event)
+                    break;
+                merge_event(aggregate, *next.event, cfg.limits.object_bytes, &aggregate_bound);
                 work->pipe->acknowledge();
             }
         } catch (const Error &error) {
@@ -1784,12 +1903,19 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
                 } else if (openai) {
                     for (auto &choice : partial.at("choices").as_array())
                         choice.as_object()["finish_reason"] = nullptr;
-                }
+                } else if (anthropic)
+                    partial["stop_reason"] = nullptr;
                 state.partial_response = std::move(partial);
             }
             throw;
         }
-        co_await send_json(stream, 200, adapt(aggregate));
+        auto output = adapt(aggregate);
+        if (dropped)
+            service.log({{"event", "anthropic_parts_dropped"}, {"request_id", work->usage->id()}, {"parts", dropped}});
+        if (state.keepalive_committed)
+            co_await write_json_body(stream, output);
+        else
+            co_await send_json(stream, 200, output);
         co_return;
     }
     auto event = co_await next_event(work, cfg.limits.queue_seconds);
@@ -1799,6 +1925,8 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         state.responses_stream = std::make_unique<ResponsesStream>(
             work->model, work->usage->id(), work->response_options, cfg.limits.object_bytes,
             &service.store(), work->principal);
+    if (anthropic)
+        state.anthropic_stream = std::make_unique<AnthropicStream>(work->model, work->usage->id(), thinking);
     http::response<http::empty_body> response(http::status::ok, 11);
     response.set(http::field::content_type, "text/event-stream");
     response.set(http::field::cache_control, "no-cache");
@@ -1821,6 +1949,20 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         for (const auto &response_event : state.responses_stream->finish())
             co_await json_sse(stream, response_event.as_object(), cfg.limits.relay_bytes, true);
         co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+        co_return;
+    }
+    if (anthropic) {
+        while (event) {
+            for (const auto &message_event : state.anthropic_stream->push(*event))
+                co_await json_sse(stream, message_event.as_object(), cfg.limits.relay_bytes, true);
+            work->pipe->acknowledge();
+            event = co_await next_event(work, cfg.limits.queue_seconds);
+        }
+        for (const auto &message_event : state.anthropic_stream->finish())
+            co_await json_sse(stream, message_event.as_object(), cfg.limits.relay_bytes, true);
+        co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+        if (auto dropped = state.anthropic_stream->dropped())
+            service.log({{"event", "anthropic_parts_dropped"}, {"request_id", work->usage->id()}, {"parts", dropped}});
         co_return;
     }
     const auto created = unix_seconds();
@@ -1888,11 +2030,24 @@ net::awaitable<void> connection(tcp::socket socket, Service &service,
                 if (state.responses_stream) {
                     for (const auto &value : state.responses_stream->fail(*error))
                         co_await json_sse(stream, value.as_object(), 16384, true);
+                } else if (state.anthropic_stream) {
+                    for (const auto &value : state.anthropic_stream->fail(*error))
+                        co_await json_sse(stream, value.as_object(), 16384, true);
                 } else
-                    co_await json_sse(stream, error_json(*error, state.openai), 16384);
+                    co_await json_sse(stream, client_error(*error, state.flavor), 16384);
                 co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+            } else if (state.keepalive_committed) {
+                // The status line already said 200; the error is the body and
+                // request history keeps the real status.
+                if (error->status != 499) {
+                    auto body = client_error(*error, state.flavor);
+                    if (state.partial_response)
+                        body["ais2api"] =
+                            json::object{{"partial_response", std::move(*state.partial_response)}};
+                    co_await write_json_body(stream, body);
+                }
             } else if (error->status != 499) {
-                auto body = error_json(*error, state.openai);
+                auto body = client_error(*error, state.flavor);
                 if (state.partial_response)
                     body["ais2api"] =
                         json::object{{"partial_response", std::move(*state.partial_response)}};

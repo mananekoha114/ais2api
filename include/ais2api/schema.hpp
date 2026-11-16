@@ -15,6 +15,11 @@ struct UnsupportedSchema : Error {
 
 // Lower client JSON Schema into the verified AI Studio Schema subset.
 // Unsupported constraints are reported by keyword, never by caller values.
+// A nested schema without a type accepts any JSON value; it becomes a string
+// the model fills with JSON text. `json_text` receives the paths of such
+// values reachable through properties (a string key) and items (null), so
+// decode_json_text_args can restore the values in function call arguments.
 json::object prepare_schema(const json::object &schema, json::array *ignored = nullptr,
-                            std::string_view location = "schema", bool ignore_unsupported = false);
+                            std::string_view location = "schema", bool ignore_unsupported = false,
+                            json::array *json_text = nullptr);
 }

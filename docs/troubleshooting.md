@@ -121,6 +121,9 @@
 - **Gemini 4 长回答被截断**：AI Studio 上游每轮最多输出 32,768 token（含思考）。未指定 `maxOutputTokens`（或 `max_tokens` / `max_output_tokens`）时总预算为 32768，到达上限以 `MAX_TOKENS`（OpenAI 为 `length`）结束；需要更长输出时明确设置更大的总预算，网关会在同一次请求内自动续接（见 [协议说明](protocol.md#总输出预算与自动续接)）。非流式长生成可能超过 `limits.generation_seconds`，建议改用流式接口。日志 `output_budget_exceeded` 表示上游报告的输出略超总预算，回答本身已正常结束。
 - **原生 Gemini 接口看不到思考**：与官方一致，需要在 `generationConfig.thinkingConfig` 中设置 `includeThoughts: true`，或在 `model_defaults` 中为该模型配置。
 - **搜索没有返回来源**：目前不解析搜索来源元数据，这是已知限制。
+- **经过反向代理的非流式请求被断开**：Nginx（`proxy_read_timeout` 默认 60 秒）、Cloudflare 等会切断长时间没有数据的响应。开启 [`nonstream_keepalive_seconds`](protocol.md#非流式保活)（推荐 10），或改用流式接口。开启后，等待超过设定秒数才出现的错误会放在 200 响应的正文里。
+- **Claude Code 报 `queue_timeout` 或很慢**：同一时间只处理一个生成请求，子代理并行时会排队。调大 `limits.queue_seconds` 和 `limits.queue_size`，并设置 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`，见 [Claude Code](clients.md#claude-code)。
+- **Claude Code 的 WebSearch 报 400**：WebSearch 依赖 Anthropic 服务端执行的工具，ais2api 不支持。
 
 ## 仍无法解决
 

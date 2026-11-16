@@ -1,8 +1,8 @@
 # 协议合同
 
-本文定义三种数据 API（Gemini、OpenAI Chat Completions、OpenAI Responses）的支持范围与转换规则。面向使用者的简要说明见 [客户端接入](clients.md)。
+本文定义四种数据 API（Gemini、OpenAI Chat Completions、OpenAI Responses、Anthropic Messages）的支持范围与转换规则。面向使用者的简要说明见 [客户端接入](clients.md)。
 
-本项目的实现是独立编写的 C++ 代码。参考项目的 `docs/WIRE_SPECIFICATION.md` 仅作为上游协议的描述来源，没有复用其实现或测试样例。上游协议细节集中在 `src/protocol.cpp`，Responses 适配器位于 `src/responses.cpp`。
+本项目的实现是独立编写的 C++ 代码。参考项目的 `docs/WIRE_SPECIFICATION.md` 仅作为上游协议的描述来源，没有复用其实现或测试样例。上游协议细节集中在 `src/protocol.cpp`，Responses 适配器位于 `src/responses.cpp`，Anthropic 适配器位于 `src/anthropic.cpp`。
 
 ## 总体流程
 
@@ -97,7 +97,7 @@ HTTP 错误体不算生成流；任何生成流字节都排除补试，包括未
 
 ## JSON Schema
 
-三种 API 的工具参数与响应格式共用同一个 schema 适配器。
+各 API 的工具参数与响应格式共用同一个 schema 适配器。
 
 **直接支持**：具体的 string/number/integer/boolean/array/object 类型、可空类型数组、嵌套 properties/items、enum/required、长度与数值范围、pattern、example、oneOf/anyOf/allOf/not 以及 propertyOrdering。Gemini 还接受 `responseJsonSchema` / `response_json_schema` 作为 `responseSchema` 的替代，两者同时出现时报错。
 
@@ -105,7 +105,11 @@ HTTP 错误体不算生成流；任何生成流字节都排除补试，包括未
 
 **降级为描述提示**（仅限非 strict schema）：`additionalProperties`（布尔或 schema）、`title`、`default` 与非字符串的标量 enum 会被接受。私有上游没有对应字段，因此这些约束会转为描述中的提示文字；`$schema`、`$id`、`$comment` 直接省略。被降级的关键字去重后记录在 `generation_parameters_ignored` 中（不记录属性名或值）。这只是对模型的提示，不是强制约束，客户端必须自行校验模型输出和工具参数。
 
-**其他规则**：字符串 `const` 转为单元素 enum；同类标量 enum/const 可推断类型。任意未知关键字、布尔 schema、元组 schema，以及无法推断具体类型的无约束 schema 仍不支持；联合类型仍需要具体或可推断的类型。OpenAI 的 strict JSON schema / strict 函数模式默认被拒绝，因为上游无法保证其语义；可通过下文的开关舍弃该要求。
+**exclusive 边界**：上游只有闭区间的 `minimum` / `maximum`。integer 的 `exclusiveMinimum` / `exclusiveMaximum`（包括 Draft 4 的布尔写法）精确换算，例如 `exclusiveMinimum: 0` 变为 `minimum: 1`，小数边界取整到区间内最近的整数；不记录为舍弃。其他类型写成同值的 `minimum` / `maximum`，并在描述中提示“Must be greater than …”或“Must be less than …”，同时记入 `generation_parameters_ignored`。已有更严的闭区间边界时只保留它。
+
+**任意 JSON 值**：嵌套位置上只有描述的子 schema（例如 `{}` 或 `{"description":"…"}`，也包括引用到这类定义的 `$ref`）表示任意 JSON 值。上游没有对应的类型，因此声明为 string，并在描述中提示模型用 JSON 文本填写。对函数参数，从根经 properties 和 items 能到达的这类位置，在返回给客户端前会把模型写的 JSON 文本解析回原值，不是合法 JSON 时保持字符串；联合分支里的同类位置和响应格式 schema 中的输出不做解析，保持字符串。空 schema 形式的 `additionalProperties: {}` 等同于 `true`。
+
+**其他规则**：字符串 `const` 转为单元素 enum；同类标量 enum/const 可推断类型。任意未知关键字、布尔 schema、元组 schema、根位置上没有类型的 schema，以及有约束（如 `minLength`）却无法推断类型的 schema 仍不支持；联合类型仍需要具体或可推断的类型。OpenAI 的 strict JSON schema / strict 函数模式默认被拒绝，因为上游无法保证其语义；可通过下文的开关舍弃该要求。
 
 ## 工具
 
@@ -146,14 +150,15 @@ Chat Completions 的 `web_search_options` 对所请求的模型应用同样的�
 
 ## 可选：舍弃不支持的参数
 
-`ignore_unsupported_parameters` 默认为 `false`。可通过以下任一方式开启：管理控制台「配置 → API 兼容性」、配置 PATCH、在 `config.json` 设置 `"ignore_unsupported_parameters": true` 后执行 `ais2api config reload`，或设置环境变量 `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS=true`。它支持热更新，对之后三种 API 的生成请求生效。关闭后恢复默认的拒绝策略；它不影响上文所述的非 strict schema 降级转换。
+`ignore_unsupported_parameters` 默认为 `false`。可通过以下任一方式开启：管理控制台「配置 → API 兼容性」、配置 PATCH、在 `config.json` 设置 `"ignore_unsupported_parameters": true` 后执行 `ais2api config reload`，或设置环境变量 `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS=true`。它支持热更新，对之后各 API 的生成请求生效。关闭后恢复默认的拒绝策略；它不影响上文所述的非 strict schema 降级转换。
 
 开启后，已知不支持的可选参数会在编码前移除，字段名（不含值）记录在 `generation_parameters_ignored` 中：
 
 - **Chat**：strict 函数/JSON 标志、强制或指定的 `tool_choice`、`parallel_tool_calls: false`、`n > 1`、`store: true`、`seed`、`logit_bias`、`service_tier`，以及无法映射的 `none` / `xhigh` 推理强度。其余工具与受支持的 schema 约束保留。
 - **Gemini**：`candidateCount > 1`、`ANY` / `VALIDATED` 函数调用模式、`cachedContent`、不支持的音频输出/语音/路由/模型选择选项、不支持的内置工具选项、与模型不兼容的代码/地图/URL 工具，以及启用的已废弃 civic-integrity 过滤。受支持的工具、内容与历史保留。不支持的选项对象整体舍弃；会检查对象形状，但不会校验其内部字段。
 - **Responses**：存储/后台/续接控制、额外的 include 数据、自动截断、service tier、摘要请求、并行限制、强制工具选择、strict 标志，以及已识别的不支持内置工具。请求仍只使用本次提交的完整历史同步执行，不保存响应。响应中的选项字段反映被移除的顶层控制和 strict 标志。
-- **Schema**：在结构校验之后，逐个移除已知不支持的 JSON Schema 约束（如 `multipleOf`、exclusive 边界、`patternProperties`、元组前缀/contains/uniqueItems、条件/依赖/unevaluated 约束、content 注解、读写标志）。如果一个合法的可选 schema 完全无法表示（远程/递归引用、布尔/元组/无约束/多类型形式），则移除整个根 schema：被移除的输出 schema 保留 application/json MIME 模式，被移除的函数 schema 保留函数名与描述。
+- **Anthropic Messages**：服务端工具、强制或指定的 `tool_choice`、`disable_parallel_tool_use`、strict 工具、`input_examples`、`allowed_callers`、`output_config.task_budget`、文档引用、`clear_thinking_20251015` 以外的 `context_management` 编辑，以及 `service_tier`、`container`、`mcp_servers`、`inference_geo`、`speed`、`fallbacks`、`diagnostics`。详见 [Anthropic Messages](#anthropic-messages)。
+- **Schema**：在结构校验之后，逐个移除已知不支持的 JSON Schema 约束（如 `multipleOf`、`patternProperties`、元组前缀/contains/uniqueItems、条件/依赖/unevaluated 约束、content 注解、读写标志）。如果一个合法的可选 schema 完全无法表示（远程/递归引用、布尔/元组/多类型形式、根位置无类型），则移除整个根 schema：被移除的输出 schema 保留 application/json MIME 模式，被移除的函数 schema 保留函数名与描述。
 
 被舍弃的能力不会被强制执行或模拟。未知的请求/schema 关键字、保留字段格式错误、缺少必填输入、定义冲突、无效引用、不支持的内容或文件附件、鉴权失败与资源超限仍会明确报错。这不是对任意上游 400 的捕获重试策略，不会新增不支持的接口，也不会静默丢弃对话内容。
 
@@ -195,6 +200,86 @@ Chat Completions 的 `web_search_options` 对所请求的模型应用同样的�
 - 接口是无状态的：客户端提交完整输入历史并保留函数 `call_id`。字符串输入、instructions、消息内容、函数调用与结果、扁平函数声明、兼容的采样/token/推理控制以及非 strict 文本格式都映射到现有编解码器。data URL 图片直接归一化；HTTPS 图片使用与 Chat 相同的受限公网媒体加载器。存储、后台任务、引用和其他内置工具明确报错。
 - reasoning 与 message 输出项可以携带 `ais2api.gemini_content` 和兼容的文本签名。保留这些字段即可重放原生部件；由于 Responses 把推理、可见/原生内容和函数调用分到不同输出项，这种表示不保证原始的跨项部件交错顺序。函数调用 ID 与 Chat 使用同样的签名格式。参数完全相同的重复显式 ID 视为一次调用，参数冲突时报错；无 ID 的调用保留各自的序号。
 - JSON 结果为带类型输出项和 Responses usage 的 Response 对象。命名 SSE 记录的 `event` 与 JSON 的 `type` 一致，带递增的 `sequence_number`；依次输出响应创建/进行中、输出项与内容部件生命周期、文本/推理/函数参数增量事件，最后是 completed 或 incomplete。token 用尽映射为 `incomplete_details.reason=max_output_tokens`，过滤映射为 `content_filter`。中途失败输出 `response.failed`，已发送的内容不会重试。不追加 Chat 的 `[DONE]`。流状态受对象限额约束，超出则响应失败。以上遵循 [OpenAI Responses 事件参考](https://developers.openai.com/api/reference/resources/responses/streaming-events)。
+
+## Anthropic Messages
+
+`POST /v1/messages` 与其他接口共用鉴权、生成调度、上游编解码和取消路径。适配器在生成队列里把请求转换为原生 Gemini 请求体，再交给与 Gemini 接口相同的归一化（别名、思考默认值、schema 适配、Gemini 4 总预算与续接）。Claude Code 的接入方法见 [客户端接入](clients.md#claude-code)。
+
+- 鉴权接受 `x-api-key` 或 `Authorization: Bearer`。`anthropic-version`、`anthropic-beta` 请求头接受并忽略；查询参数（如 Claude Code 的 `?beta=true`）不影响路由。
+- 接口无状态，客户端每次提交完整历史。
+
+### 请求映射
+
+| Anthropic | Gemini |
+|---|---|
+| `model`、`max_tokens`（必填，正整数） | 模型 id、`maxOutputTokens` |
+| `system`（字符串或 text 块） | `systemInstruction` |
+| `temperature`、`top_p`、`top_k`、`stop_sequences` | `temperature`、`topP`、`topK`、`stopSequences` |
+| `thinking`：`enabled`、`adaptive` | 返回思考块。`display` 为默认的 `summarized` 时 `includeThoughts: true`；为 `omitted` 或 `updates` 时不返回思考文本 |
+| `thinking`：`disabled`、`between_tools` 或省略 | `includeThoughts: false` |
+| `output_config.effort`：`low`、`medium`、`high`、`xhigh`、`max` | `thinkingLevel`：`LOW`、`MEDIUM`、`HIGH`、`HIGH`、`HIGH`；未提供时按模型默认等级 |
+| `output_config.format` 或 `output_format`（`json_schema`） | `responseMimeType: application/json` 与 `responseSchema` |
+| `tools`：自定义工具（`name`、`description`、`input_schema`） | `functionDeclarations`，`input_schema` 经过 [JSON Schema](#json-schema) 适配 |
+| `tool_choice`：`auto`、`none` | 默认、`NONE` |
+
+- `thinking.budget_tokens` 与 Gemini 的 `thinkingBudget` 一样没有已验证的上游字段，被忽略并记录。任何设置都不会关闭模型本身的推理。
+- `defer_loading` 的工具照常声明给上游；`eager_input_streaming` 不改变行为。
+- `metadata` 与各处的 `cache_control` 是提示，接受并忽略。
+
+内容块：
+
+- user 侧：
+  - `text` → 文本；
+  - `image`（只支持 base64）→ `inlineData`；
+  - `document`：base64 PDF → `inlineData`，`text` 来源 → 文本，`content` 来源按顺序展开；`title`、`context` 变为文本前缀；
+  - `tool_result` → `functionResponse`：函数名取自历史中配对的 `tool_use`，找不到时报 400；`is_error` 时包装为 `{"error": ...}`，否则为 `{"result": ...}`；结果里的图片和文档作为相邻部件发送；`tool_reference` 变为一行文本。
+- assistant 侧：`text` → 文本；`thinking` → 思考部件加签名部件；`redacted_thinking` → 签名部件；`tool_use` → `functionCall`。
+- URL 或 Files API 来源的图片和文档、`search_result` 块、服务端工具产生的块报 400。
+
+对话中的 `role: "system"` 消息（Claude Code 会发送）：
+
+- 文本并入相邻的 user 内容：前一条是 user 时追加在它末尾，否则并入下一条 user 消息、排在它的 `tool_result` 之后，保证函数调用之后紧跟函数结果。
+- `tool_addition`、`tool_removal` 按顺序增删工具声明；`output_config.effort` 覆盖顶层设置，以最后一条为准。
+
+`context_management` 支持 `clear_thinking_20251015`：`keep: "all"` 不做改动；`keep: {"type": "thinking_turns", "value": N}`（省略时为 1）只保留最近 N 个含思考的 assistant 轮次中的思考与签名。
+
+不支持的字段：服务端工具（`web_search_*`、`web_fetch_*`、`code_execution_*`、`bash_*`、`text_editor_*`、`computer_*`、`memory_*` 等）、`tool_choice` 的 `any` 与 `tool`、`disable_parallel_tool_use`、strict 工具、`input_examples`、`allowed_callers`、`output_config.task_budget`、文档引用、其他 `context_management` 编辑，以及 `mcp_servers`、`container`、`service_tier` 等顶层选项。默认报 400，开启 [`ignore_unsupported_parameters`](#optional-unsupported-parameter-dropping) 时舍弃并记录。其他未知字段始终报 400。
+
+### 签名
+
+- 函数调用签名沿用 [`call_gemini_` 工具调用 ID](#工具调用-id-与签名)。
+- 思考签名加上 `ais2api.gemini.` 前缀返回，回传时只采用带这个前缀的签名。官方 Claude 或其他来源的签名不发给上游，字段名记录在 `generation_parameters_ignored`，所以从官方 Claude 切换过来的会话也能继续。
+- 文本部件上的签名：
+  - 有尚未签名、仍然打开的 thinking 块时放在它上面；
+  - 还没有任何可见块、且客户端开启了思考时，新建一个空 thinking 块携带它；
+  - 否则舍弃。Gemini 在可见文本之后才发送文本回答的签名，放在末尾会让 thinking 块成为最后一个块，而 Claude Code 等客户端把最后一个块当作回答。这类签名结束本轮，Gemini 不会校验。
+- 不伪造签名。官方 Claude 会话里的 `tool_use`（`toolu_` ID）没有 Gemini 签名；Gemini 3 会校验当前轮次中函数调用的签名，所以在一轮工具调用的中途切换过来时上游可能拒绝，从新的用户消息开始即可。
+
+### 输出
+
+- 非流式返回 message 对象：`id`（`msg_` 开头，与请求记录相同）、`content`、`stop_reason`、`stop_sequence: null`、`usage`。
+- 部件按顺序转换：思考 → `thinking` 块，可见文本 → `text` 块，函数调用 → `tool_use` 块。图片、代码执行等没有对应块的部件被丢弃，数量记录在 `anthropic_parts_dropped` 日志。
+- `stop_reason`：有工具调用为 `tool_use`；`MAX_TOKENS` 为 `max_tokens`；安全、复述等内容拦截为 `refusal`；其他为 `end_turn`。
+- `usage`：`input_tokens` 为输入减去缓存读取，`cache_read_input_tokens` 为缓存读取，`cache_creation_input_tokens` 为 0，`output_tokens` 含思考。
+- 流式输出命名 SSE 事件，`event` 与 JSON 的 `type` 一致：
+  - `message_start`；
+  - 每个块的 `content_block_start`、增量（`text_delta`、`thinking_delta`、`signature_delta`；`tool_use` 先发空 `input`，再用一个 `input_json_delta` 发完整参数）和 `content_block_stop`；
+  - `message_delta`（`stop_reason` 与最终 usage）；
+  - `message_stop`。
+  - 中途失败输出 `event: error`。同一组上游数据块的流式结果与非流式结果一致，由测试覆盖。
+- 错误体为 `{"type":"error","error":{"type":...,"message":...}}`。`error.type` 按状态码映射：400 `invalid_request_error`、401 `authentication_error`、402 `billing_error`、403 `permission_error`、404 `not_found_error`、413 `request_too_large`、429 `rate_limit_error`、503 与 529 `overloaded_error`、504 `timeout_error`，其他为 `api_error`。非流式部分结果（`ais2api.partial_response`）的 `stop_reason` 为 null。
+
+### count_tokens
+
+`POST /v1/messages/count_tokens` 接受同样的请求体（不需要 `max_tokens`），经过同样的转换和校验后在本地计数，返回 `{"input_tokens": N}`。它不进入生成队列，不访问上游，不写请求记录，在单独的线程上计算。
+
+- 文本、函数调用参数、函数结果和工具声明（序列化为 JSON）用内嵌的 Gemma 4 分词器计数。Gemma 4 与 Gemini 使用同一套分词器，Google 的 `google-genai` SDK 也用它在本地给 Gemini 模型计数；本项目的实现与 Hugging Face `tokenizers` 的结果完全一致。来源见 [third_party/gemma4-tokenizer](../third_party/gemma4-tokenizer/README.md)。
+- 媒体按 Gemini 3 默认分辨率估算：每张图片 1120，PDF 每页 560（页数取 PDF 中未压缩的页面对象数，数不出时按 1 页），其他媒体 258。
+- 结果是估算值：不包含上游为对话格式加入的模板 token，与上游返回的 `promptTokenCount` 会有差异。
+
+### 模型列表
+
+请求带 `anthropic-version` 头时，`GET /v1/models` 与 `/v1/models/{id}` 按 Anthropic 格式返回：`data` 中每项为 `{"type":"model","id":...,"display_name":...,"created_at":...}`，上游提供限额时附 `max_input_tokens` 与 `max_tokens`；外层带 `has_more: false`、`first_id`、`last_id`。不带这个头时仍是 OpenAI 格式。
 
 ## ais2api 扩展（版本 1）
 
@@ -250,11 +335,21 @@ OpenAI 流式数据块在 `choices[].delta.ais2api.gemini_delta` 中携带完整
 
 鉴权方案与 JSON 媒体类型不区分大小写，并按精确的词边界比较；支持带 charset 参数的 `application/json`，拒绝 `application/jsonp`。
 
-生成失败时，流式接口保留已经送出的内容，并沿用现有错误事件；不会补发成功完成标记。非流式如果已有内容，在原 HTTP 错误体的 `ais2api.partial_response` 中附带对应接口的部分结果：Gemini 不带正常 `finishReason`，Chat 的 `finish_reason` 为 null，Responses 为 `status=failed` 且输出项为 `incomplete`。保留原错误状态和原因，未收到内容时不提供该扩展。聚合内容受 `object_bytes` 限制，适配后的错误体还包含相应协议的包装与内容副本；不缓存无界的上游响应。客户端需要主动读取这个错误扩展，部分 SDK 会直接抛出异常而不显示正文。
+生成失败时，流式接口保留已经送出的内容，并沿用现有错误事件；不会补发成功完成标记。非流式如果已有内容，在原 HTTP 错误体的 `ais2api.partial_response` 中附带对应接口的部分结果：Gemini 不带正常 `finishReason`，Chat 的 `finish_reason` 为 null，Responses 为 `status=failed` 且输出项为 `incomplete`，Anthropic 的 `stop_reason` 为 null。保留原错误状态和原因，未收到内容时不提供该扩展。聚合内容受 `object_bytes` 限制，适配后的错误体还包含相应协议的包装与内容副本；不缓存无界的上游响应。客户端需要主动读取这个错误扩展，部分 SDK 会直接抛出异常而不显示正文。
+
+### 非流式保活
+
+反向代理常会切断一分钟没有数据的响应，而一次较长的非流式生成很容易等这么久。`nonstream_keepalive_seconds` 默认为 0（关闭），可设为 1–120（推荐 10），支持热更新，也可用环境变量 `AIS2API_NONSTREAM_KEEPALIVE_SECONDS` 设置。它对 Chat Completions、Responses、Anthropic Messages 和 Gemini `generateContent` 的非流式请求生效：
+
+- 在设定秒数内完成的请求与关闭时完全相同，响应带 `Content-Length` 和真实状态码。
+- 超过设定秒数仍未完成时，先发送 200 响应头（`application/json; charset=utf-8`、`Cache-Control: no-store`、`X-Accel-Buffering: no`，chunked 传输）和一个换行，之后每隔设定秒数再写一个换行，完成后写入 JSON 正文。JSON 允许前导空白，标准 JSON 解析器可以直接读取。
+- 响应头发出后才出错时，正文是对应接口的错误对象，已有内容时同样附带 `ais2api.partial_response`。客户端需要检查正文是否为错误。请求记录和 `http_request` 日志保存真实的错误状态码。
+- 客户端断开时取消生成，与不开保活时相同。
+- 流式请求不受影响，仍在上游第一个数据块到达后才发送响应头。
 
 ### 请求用量与参考费用
 
-通过生成鉴权的 Chat Completions、Responses、Gemini 调用各有一个持久请求记录。参数拒绝、排队失败、取消与流式中断同样记录结果，内部重试归入同一请求的尝试列表。生成完成与 HTTP 传输完成分别记录，两者结束后在同一事务中写终态与累计；服务启动时把遗留未完成记录标为中断。鉴权前拒绝、管理和健康检查不写入请求历史。
+通过生成鉴权的 Chat Completions、Responses、Anthropic Messages、Gemini 调用各有一个持久请求记录（`count_tokens` 不生成记录）。参数拒绝、排队失败、取消与流式中断同样记录结果，内部重试归入同一请求的尝试列表。生成完成与 HTTP 传输完成分别记录，两者结束后在同一事务中写终态与累计；服务启动时把遗留未完成记录标为中断。鉴权前拒绝、管理和健康检查不写入请求历史。
 
 每次执行只采用最新用量快照，失败重试与自动续接各自记录为一轮，可确认用量只归集一次。原始输入量 `initial_prompt_tokens` 与累计消费分开保存；例如两轮输入 44976 和 77744、输出 32768 和 11955，对外累计输入为 122720、输出为 44723，总量为 167443，而原始输入仍为 44976。此处消费本项目解码器的归一结果：`promptTokenCount` 包含缓存输入，`candidatesTokenCount` 已包含 `thoughtsTokenCount`。计价把非缓存输入、缓存读取、可见输出和思考分列，思考按输出单价计费且不会再次增加总输出。未知消耗保留未完整状态；失败不自动等于零消耗。尚未进入任何上游尝试的拒绝请求可确认费用为零。
 
@@ -265,5 +360,7 @@ OpenAI 流式数据块在 `choices[].delta.ais2api.gemini_delta` 中携带完整
 ## 验证范围
 
 Catch2 协议测试使用独立编写的合成样例，覆盖任意字节边界、格式错误或截断的流、各类上限、带类型的函数值、逐部件签名、schema 递归、请求模板替换、扩展冲突、多消息工具以及 OpenAI 原生往返。回归用例还覆盖跨数据块的相同无 ID 调用、显式 ID 的索引稳定、有/无签名调用不会错绑签名，以及生成的标准/原生工具消息一起回传时的严格冲突检查。
+
+Anthropic 适配器的测试覆盖 Claude Code 默认请求的转换、签名与工具往返、外来签名、`clear_thinking`、对话中的 system 消息与工具增删、SSE 事件顺序及其与非流式结果的一致性、错误类型和 `count_tokens`；分词器测试对照 Hugging Face `tokenizers` 的计数。隐藏用例 `[.agent-server]` 用脚本化的合成后端启动服务，供真实客户端（如 Claude Code）在没有账号的情况下做端到端检查。
 
 这些是协议与适配器测试，不能证明某个已登录的真实上游模型支持每项能力。真实浏览器与平台的验收结果另见 [验证记录](validation.md)。

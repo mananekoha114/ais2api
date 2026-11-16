@@ -1,6 +1,6 @@
 # 客户端接入
 
-ais2api 同时提供 Gemini 原生接口和 OpenAI 兼容接口。本文说明接口地址、鉴权方式、常见客户端的填写方法，以及搜索模型等功能的用法。字段级的支持范围见 [协议合同](protocol.md)。
+ais2api 同时提供 Gemini 原生接口、OpenAI 兼容接口和 Anthropic Messages 接口。本文说明接口地址、鉴权方式、常见客户端的填写方法，以及搜索模型等功能的用法。字段级的支持范围见 [协议合同](protocol.md)。
 
 ## 接口一览
 
@@ -8,9 +8,11 @@ ais2api 同时提供 Gemini 原生接口和 OpenAI 兼容接口。本文说明�
 
 | 用途 | 方法与路径 |
 |---|---|
-| OpenAI 模型列表 | `GET /v1/models`、`GET /v1/models/{id}` |
+| OpenAI 模型列表 | `GET /v1/models`、`GET /v1/models/{id}`（带 `anthropic-version` 头时返回 Anthropic 格式） |
 | OpenAI Chat Completions | `POST /v1/chat/completions` |
 | OpenAI Responses | `POST /v1/responses`（见 [Responses 说明](responses.md)） |
+| Anthropic Messages | `POST /v1/messages`（见 [Claude Code](#claude-code)） |
+| Anthropic 计数 | `POST /v1/messages/count_tokens`（本地计数，不访问上游） |
 | Gemini 模型列表 | `GET /v1beta/models`、`GET /v1beta/models/{id}` |
 | Gemini 生成 | `POST /v1beta/models/{model}:generateContent` |
 | Gemini 流式生成 | `POST /v1beta/models/{model}:streamGenerateContent?alt=sse` |
@@ -68,6 +70,33 @@ reply = client.chat.completions.create(
 print(reply.choices[0].message.content)
 ```
 
+### Claude Code
+
+在启动 Claude Code 前设置环境变量（Windows PowerShell 写成 `$env:名称="值"`）：
+
+```sh
+export ANTHROPIC_BASE_URL=http://127.0.0.1:18451
+export ANTHROPIC_AUTH_TOKEN=YOUR_KEY
+export ANTHROPIC_MODEL=gemini-3.1-pro-preview
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=gemini-3.1-flash-lite
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+claude
+```
+
+- `ANTHROPIC_BASE_URL` 不带 `/v1`。`ANTHROPIC_AUTH_TOKEN` 以 Bearer 方式发送；也可以用 `ANTHROPIC_API_KEY`（以 `x-api-key` 发送）。
+- 模型名填模型列表里的 id。`ANTHROPIC_MODEL` 是主模型；`ANTHROPIC_DEFAULT_HAIKU_MODEL` 用于后台小任务，建议选轻量模型。需要时还可以设置 `ANTHROPIC_DEFAULT_SONNET_MODEL`、`ANTHROPIC_DEFAULT_OPUS_MODEL`。
+- `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` 关闭遥测、自动更新等非必要请求，减少排队。
+- 这些变量也可以写进 Claude Code 设置文件（如 `~/.claude/settings.json`）的 `env` 字段。
+
+支持的功能：工具调用与工具结果、思考签名往返、图片和 PDF 输入、`/effort` 调整思考等级（`low`、`medium`、`high` 对应 Gemini 的 `LOW`、`MEDIUM`、`HIGH`，更高的档位都按 `HIGH`），以及本地计数的 `count_tokens`。
+
+注意事项：
+
+- **同一时间只处理一个生成请求**。Claude Code 的子代理并行工作时会排队，默认最多等 30 秒，超时返回 `504 queue_timeout`。建议在 [配置](configuration.md) 里调大 `limits.queue_seconds`（例如 600）和 `limits.queue_size`（例如 32）。
+- **WebSearch 不可用**：它依赖 Anthropic 在服务端执行的搜索工具。ais2api 默认对这类工具返回 400；开启“忽略不支持的参数”后舍弃该工具，模型不搜索直接回答。
+- 思考文本：Claude Code 2.1.322 默认请求 `display: "omitted"`，ais2api 照此不返回思考文本；模型仍会思考，签名照常往返。
+- 从官方 Claude 切换过来的会话可以继续，官方的思考签名会被舍弃。不要在一轮工具调用的中途切换模型，从新的用户消息开始即可，原因见 [协议合同](protocol.md#签名)。
+
 ### Gemini 原生请求
 
 ```sh
@@ -108,10 +137,11 @@ curl "http://127.0.0.1:18451/v1beta/models/gemini-3.1-flash-lite:streamGenerateC
 - `thinkingBudget` 与 `seed` 为兼容客户端而接受，但**不会生效**；`thinkingBudget: 0` 也不会关闭思考。例外：Gemini 4 上单独的 `thinkingBudget: 0` 映射为 `LOW`，与 `thinkingLevel` 同时提供时报错。
 - Gemini 4 每次最多输出 32,768 token（含思考），不支持官方的续写（`continuationToken`）；更大的输出上限会被压到 32768，超长回答以 `MAX_TOKENS` / `length` 截断。
 - OpenAI 响应额外提供 `reasoning_content` 与 `thought_signature` 字段。多轮对话中原样回传模型给出的签名和 `call_gemini_...` 工具调用 ID 即可，详见 [真 role 与思考签名](true-role.md)。
+- Anthropic Messages 的思考签名以 `ais2api.gemini.` 开头，工具调用 ID 同样是 `call_gemini_...`，原样回传即可。
 
 ## 兼容开关：忽略不支持的参数
 
-默认情况下，上游无法保证的参数会被明确拒绝（例如 strict schema、强制工具调用、`n > 1`、`parallel_tool_calls: false`）。如果希望舍弃这些参数后继续生成，可以：
+默认情况下，上游无法保证的参数会被明确拒绝（例如 strict schema、强制工具调用、`n > 1`、`parallel_tool_calls: false`、Anthropic 的服务端工具）。如果希望舍弃这些参数后继续生成，可以：
 
 - 在 WebUI「配置 → API 兼容性」打开“忽略不支持的参数”；或
 - 在 `config.json` 设置 `"ignore_unsupported_parameters": true` 后执行 `ais2api config reload`；或
@@ -124,6 +154,7 @@ curl "http://127.0.0.1:18451/v1beta/models/gemini-3.1-flash-lite:streamGenerateC
 - Responses 为无状态模式：没有服务端响应存储、`previous_response_id` 续接或后台任务。
 - 没有 Files、embeddings、独立的图片生成或音频接口；`fileData` 不支持。
 - 强制工具调用（`ANY` / `required` / 指定函数）与 `VALIDATED` 模式会被拒绝。
+- Anthropic 的服务端工具（WebSearch、代码执行等）、`mcp_servers`、`container` 不支持；图片和文档只支持 base64，不支持 URL 与 Files API。
 - 同一时间只处理一个生成请求，其余请求排队（默认最多 8 个，最长等待 30 秒）。
 
 ## 健康检查

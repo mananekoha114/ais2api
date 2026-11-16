@@ -31,7 +31,7 @@ beforeEach(() => {
     bind: '127.0.0.1', port: 18451, proxy: '', browser_proxy_relay: false,
     data_dir: 'data', browser_executable: '', headless: true,
     ignore_unsupported_parameters: false, search_model_drop_functions: true,
-    continuation_retry_enabled: true, browser_idle_seconds: 0,
+    continuation_retry_enabled: true, browser_idle_seconds: 0, nonstream_keepalive_seconds: 0,
     cookie_import_max_accounts: 8, cookie_import_timeout_seconds: 180,
     limits: { request_bytes: 33554432, object_bytes: 67108864, relay_bytes: 1048576,
       queue_size: 8, queue_seconds: 30, generation_seconds: 240, stream_idle_seconds: 240,
@@ -97,4 +97,17 @@ it('loads a saved disabled policy and validates the upper bound without restarti
     continuation_retry_enabled: true, limits: { max_continuation_retries: 16 },
   })
   expect(wrapper!.text()).toContain('校验通过，保存后立即生效')
+})
+
+it('saves the non-streaming keepalive interval and rejects values above 120 seconds', async () => {
+  await show()
+  const keepalive = () => wrapper!.get<HTMLInputElement>('input[id="f-nonstream_keepalive_seconds"]')
+  expect(keepalive().element.value).toBe('0')
+  await keepalive().setValue('121')
+  expect(keepalive().attributes('aria-invalid')).toBe('true')
+  expect(saveButton().element.disabled).toBe(true)
+  await keepalive().setValue('10')
+  await saveButton().trigger('click')
+  await flushPromises()
+  expect(backend.patch).toHaveBeenLastCalledWith('/config', { nonstream_keepalive_seconds: 10 })
 })

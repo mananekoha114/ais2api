@@ -18,3 +18,4 @@ LICENSE text eol=lf
 waa/third_party/** -text
 *.patch -text
 *.gz binary
+*.zst binary

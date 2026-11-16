@@ -7,6 +7,10 @@
 #include "ais2api/schema.hpp"
 #include <algorithm>
 #include <cctype>
+#include <charconv>
+#include <cmath>
+#include <cstdint>
+#include <optional>
 #include <set>
 
 namespace ais2api {
@@ -142,11 +146,61 @@ void validate(const json::value &value, const json::object &root, unsigned depth
         else if (key != "default" && key != "const" && key != "example") bad("unsupported field " + std::string(key));
     }
 }
+std::string lowercase(std::string_view text) {
+    std::string out(text);
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return out;
+}
+// The single non-null type of a schema, lowercased, or empty.
+std::string concrete_type(const json::object &schema) {
+    auto type = schema.if_contains("type");
+    if (!type) return {};
+    if (type->is_string()) return lowercase(type->as_string());
+    std::string found;
+    if (type->is_array())
+        for (const auto &t : type->as_array())
+            if (t.is_string() && lowercase(t.as_string()) != "null") {
+                if (!found.empty()) return {};
+                found = lowercase(t.as_string());
+            }
+    return found;
+}
+// A number as people write it: 1.5 rather than serialize's 1.5E0.
+std::string number_text(const json::value &value) {
+    if (!value.is_double()) return json::serialize(value);
+    char digits[32];
+    const auto result = std::to_chars(digits, digits + sizeof digits, value.as_double());
+    return result.ec == std::errc{} ? std::string(digits, result.ptr) : json::serialize(value);
+}
+// Whether `a` is a tighter lower (or, with `lower` false, upper) bound than `b`.
+bool tighter(const json::value &a, const json::value &b, bool lower) {
+    if (a.is_int64() && b.is_int64()) return lower ? a.as_int64() > b.as_int64() : a.as_int64() < b.as_int64();
+    const auto x = json::value_to<double>(a), y = json::value_to<double>(b);
+    return lower ? x > y : x < y;
+}
+// The nearest integer strictly above (or below) `value`, when it fits int64.
+std::optional<std::int64_t> integer_beyond(const json::value &value, bool above) {
+    if (value.is_int64()) {
+        const auto v = value.as_int64();
+        if (above ? v == INT64_MAX : v == INT64_MIN) return std::nullopt;
+        return above ? v + 1 : v - 1;
+    }
+    if (value.is_uint64()) {
+        // Every uint64 value exceeds INT64_MAX; only one step down can fit.
+        if (above || value.as_uint64() - 1 > static_cast<std::uint64_t>(INT64_MAX)) return std::nullopt;
+        return static_cast<std::int64_t>(value.as_uint64() - 1);
+    }
+    const auto d = value.as_double();
+    const auto r = above ? std::floor(d) + 1 : std::ceil(d) - 1;
+    if (!std::isfinite(r) || r < -9.2e18 || r > 9.2e18) return std::nullopt;
+    return static_cast<std::int64_t>(r);
+}
 class Lowerer {
     const json::object &root_;
     json::array *ignored_;
     std::string location_;
     bool ignore_unsupported_;
+    json::array *json_text_;
     std::set<const json::object *> active_;
     std::size_t nodes_ = 0;
     std::size_t bytes_ = 0;
@@ -175,11 +229,47 @@ class Lowerer {
         if (!description.empty()) description += '\n';
         schema["description"] = description + text;
     }
+    // The upstream has inclusive minimum and maximum only. Integer bounds
+    // convert exactly; other bounds become the inclusive limit plus a hint.
+    void exclusive_bounds(json::object &schema) {
+        const bool integer = concrete_type(schema) == "integer";
+        for (const bool lower_bound : {true, false}) {
+            const std::string key = lower_bound ? "exclusiveMinimum" : "exclusiveMaximum";
+            const char *inclusive = lower_bound ? "minimum" : "maximum";
+            auto p = schema.if_contains(key);
+            if (!p) continue;
+            if (!p->is_number() && !p->is_bool()) bad(key + " has an invalid value type");
+            std::optional<json::value> bound;
+            if (p->is_number()) bound = *p;
+            // Draft 4 spells it as a flag that makes minimum or maximum exclusive.
+            else if (p->as_bool())
+                if (auto q = schema.if_contains(inclusive)) bound = *q;
+            schema.erase(key);
+            if (!bound) continue;
+            const auto current = schema.if_contains(inclusive);
+            const bool draft4 = current && *current == *bound;
+            if (integer)
+                if (auto step = integer_beyond(*bound, lower_bound)) {
+                    json::value value(*step);
+                    if (draft4 || !current || tighter(value, *current, lower_bound)) schema[inclusive] = value;
+                    continue;
+                }
+            if (!current || tighter(*bound, *current, lower_bound)) schema[inclusive] = *bound;
+            else if (!draft4) continue; // an inclusive bound already excludes it
+            hint(schema, std::string(lower_bound ? "Must be greater than " : "Must be less than ") +
+                             number_text(*bound) + ".");
+            ignored(key);
+        }
+    }
 public:
-    Lowerer(const json::object &root, json::array *ignored, std::string_view location, bool ignore_unsupported)
-        : root_(root), ignored_(ignored), location_(location), ignore_unsupported_(ignore_unsupported) {}
+    Lowerer(const json::object &root, json::array *ignored, std::string_view location, bool ignore_unsupported,
+            json::array *json_text)
+        : root_(root), ignored_(ignored), location_(location), ignore_unsupported_(ignore_unsupported),
+          json_text_(json_text) {}
 
-    json::object lower(const json::object &source, unsigned depth = 0) {
+    // `path` leads from the root through properties and items, or is null
+    // inside unions, not and additionalProperties.
+    json::object lower(const json::object &source, unsigned depth, const json::array *path, bool root) {
         if (depth > 64 || ++nodes_ > 4096) bad("schema expansion exceeds depth or node limit");
         // Charge before copying, including each repeated reference target.
         // This bounds live intermediate copies, not just the final result.
@@ -188,7 +278,7 @@ public:
         auto schema = source;
         if (auto ref = source.if_contains("$ref")) {
             if (!ref->is_string()) bad("$ref must be a string");
-            auto target = lower(resolve(std::string_view(ref->as_string())), depth + 1);
+            auto target = lower(resolve(std::string_view(ref->as_string())), depth + 1, path, root);
             schema.erase("$ref");
             // Metadata siblings are common in Pydantic schemas. Conflicting
             // validation siblings require intersection semantics; do not weaken them.
@@ -201,14 +291,14 @@ public:
             }
             schema = std::move(target);
         }
+        exclusive_bounds(schema);
         // Validate known unsupported keyword values before dropping constraints.
         // Unknown fields remain errors even in compatibility mode.
         for (auto it = schema.begin(); it != schema.end();) {
             const std::string key(it->key());
             const auto &v = it->value();
             bool known = true, valid = true;
-            if (key == "exclusiveMinimum" || key == "exclusiveMaximum") valid = v.is_number() || v.is_bool();
-            else if (key == "multipleOf") valid = v.is_number() && json::value_to<double>(v) > 0;
+            if (key == "multipleOf") valid = v.is_number() && json::value_to<double>(v) > 0;
             else if (key == "uniqueItems" || key == "readOnly" || key == "writeOnly" || key == "deprecated") valid = v.is_bool();
             else if (key == "minContains" || key == "maxContains") valid = (v.is_uint64() || (v.is_int64() && v.as_int64() >= 0));
             else if (key == "contentEncoding" || key == "contentMediaType" || key == "$anchor" || key == "$dynamicAnchor") valid = v.is_string();
@@ -257,10 +347,11 @@ public:
                 bad("additionalProperties must be boolean or a schema object");
             if (!schema.if_contains("type")) schema["type"] = "object";
             p = schema.if_contains("additionalProperties");
-            if (p->is_object()) {
-                auto additional = lower(p->as_object(), depth + 1);
+            // An empty schema allows any value, like true.
+            if (p->is_object() && !p->as_object().empty()) {
+                auto additional = lower(p->as_object(), depth + 1, nullptr, false);
                 hint(schema, "Additional property values follow this schema: " + json::serialize(additional));
-            } else if (!p->as_bool())
+            } else if (p->is_bool() && !p->as_bool())
                 hint(schema, "Do not include properties other than those declared in properties.");
             ignored("additionalProperties");
             schema.erase("additionalProperties");
@@ -304,7 +395,9 @@ public:
                 for (auto &kv : p->as_object()) {
                     if (kv.value().is_bool()) throw UnsupportedSchema("boolean property schema is not supported");
                     if (!kv.value().is_object()) bad("property schema must be an object");
-                    kv.value() = lower(kv.value().as_object(), depth + 1);
+                    std::optional<json::array> child;
+                    if (path) (child = *path)->push_back(json::value(kv.key()));
+                    kv.value() = lower(kv.value().as_object(), depth + 1, child ? &*child : nullptr, false);
                 }
             }
         for (auto keyword : {"items", "not"})
@@ -312,7 +405,9 @@ public:
                 if (p->is_bool() || (std::string_view(keyword) == "items" && p->is_array()))
                     throw UnsupportedSchema("boolean or tuple schema is not supported");
                 if (!p->is_object()) bad(std::string(keyword) + " must be a schema object");
-                *p = lower(p->as_object(), depth + 1);
+                std::optional<json::array> child;
+                if (path && std::string_view(keyword) == "items") (child = *path)->push_back(nullptr);
+                *p = lower(p->as_object(), depth + 1, child ? &*child : nullptr, false);
             }
         for (auto keyword : {"oneOf", "anyOf", "allOf"})
             if (auto p = schema.if_contains(keyword)) {
@@ -320,7 +415,7 @@ public:
                 for (auto &branch : p->as_array()) {
                     if (branch.is_bool()) throw UnsupportedSchema("boolean union schema is not supported");
                     if (!branch.is_object()) bad("union branch must be a schema object");
-                    branch = lower(branch.as_object(), depth + 1);
+                    branch = lower(branch.as_object(), depth + 1, nullptr, false);
                 }
             }
         // Also validate schemas used only as textual additionalProperties
@@ -345,17 +440,28 @@ public:
                 }
                 if (concrete != 1) throw UnsupportedSchema("multi-type schema is not supported");
             } else if (!type->is_string()) bad("type must be a string or array");
-        } else if (!schema.if_contains("properties") && !schema.if_contains("items") && !schema.if_contains("oneOf") && !schema.if_contains("anyOf") && !schema.if_contains("allOf"))
-            throw UnsupportedSchema("schema requires a concrete type");
+        } else if (!schema.if_contains("properties") && !schema.if_contains("items") && !schema.if_contains("oneOf") && !schema.if_contains("anyOf") && !schema.if_contains("allOf")) {
+            // A nested schema that only describes accepts any JSON value; the
+            // upstream has no such type, so the model writes it as JSON text.
+            const bool any = std::all_of(schema.begin(), schema.end(), [](const auto &kv) {
+                return kv.key() == "description" || kv.key() == "nullable" || kv.key() == "example";
+            });
+            if (root || !any) throw UnsupportedSchema("schema requires a concrete type");
+            schema["type"] = "string";
+            hint(schema, "Any JSON value, written as JSON text.");
+            if (path && json_text_) json_text_->push_back(*path);
+        }
         active_.erase(&source);
         return schema;
     }
 };
 }
-json::object prepare_schema(const json::object &schema, json::array *ignored, std::string_view location, bool ignore_unsupported) {
+json::object prepare_schema(const json::object &schema, json::array *ignored, std::string_view location, bool ignore_unsupported,
+                            json::array *json_text) {
     if (json::serialize(schema).size() > 8 * 1024 * 1024) bad("schema expansion exceeds byte limit");
     std::size_t nodes = 0;
     validate(json::value(schema), schema, 0, nodes);
-    return Lowerer(schema, ignored, location, ignore_unsupported).lower(schema);
+    const json::array top;
+    return Lowerer(schema, ignored, location, ignore_unsupported, json_text).lower(schema, 0, &top, true);
 }
 }

@@ -160,6 +160,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 部分字段的补充说明：
 
 - `ignore_unsupported_parameters`：布尔，默认 `false`，立即生效。只影响生成参数，不放宽配置、鉴权或内容校验。见 [协议合同](protocol.md#optional-unsupported-parameter-dropping)。
+- `nonstream_keepalive_seconds`：整数，`0`（默认，关闭）或 1–120，立即生效。见 [非流式保活](protocol.md#非流式保活)。
 - `search_model_drop_functions`：布尔，默认 `true`，立即生效。见 [搜索模型](protocol.md#search-models)。
 - `browser_proxy_relay`：布尔，默认 `false`，需重启。开启时 `proxy` 必须是单个 `http://` 或 `socks5://` URL（凭据可选），否则 PATCH 被拒绝。浏览器诊断显示 `proxy.mode`（`none`、`direct`、`relay`）与 `proxy.relayError`（不含凭据的最近一次上游失败原因）。
 - `browser_idle_seconds`：整数，`0`（默认，关闭）或 10–86400，立即生效。浏览器因空闲关闭后，诊断状态为 `idle_closed`。

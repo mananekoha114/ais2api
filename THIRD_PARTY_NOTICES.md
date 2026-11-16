@@ -37,6 +37,10 @@ Camoufox 后端的身份生成器（`src/fpgen.cpp`、`src/firefox_identity.cpp`
 
 移植部分的许可不因 ais2api 的许可选择而改变。Camoufox 浏览器本身（MPL 2.0）不纳入仓库和正式运行包：`setup` 从官方 GitHub Release 下载锁定版本，跳过自带的字体（保留 emoji 字体）和 uBlock Origin 后安装在数据目录中，其余文件保持原样。开发版运行包在 `bin/camoufox-runtime/` 中附带同一锁定版本，裁剪方式相同，其余文件同样未作修改；其源码见 [Camoufox 仓库](https://github.com/daijro/camoufox) 中与 `runtime-manifest.json` 所锁定版本同名的标签，MPL 2.0 全文与本项目的 [LICENSE](LICENSE) 相同。
 
+## Gemma 4 分词器
+
+本地 token 计数（`src/tokenizer.cpp`）使用的 `third_party/gemma4-tokenizer/gemma4-bpe.zst` 由 Google 发布的 [`google/gemma-4-E4B-it`](https://huggingface.co/google/gemma-4-E4B-it/tree/4ecc2ba63bcac23ba4a767fc87025b1450f84c9c) 中的 `tokenizer.json`（Apache License 2.0，[gemma4-tokenizer-LICENSE.txt](licenses/gemma4-tokenizer-LICENSE.txt)）派生：只保留单字符词条、字节回退词条的起始 id 和合并规则，改用紧凑格式并压缩，构建时按锁定的 SHA-256 校验后嵌入程序。来源提交、改动和重新生成的方法见 [`third_party/gemma4-tokenizer/README.md`](third_party/gemma4-tokenizer/README.md)。许可文本随运行包安装到 `share/doc/ais2api/licenses/`，该许可不因 ais2api 的许可选择而改变。
+
 ## WAA 运行时
 
 `waa/` 是 [AIStudio2API](https://github.com/Mag1cFall/AIStudio2API/tree/d94bf91c071e921ba2d0d8c6d14fef4faae2a469)（MIT License，Copyright (c) 2026 Mag1cFall，[AIStudio2API-LICENSE.txt](licenses/AIStudio2API-LICENSE.txt)）中 `internal/waa` 的 C++ 移植，用于在进程内的 SpiderMonkey 里运行 Google 的 WAA 虚拟机：

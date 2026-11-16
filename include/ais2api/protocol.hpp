@@ -21,6 +21,9 @@ struct Request {
     std::optional<std::int64_t> output_budget;
     json::array ignored_parameters;
     json::object gemini;
+    // Function name -> argument paths the schema adapter turned into JSON text
+    // (see prepare_schema); decode_json_text_args restores them.
+    json::object json_text_args;
 };
 struct GenerationEvent {
     enum class Kind { chunk, round_finished, continuation_started, continuation_failed,
@@ -51,6 +54,9 @@ inline constexpr std::string_view continuation_token_key = "ais2apiContinuationT
 json::object decode_chunk(const json::value& wire_chunk);
 json::array take_upstream_ignored(json::object& event);
 void filter_thoughts(json::object& event);
+// Parses the JSON text the model wrote for schema-less arguments back into
+// values; text that is not valid JSON stays a string.
+void decode_json_text_args(json::object& event, const json::object& json_text_args);
 // Converts decoded usage to the public Gemini API form for native responses.
 // Internally candidatesTokenCount includes thoughtsTokenCount; the public field
 // excludes it, and zero thought/cache counts are omitted.
@@ -70,6 +76,16 @@ bool joins_text(const json::object& a, const json::object& b);
 // The size_bound growth merge_event allows for an event with these counts of
 // candidates and content parts.
 std::size_t merge_growth_bound(const json::object& event, std::size_t candidates, std::size_t parts);
+// Tool call ids this service issues: "call_gemini_" + base64url of
+// [upstream id or null, thought signature or null, nonce]. Other ids pass
+// through unchanged with `encoded` unset.
+struct ClientCall {
+    std::string id;
+    std::optional<std::string> signature;
+    bool encoded = false;
+};
+ClientCall client_call(std::string id);
+std::string signed_call_id(std::string_view id, const json::value &signature, std::string nonce);
 json::object openai_response(const json::object& gemini, std::string_view model, std::string_view id, Store* store = nullptr, std::string_view principal = {});
 json::object openai_delta(const json::object& gemini_delta, std::string_view model, std::string_view id, Store* store = nullptr, std::string_view principal = {});
 class WireStreamParser {

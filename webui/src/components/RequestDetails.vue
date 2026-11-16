@@ -12,7 +12,7 @@ const emit = defineEmits<{ refresh: [] }>()
 const timestamp = (ms: number | null) => formatTimestamp(ms == null ? null : ms / 1000)
 const duration = (ms: number | null) => ms == null ? '—' : `${(ms / 1000).toFixed(3)} 秒`
 const settings = computed(() => generationSettings(props.record?.settings ?? {}))
-const endpoint = { chat_completions: 'Chat Completions', responses: 'Responses', gemini: 'Gemini' }
+const endpoint = { chat_completions: 'Chat Completions', responses: 'Responses', messages: 'Anthropic Messages', gemini: 'Gemini' }
 </script>
 
 <template>

@@ -1,0 +1,18 @@
+# Copyright (c) 2026 Mana Nekoha (mananekoha114)
+# SPDX-License-Identifier: MPL-2.0
+# Embeds the compact Gemma 4 tokenizer table (third_party/gemma4-tokenizer)
+# after checking it against the sha256 its README records.
+set(expected "9bff64d0ebcfd3ebf3543e319063e9a927d14f33c53373307cad87eb2c90d6ac")
+file(SHA256 "${SOURCE}" actual)
+if(NOT actual STREQUAL expected)
+  message(FATAL_ERROR "${SOURCE} does not match the pinned sha256; regenerate it as third_party/gemma4-tokenizer/README.md describes")
+endif()
+file(READ "${SOURCE}" tokenizer_hex HEX)
+string(LENGTH "${tokenizer_hex}" tokenizer_hex_length)
+if(tokenizer_hex_length EQUAL 0 OR tokenizer_hex_length GREATER 16777216)
+  message(FATAL_ERROR "The tokenizer table must contain 1..8388608 bytes")
+endif()
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," tokenizer_bytes "${tokenizer_hex}")
+get_filename_component(output_directory "${OUTPUT}" DIRECTORY)
+file(MAKE_DIRECTORY "${output_directory}")
+file(WRITE "${OUTPUT}" "// Generated; do not edit.\nstatic constexpr unsigned char embedded_gemma4_bpe[] = {${tokenizer_bytes}};\n")
