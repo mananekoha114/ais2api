@@ -54,6 +54,7 @@
 | 字段 | 类型与默认值 | 生效方式 | 说明 |
 |---|---|---|---|
 | `ignore_unsupported_parameters` | 布尔，`false` | 热更新 | 舍弃已知不支持的可选参数后继续生成，而不是报错。舍弃清单见 [协议合同](protocol.md#optional-unsupported-parameter-dropping)。 |
+| `nonstream_keepalive_seconds` | `0` 或 1–120，`0` | 热更新 | 非流式保活：生成超过这么多秒仍未完成时，先返回 200 响应头，之后按同样间隔写换行，防止反向代理因长时间没有数据而断开；推荐 10，`0` 表示关闭。开启后错误可能出现在 200 响应的正文里，见 [非流式保活](protocol.md#非流式保活)。 |
 | `search_model_drop_functions` | 布尔，`true` | 热更新 | `*-search` 模型同时收到自定义函数时：`true` 舍弃函数、保留搜索；`false` 保留函数、不加搜索。见 [搜索模型](protocol.md#search-models)。 |
 | `continuation_retry_enabled` | 布尔，`true` | 热更新 | 续接失败自动重试开关；只控制符合条件的无生成数据 403 补试，不关闭正常续接。 |
 | `model_aliases` | 对象，`{}` | 热更新 | 模型别名，键为客户端使用的名称，值为实际模型 id，例如 `{"flash": "gemini-3.1-flash-lite"}`。 |
@@ -94,6 +95,7 @@
 | `browser_idle_seconds` | `AIS2API_BROWSER_IDLE_SECONDS` | `--browser-idle-seconds N` |
 | `request_retention_days` | `AIS2API_REQUEST_RETENTION_DAYS` | — |
 | `ignore_unsupported_parameters` | `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS` | — |
+| `nonstream_keepalive_seconds` | `AIS2API_NONSTREAM_KEEPALIVE_SECONDS` | — |
 | `search_model_drop_functions` | `AIS2API_SEARCH_MODEL_DROP_FUNCTIONS` | — |
 | `continuation_retry_enabled` | `AIS2API_CONTINUATION_RETRY_ENABLED` | — |
 | `limits.max_continuation_retries` | `AIS2API_MAX_CONTINUATION_RETRIES` | — |

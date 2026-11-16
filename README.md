@@ -2,13 +2,13 @@
 
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-blue.svg)](LICENSE)
 
-ais2api 是一个 C++20 编写的 AI Studio 网页会话网关：它驱动本地浏览器登录 Google AI Studio，把网页会话转换为 **Gemini 原生 API**、**OpenAI Chat Completions** 与 **OpenAI Responses** 接口，供 Cherry Studio、SillyTavern、RikkaHub 等客户端使用。支持 Windows、Linux 与 Android（Termux）。
+ais2api 是一个 C++20 编写的 AI Studio 网页会话网关：它驱动本地浏览器登录 Google AI Studio，把网页会话转换为 **Gemini 原生 API**、**OpenAI Chat Completions**、**OpenAI Responses** 与 **Anthropic Messages** 接口，供 Cherry Studio、SillyTavern、RikkaHub、Claude Code 等客户端使用。支持 Windows、Linux 与 Android（Termux）。
 
 > **开发版本**：Windows 上已用真实账号验证基础文本生成、流式、多轮和搜索，但工具调用、生图以及 Linux / Termux 的真实账号场景尚未完成验收。详见 [验证记录](docs/validation.md)。
 
 ## 特性
 
-- **三种 API**：Gemini `generateContent` / `streamGenerateContent`、OpenAI `/v1/chat/completions` 与 `/v1/responses`，支持流式、多模态输入、函数调用、JSON Schema 输出。
+- **四种 API**：Gemini `generateContent` / `streamGenerateContent`、OpenAI `/v1/chat/completions` 与 `/v1/responses`、Anthropic `/v1/messages`，支持流式、多模态输入、函数调用、JSON Schema 输出；Anthropic 的 `count_tokens` 用内嵌的 Gemma 4 分词器在本地计数。
 - **真 role 与思考签名**：保留完整历史中的消息边界和原生部件，思考签名可在多轮对话中往返。
 - **搜索模型**：每个模型自动提供 `<模型>-search` 变体，无需客户端配置即可开启 Google 搜索。
 - **多账号管理**：账号轮换、按模型冷却与自动恢复、每个账号固定的浏览器指纹、Cookie 自动写回。
@@ -32,6 +32,7 @@ ais2api 是一个 C++20 编写的 AI Studio 网页会话网关：它驱动本地
 | Cherry Studio / OpenAI 兼容 | Base URL `http://127.0.0.1:18451/v1` |
 | SillyTavern | Google AI Studio，反向代理 `http://127.0.0.1:18451` |
 | RikkaHub | Google 提供商，Base URL `http://127.0.0.1:18451/v1beta` |
+| Claude Code | `ANTHROPIC_BASE_URL=http://127.0.0.1:18451`，见 [Claude Code](docs/clients.md#claude-code) |
 
 API Key 均填写 `config.json` 中的 `api_key`。更多说明见 [客户端接入](docs/clients.md)。
 
@@ -74,7 +75,7 @@ CXXFLAGS=-fexperimental-library sh scripts/build.sh termux --install-deps
 ## 限制
 
 - 同一时间只处理一个生成请求，其余排队。
-- Responses 为无状态模式；没有 Files、embeddings 或独立的图片/音频接口。
+- Responses 为无状态模式；没有 Files、embeddings 或独立的图片/音频接口；不支持 Anthropic 的服务端工具（如 Claude Code 的 WebSearch）。
 - `thinkingBudget` 与 `seed` 被接受但不生效；强制工具调用与 strict schema 默认拒绝（可选择舍弃后继续）。
 - 搜索来源与引用元数据暂不解析。
 - 依赖 AI Studio 网页的私有协议，上游变化时需要更新适配器。

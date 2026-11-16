@@ -1,6 +1,6 @@
 # 验证记录
 
-更新：2026-11-05。本项目仍是开发版本，尚未达到完整版本的发布门槛。本文汇总已执行的验证及其能证明的范围；各专项的详细过程见 [docs/reports/](reports/README.md)。
+更新：2026-11-16。本项目仍是开发版本，尚未达到完整版本的发布门槛。本文汇总已执行的验证及其能证明的范围；各专项的详细过程见 [docs/reports/](reports/README.md)。
 
 阅读时请注意区分四类证据，它们不能互相替代：
 
@@ -14,12 +14,15 @@
 | 范围 | 最近结果 | 能证明的范围 |
 |---|---|---|
 | C++ 全量测试 | 2026-11-05，ARM64 Termux，Catch2 375 个用例、7,674 条断言通过；此前模型目录与计价验证见[报告](reports/request-usage-pricing-2026-10-31.md)；此前 Windows 结果见[搜索修复报告](reports/search-fix-2026-10-24.md) | 合成协议、解析器、存储、CLI 控制通道、HTTP、资源限制、重试、逐请求记录、计价、迁移与保留期等 |
+| Anthropic Messages、分词器与非流式保活 | 2026-11-16，Windows，全量 539 个用例、20,720 条断言通过；其中 `[anthropic]` 14 个用例、`[tokenizer]` 3 个、`[keepalive]` 4 个 | Claude Code 默认请求的转换、签名与工具往返、外来签名、`clear_thinking`、对话中的 system 消息与工具增删、SSE 事件顺序及其与非流式结果的一致性、错误类型、`count_tokens`、`x-api-key` 鉴权与 Anthropic 格式的模型列表；保活的三种时序与断开取消。分词器另对照 Hugging Face `tokenizers` 跑了 3,749 条语料（中文、英文、日文、代码、emoji、空白、数字、长文本），计数全部一致。未使用真实账号 |
 | 页面桥接脚本 | `node --test browser/test_bridge.cjs` 46 项通过 | 模拟页面下的捕获、快照、信用协议、取消、身份与错误分类 |
-| WebUI | 2026-11-05，`vue-tsc --noEmit` 与 Vitest 9 个文件、50 项通过 | 前端类型与交互（模拟管理 API），包括模型目录替换、失败保留、统计与请求记录的筛选、分页、日期边界、生成设置与部分费用，以及续接重试开关、次数保留和输入范围 |
+| WebUI | 2026-11-16，`vue-tsc --noEmit` 与 Vitest 10 个文件、59 项通过（此前 2026-11-05 为 9 个文件、50 项） | 前端类型与交互（模拟管理 API），包括模型目录替换、失败保留、统计与请求记录的筛选、分页、日期边界、生成设置与部分费用，以及续接重试开关、次数保留和输入范围 |
 | CLI 冒烟 | ARM64 Termux 38 项通过（2026-11-05）；Windows 36 项通过（2026-10-23）；Windows / Debian 各 34 项（2026-10-22） | init 不生成密钥、旧配置迁移、start/stop、在线存储、配置密钥轮换与清空、脱敏、热更新 |
 | Responses 专项 | Windows 14 个用例、233 条断言 | JSON / 命名 SSE、usage、函数签名与完整历史、重复工具 ID、图片输入、schema、截断与失败状态、流式限额、FIN/RST 取消；未运行真实账号或 SDK 集成 |
 | Cookie 导入与专用脚本 | Windows / Debian 离线 HTTP 测试及 Node VM 测试通过 | 原版推送格式、独立密钥、元数据转换、分区过滤、身份检查、事务更新、队列限额、超时、取消与保存前撤销检查；未使用真实 Cookie |
 | Linux sanitizer 与模糊测试 | Debian 13 GCC 14.2 与 Clang 19 ASan/UBSan 均为 105 个用例、1,591 条断言通过；Clang ASan/UBSan 下 21 秒完成 878,837 次输入，无 sanitizer 错误 | 本机 WSL 2 原生 Linux；短时线路解析器冒烟，不是长期稳定性或完整覆盖证明 |
+
+Claude Code 端到端（离线合成，2026-11-16）：Claude Code 2.1.322 连接隐藏用例 `[.agent-server]` 启动的 ais2api，生成源是脚本化的合成后端。在一次 `-p` 会话中走完“提问 → 调用 Read → 工具结果 → 回答”，函数调用签名经 `call_gemini_` ID 原样带回，`--continue` 续接的会话也带回了前一次的签名；`-p` 输出的最终文本正确。设置 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` 时每次会话只发出 2 个生成请求。这不涉及真实账号，也不能证明真实上游接受这些签名。
 
 C++ HTTP 测试使用真实的回环 TCP、HTTP 分块编码、SQLite 和本地 IPC，生成源是合成的 `GenerationBackend`。它们验证了多轮、Gemini 聚合、OpenAI SSE usage 数据块、正常结束、首个内容后出错不重试以及客户端断开取消。生产程序始终使用真实的后端路由（Camoufox / SpiderMonkey），没有模拟生成开关。
 
