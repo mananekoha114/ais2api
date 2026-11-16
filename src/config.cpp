@@ -222,6 +222,11 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
     if (env_exists(pair.first))
       e[pair.second] = v;
   }
+  // Containers set up for the removed CloakBrowser backend may still export
+  // AIS2API_BROWSER_BACKEND=cloakbrowser; it migrates like a stored value.
+  if (auto backend = e.if_contains("browser_backend");
+      backend && backend->is_string() && backend->as_string() == "cloakbrowser")
+    *backend = "camoufox";
   for (auto pair :
        {std::pair{"AIS2API_PORT", "port"}, {"AIS2API_HEADLESS", "headless"},
         {"AIS2API_BROWSER_PROXY_RELAY", "browser_proxy_relay"},

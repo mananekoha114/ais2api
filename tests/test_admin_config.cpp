@@ -87,6 +87,17 @@ TEST_CASE("a legacy or empty browser backend migrates to Camoufox and accepts no
         CHECK_THROWS_AS(cfg.patched({{"browser_backend", invalid}}), Error);
     CHECK_THROWS_AS(Config::load(cfg.config_file, {{"browser_backend", "cloakbrowser"}}), Error);
 }
+TEST_CASE("a CloakBrowser backend left in the environment migrates to Camoufox", "[config][admin][browser]") {
+    CompatibilityEnvironment environment("AIS2API_BROWSER_BACKEND");
+    AdminDirectory dir;
+    Config::load(dir.path / "config.json").save();
+    environment.set("cloakbrowser");
+    const auto cfg = Config::load(dir.path / "config.json");
+    CHECK(cfg.browser_backend == "camoufox");
+    CHECK(json::parse(read_file(cfg.config_file)).as_object().at("browser_backend") == "camoufox");
+    environment.set("chromium");
+    CHECK_THROWS_AS(Config::load(dir.path / "config.json"), Error);
+}
 TEST_CASE("search model function policy defaults to dropping functions and updates without restart", "[config][admin][search-model]") {
     AdminDirectory dir;
     auto cfg = Config::load(dir.path / "config.json");
