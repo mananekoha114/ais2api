@@ -56,6 +56,10 @@ struct Config {
     // Optional memory saving: stop the browser after this many seconds without
     // work (0 = keep it running). The next request starts it again.
     unsigned browser_idle_seconds = 0;
+    // Keep a non-streaming generation's connection alive behind reverse
+    // proxies (0 = off): after this many seconds without a result, commit a
+    // 200 JSON response and write one newline per interval until it is ready.
+    unsigned nonstream_keepalive_seconds = 0;
     unsigned request_retention_days = 90;
     Limits limits;
     json::object model_aliases;

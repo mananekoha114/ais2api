@@ -301,3 +301,26 @@ TEST_CASE("default management password peers are limited to local networks", "[c
                                "not-an-address", ""})
         CHECK_FALSE(local_network_address(remote));
 }
+TEST_CASE("non-streaming keepalive is off by default and updates without restart", "[config][admin][keepalive]") {
+    CompatibilityEnvironment environment("AIS2API_NONSTREAM_KEEPALIVE_SECONDS");
+    AdminDirectory dir;
+    auto cfg = Config::load(dir.path / "config.json");
+    CHECK(Config{}.nonstream_keepalive_seconds == 0);
+    CHECK(cfg.to_json().at("nonstream_keepalive_seconds") == 0);
+    auto enabled = cfg.patched({{"nonstream_keepalive_seconds", 10}});
+    CHECK(enabled.nonstream_keepalive_seconds == 10);
+    CHECK_FALSE(restart_required(cfg, enabled));
+    enabled.save();
+    CHECK(Config::load(cfg.config_file).nonstream_keepalive_seconds == 10);
+    for (const auto& valid : json::array{0, 1, 120})
+        CHECK_NOTHROW(cfg.patched({{"nonstream_keepalive_seconds", valid}}));
+    for (const auto& invalid : json::array{121, -1, true, "10", nullptr, 1.5})
+        CHECK_THROWS_AS(cfg.patched({{"nonstream_keepalive_seconds", invalid}}), Error);
+    environment.set("30");
+    CHECK(Config::load(cfg.config_file).nonstream_keepalive_seconds == 30);
+    environment.set("121");
+    CHECK_THROWS_AS(Config::load(cfg.config_file), Error);
+    Config direct = cfg;
+    direct.nonstream_keepalive_seconds = 121;
+    CHECK_THROWS_AS(direct.validate(), Error);
+}

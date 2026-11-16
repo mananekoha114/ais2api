@@ -256,6 +256,20 @@ public:
                                                              {"totalTokenCount", output + 4}}}});
             throw Error(500, "upstream_internal", "Internal error encountered.");
         }
+        if (request.model == "synthetic-slow" || request.model == "synthetic-slow-error") {
+            // Longer than two 1-second keepalive intervals.
+            std::stop_callback on_cancel(cancel, [state = state_] { state->cancelled = true; });
+            emit(text_event("hello "));
+            for (const auto until = Clock::now() + 2500ms; Clock::now() < until;) {
+                check_cancel(cancel);
+                std::this_thread::sleep_for(5ms);
+            }
+            if (request.model == "synthetic-slow-error")
+                throw Error(502, "synthetic_upstream_failure", "Synthetic failure after a long wait");
+            emit(text_event("world"));
+            emit(finish_event());
+            return;
+        }
         emit(text_event("hello "));
         if (request.model == "synthetic-unfinished") return;
         if (request.model == "synthetic-after-content-error")
@@ -1986,4 +2000,104 @@ TEST_CASE("Accounts that are only in auth cooldown get one probe attempt, not on
     CHECK(response.body().find("no_account") != std::string::npos);
     CHECK(server.state->attempted_accounts.size() == probed);
     REQUIRE_FALSE(server.failed);
+}
+
+namespace {
+void set_keepalive(GenerationServer &server, unsigned seconds) {
+    server.config.nonstream_keepalive_seconds = seconds;
+    atomic_write(server.config.config_file, json::serialize(server.config.to_json()), true);
+    REQUIRE(local_call(server.config, {{"command", "config.reload"}}).at("status") == "reloaded");
+}
+struct KeepaliveCase {
+    std::string target, body;
+};
+std::vector<KeepaliveCase> keepalive_cases(const std::string &model) {
+    return {{"/v1/chat/completions",
+             R"({"model":")" + model + R"(","messages":[{"role":"user","content":"hello"}]})"},
+            {"/v1/responses", R"({"model":")" + model + R"(","input":"hello"})"},
+            {"/v1beta/models/" + model + ":generateContent", R"({"contents":[{"parts":[{"text":"hello"}]}]})"}};
+}
+std::size_t leading_newlines(std::string_view body) {
+    std::size_t count = 0;
+    while (count < body.size() && body[count] == '\n') ++count;
+    return count;
+}
+}
+
+TEST_CASE("Non-streaming keepalive commits 200 and writes newlines before the JSON body", "[generation][http][keepalive]") {
+    GenerationServer server;
+    // Off by default: a slow answer keeps the ordinary Content-Length response.
+    auto plain = server.call("/v1/chat/completions", keepalive_cases("synthetic-slow")[0].body);
+    REQUIRE(plain.result_int() == 200);
+    REQUIRE_FALSE(plain.chunked());
+    REQUIRE(leading_newlines(plain.body()) == 0);
+    set_keepalive(server, 1);
+    for (const auto &item : keepalive_cases("synthetic-slow")) {
+        INFO(item.target);
+        auto response = server.call(item.target, item.body);
+        REQUIRE(response.result_int() == 200);
+        REQUIRE(response.chunked());
+        REQUIRE(response[http::field::content_type] == "application/json; charset=utf-8");
+        REQUIRE(response["X-Accel-Buffering"] == "no");
+        REQUIRE(leading_newlines(response.body()) >= 2);
+        REQUIRE(response.body().find("hello world") != std::string::npos);
+        REQUIRE(json::parse(response.body()).is_object());
+    }
+    // An answer within the interval is unchanged.
+    for (const auto &item : keepalive_cases("synthetic")) {
+        INFO(item.target);
+        auto response = server.call(item.target, item.body);
+        REQUIRE(response.result_int() == 200);
+        REQUIRE_FALSE(response.chunked());
+        REQUIRE(leading_newlines(response.body()) == 0);
+    }
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("An error after a keepalive commit is the JSON body and keeps its real status in history", "[generation][http][keepalive]") {
+    GenerationServer server;
+    set_keepalive(server, 1);
+    auto chat = server.call("/v1/chat/completions", keepalive_cases("synthetic-slow-error")[0].body);
+    REQUIRE(chat.result_int() == 200);
+    REQUIRE(leading_newlines(chat.body()) >= 2);
+    auto error = json::parse(chat.body()).as_object();
+    REQUIRE(error.at("error").at("code") == "synthetic_upstream_failure");
+    auto &partial = error.at("ais2api").at("partial_response").as_object();
+    REQUIRE(partial.at("choices").as_array()[0].at("message").at("content") == "hello ");
+    REQUIRE(partial.at("choices").as_array()[0].at("finish_reason").is_null());
+    auto history = finished_history(server);
+    REQUIRE(history.size() == 1);
+    REQUIRE(history[0].at("status") == "failed");
+    REQUIRE(history[0].at("http_status") == 502);
+    REQUIRE(history[0].at("error") == "synthetic_upstream_failure");
+    auto gemini = server.call(keepalive_cases("synthetic-slow-error")[2].target,
+                              keepalive_cases("synthetic-slow-error")[2].body);
+    REQUIRE(gemini.result_int() == 200);
+    auto native = json::parse(gemini.body()).as_object();
+    REQUIRE(native.at("error").at("code") == 502);
+    REQUIRE(native.at("error").at("reason") == "synthetic_upstream_failure");
+    REQUIRE(server.state->calls == 2);
+}
+
+TEST_CASE("Disconnecting during keepalive cancels the generation", "[generation][http][keepalive]") {
+    GenerationServer server;
+    set_keepalive(server, 1);
+    {
+        net::io_context io;
+        tcp::socket socket(io);
+        socket.connect({net::ip::make_address("127.0.0.1"), server.config.port});
+        receive_timeout(socket);
+        http::write(socket, server.request("/v1/chat/completions", keepalive_cases("synthetic-slow")[0].body));
+        boost::beast::flat_buffer input;
+        http::response_parser<http::string_body> parser;
+        http::read_header(socket, input, parser);
+        REQUIRE(parser.get().result_int() == 200);
+        REQUIRE(parser.chunked());
+    }
+    const auto deadline = Clock::now() + 3s;
+    while (!server.state->cancelled && Clock::now() < deadline)
+        std::this_thread::sleep_for(5ms);
+    REQUIRE(server.state->cancelled);
+    auto history = finished_history(server);
+    REQUIRE(history[0].at("status") == "cancelled");
 }

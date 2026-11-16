@@ -150,6 +150,7 @@ json::object Config::to_json(bool portable_paths) const {
           {"search_model_drop_functions", search_model_drop_functions},
           {"continuation_retry_enabled", continuation_retry_enabled},
           {"browser_idle_seconds", browser_idle_seconds},
+          {"nonstream_keepalive_seconds", nonstream_keepalive_seconds},
           {"request_retention_days", request_retention_days},
           {"limits",
            {{"request_bytes", limits.request_bytes},
@@ -234,6 +235,7 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
         {"AIS2API_SEARCH_MODEL_DROP_FUNCTIONS", "search_model_drop_functions"},
         {"AIS2API_CONTINUATION_RETRY_ENABLED", "continuation_retry_enabled"},
         {"AIS2API_BROWSER_IDLE_SECONDS", "browser_idle_seconds"},
+        {"AIS2API_NONSTREAM_KEEPALIVE_SECONDS", "nonstream_keepalive_seconds"},
         {"AIS2API_REQUEST_RETENTION_DAYS", "request_retention_days"}}) {
     auto v = env(pair.first);
     if (env_exists(pair.first)) {
@@ -299,7 +301,8 @@ static Config parse_config(Config c, json::object o) {
              "cookie_import_max_accounts", "cookie_import_timeout_seconds", "data_dir", "browser_executable",
              "browser_backend", "proxy", "browser_proxy_relay", "headless", "ignore_unsupported_parameters",
              "search_model_drop_functions", "browser_idle_seconds", "limits", "model_aliases",
-             "configured_models", "model_defaults", "request_retention_days", "continuation_retry_enabled"});
+             "configured_models", "model_defaults", "request_retention_days", "continuation_retry_enabled",
+             "nonstream_keepalive_seconds"});
   auto text = [&](const char *k) {
     if (!o.at(k).is_string())
       throw Error(400, "invalid_config", "Expected string: " + std::string(k));
@@ -354,6 +357,10 @@ static Config parse_config(Config c, json::object o) {
   if (idle > 86400)
     throw Error(400, "invalid_config", "browser_idle_seconds must be 0 or 10..86400");
   c.browser_idle_seconds = static_cast<unsigned>(idle);
+  const auto keepalive = number(o.at("nonstream_keepalive_seconds"));
+  if (keepalive > 120)
+    throw Error(400, "invalid_config", "nonstream_keepalive_seconds must be 0..120");
+  c.nonstream_keepalive_seconds = static_cast<unsigned>(keepalive);
   const auto retention = number(o.at("request_retention_days"));
   if (retention < 1 || retention > 3650)
     throw Error(400, "invalid_config", "request_retention_days must be 1..3650");
@@ -483,6 +490,8 @@ void Config::validate() const {
   }
   if (browser_idle_seconds && (browser_idle_seconds < 10 || browser_idle_seconds > 86400))
     throw Error(400, "invalid_config", "browser_idle_seconds must be 0 or 10..86400");
+  if (nonstream_keepalive_seconds > 120)
+    throw Error(400, "invalid_config", "nonstream_keepalive_seconds must be 0..120");
   if (request_retention_days < 1 || request_retention_days > 3650)
     throw Error(400, "invalid_config", "request_retention_days must be 1..3650");
   if (!cookie_import_max_accounts || cookie_import_max_accounts > 32 ||

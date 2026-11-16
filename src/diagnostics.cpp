@@ -134,6 +134,7 @@ json::object config_part(const Config &config) {
     json::object out;
     copy(out, source, {"browser_backend", "headless", "browser_proxy_relay",
                        "browser_idle_seconds", "continuation_retry_enabled", "ignore_unsupported_parameters",
+                       "nonstream_keepalive_seconds",
                        "search_model_drop_functions", "request_retention_days", "cookie_import_max_accounts",
                        "cookie_import_timeout_seconds"});
     out["proxy"] = proxy_scheme(config.proxy);

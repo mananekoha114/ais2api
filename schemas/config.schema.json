@@ -95,6 +95,13 @@
       "anyOf": [{"const": 0}, {"minimum": 10, "maximum": 86400}],
       "description": "Optional memory saving: stop the browser after this many seconds without any work; 0 keeps it running. The next request starts it again (cold start). Takes effect without restarting."
     },
+    "nonstream_keepalive_seconds": {
+      "type": "integer",
+      "default": 0,
+      "minimum": 0,
+      "maximum": 120,
+      "description": "Keep non-streaming generations alive behind reverse proxies; 0 disables it. After this many seconds without a result the response commits as 200 JSON and one newline is written per interval until the body is ready; later errors become the JSON body. 10 is a typical value. Takes effect without restarting."
+    },
     "request_retention_days": {
       "type": "integer",
       "default": 90,

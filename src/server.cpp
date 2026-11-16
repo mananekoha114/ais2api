@@ -1122,35 +1122,70 @@ net::awaitable<void> json_sse(beast::tcp_stream &stream, const json::object &obj
     pending += "\n\n";
     co_await write(pending);
 }
-net::awaitable<std::optional<json::object>> next_event(const std::shared_ptr<Work> &work,
-                                                       unsigned queue_seconds) {
+struct NextEvent {
+    // Empty with `due` unset once generation has finished.
+    std::optional<json::object> event;
+    // `wake_at` passed before an event or the end arrived.
+    bool due = false;
+};
+net::awaitable<NextEvent> next_event_until(const std::shared_ptr<Work> &work, unsigned queue_seconds,
+                                           Clock::time_point wake_at) {
     while (true) {
         // Arm before inspecting the pipe. Producer notifications are posted to
         // this executor, so no notification can be lost before async_wait starts.
-        work->wakeup->expires_at(work->pipe->started
-                                     ? Clock::time_point::max()
-                                     : work->queued + std::chrono::seconds(queue_seconds));
+        work->wakeup->expires_at(std::min(wake_at, work->pipe->started
+                                                       ? Clock::time_point::max()
+                                                       : work->queued + std::chrono::seconds(queue_seconds)));
         check_cancel(work->pipe->cancellation.get_token());
         if (auto event = work->pipe->take())
-            co_return event;
+            co_return NextEvent{std::move(event)};
         if (work->pipe->done()) {
             if (auto error = work->pipe->error())
                 throw *error;
-            co_return std::nullopt;
+            co_return NextEvent{};
         }
         if (!work->pipe->started &&
             Clock::now() - work->queued > std::chrono::seconds(queue_seconds)) {
             work->pipe->cancel();
             throw Error(504, "queue_timeout", "Queue wait exceeded limit");
         }
+        if (Clock::now() >= wake_at)
+            co_return NextEvent{std::nullopt, true};
         boost::system::error_code ec;
         co_await work->wakeup->async_wait(net::redirect_error(net::use_awaitable, ec));
         if (ec && ec != net::error::operation_aborted)
             throw boost::system::system_error(ec);
     }
 }
+net::awaitable<std::optional<json::object>> next_event(const std::shared_ptr<Work> &work,
+                                                       unsigned queue_seconds) {
+    co_return (co_await next_event_until(work, queue_seconds, Clock::time_point::max())).event;
+}
+// Commits a non-streaming response whose JSON body follows in chunks, so a
+// keepalive newline can precede it.
+net::awaitable<void> write_json_header(beast::tcp_stream &stream) {
+    http::response<http::empty_body> response(http::status::ok, 11);
+    response.set(http::field::server, "ais2api");
+    response.set(http::field::content_type, "application/json; charset=utf-8");
+    response.set(http::field::cache_control, "no-store");
+    response.set("X-Accel-Buffering", "no");
+    response.keep_alive(false);
+    response.chunked(true);
+    http::response_serializer<http::empty_body> header(response);
+    stream.expires_after(15s);
+    co_await http::async_write_header(stream, header, net::use_awaitable);
+}
+net::awaitable<void> write_json_body(beast::tcp_stream &stream, const json::object &object) {
+    const auto body = json::serialize(object);
+    stream.expires_after(15s);
+    co_await net::async_write(stream, http::make_chunk(net::buffer(body)), net::use_awaitable);
+    co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+}
 struct ConnectionState {
+    // SSE headers were sent; errors become stream events.
     bool committed = false;
+    // A keepalive JSON response was committed as 200; an error becomes its body.
+    bool keepalive_committed = false;
     bool openai = false;
     bool audit = true;
     unsigned response_status = 200;
@@ -1761,9 +1796,27 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
                 official_usage(output);
             return output;
         };
+        // Behind a reverse proxy a long silent wait can be cut off; once the
+        // interval passes, commit 200 and write a newline per interval.
+        const auto keepalive = std::chrono::seconds(cfg.nonstream_keepalive_seconds);
+        auto wake_at = keepalive.count() ? Clock::now() + keepalive : Clock::time_point::max();
         try {
-            while (auto event = co_await next_event(work, cfg.limits.queue_seconds)) {
-                merge_event(aggregate, *event, cfg.limits.object_bytes, &aggregate_bound);
+            while (true) {
+                auto next = co_await next_event_until(work, cfg.limits.queue_seconds, wake_at);
+                if (next.due) {
+                    if (!state.keepalive_committed) {
+                        co_await write_json_header(stream);
+                        state.keepalive_committed = true;
+                    }
+                    stream.expires_after(30s);
+                    co_await net::async_write(stream, http::make_chunk(net::buffer("\n", 1)),
+                                              net::use_awaitable);
+                    wake_at = Clock::now() + keepalive;
+                    continue;
+                }
+                if (!next.event)
+                    break;
+                merge_event(aggregate, *next.event, cfg.limits.object_bytes, &aggregate_bound);
                 work->pipe->acknowledge();
             }
         } catch (const Error &error) {
@@ -1789,7 +1842,10 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
             }
             throw;
         }
-        co_await send_json(stream, 200, adapt(aggregate));
+        if (state.keepalive_committed)
+            co_await write_json_body(stream, adapt(aggregate));
+        else
+            co_await send_json(stream, 200, adapt(aggregate));
         co_return;
     }
     auto event = co_await next_event(work, cfg.limits.queue_seconds);
@@ -1891,6 +1947,16 @@ net::awaitable<void> connection(tcp::socket socket, Service &service,
                 } else
                     co_await json_sse(stream, error_json(*error, state.openai), 16384);
                 co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+            } else if (state.keepalive_committed) {
+                // The status line already said 200; the error is the body and
+                // request history keeps the real status.
+                if (error->status != 499) {
+                    auto body = error_json(*error, state.openai);
+                    if (state.partial_response)
+                        body["ais2api"] =
+                            json::object{{"partial_response", std::move(*state.partial_response)}};
+                    co_await write_json_body(stream, body);
+                }
             } else if (error->status != 499) {
                 auto body = error_json(*error, state.openai);
                 if (state.partial_response)
