@@ -42,9 +42,10 @@ TEST_CASE("Strict schemas and unsupported root forms degrade only when opted in"
     REQUIRE(function.at("name") == "lookup");
     REQUIRE_FALSE(function.contains("strict"));
     REQUIRE_FALSE(function.contains("parameters"));
+    // An integer exclusive bound converts exactly and is not reported.
     REQUIRE(normalized.gemini.at("generationConfig").as_object().at("responseSchema").as_object()
-        .at("properties").as_object().at("n").as_object().size() == 1);
-    REQUIRE(normalized.ignored_parameters.size() == 4);
+        .at("properties").as_object().at("n").as_object() == read_request(R"({"type":"integer","minimum":1})"));
+    REQUIRE(normalized.ignored_parameters.size() == 3);
     for (const auto &schema : json::array{true, json::object{}, read_request(R"({"$ref":"#"})"), read_request(R"({"type":["string","number"]})")}) {
         auto candidate = chat_request();
         candidate["response_format"] = json::object{{"type", "json_schema"}, {"json_schema", json::object{{"name", "reply"}, {"schema", schema}}}};

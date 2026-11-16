@@ -21,6 +21,9 @@ struct Request {
     std::optional<std::int64_t> output_budget;
     json::array ignored_parameters;
     json::object gemini;
+    // Function name -> argument paths the schema adapter turned into JSON text
+    // (see prepare_schema); decode_json_text_args restores them.
+    json::object json_text_args;
 };
 struct GenerationEvent {
     enum class Kind { chunk, round_finished, continuation_started, continuation_failed,
@@ -51,6 +54,9 @@ inline constexpr std::string_view continuation_token_key = "ais2apiContinuationT
 json::object decode_chunk(const json::value& wire_chunk);
 json::array take_upstream_ignored(json::object& event);
 void filter_thoughts(json::object& event);
+// Parses the JSON text the model wrote for schema-less arguments back into
+// values; text that is not valid JSON stays a string.
+void decode_json_text_args(json::object& event, const json::object& json_text_args);
 // Converts decoded usage to the public Gemini API form for native responses.
 // Internally candidatesTokenCount includes thoughtsTokenCount; the public field
 // excludes it, and zero thought/cache counts are omitted.

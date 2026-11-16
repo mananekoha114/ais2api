@@ -1108,7 +1108,7 @@ void discard_gemini_controls(json::object &body, std::string model, json::array 
     }
 }
 void prepare_optional_schema(json::object &owner, std::string_view key, Request &request,
-                             std::string_view name, bool discard) {
+                             std::string_view name, bool discard, json::array *json_text = nullptr) {
     auto value = owner.if_contains(key);
     if (!value) return;
     if (discard && value->is_bool()) {
@@ -1116,11 +1116,15 @@ void prepare_optional_schema(json::object &owner, std::string_view key, Request 
         return;
     }
     try {
-        auto schema = prepare_schema(object(*value, "schema"), &request.ignored_parameters, name, discard);
+        json::array paths;
+        auto schema = prepare_schema(object(*value, "schema"), &request.ignored_parameters, name, discard, &paths);
         // Concrete types and unions are checked here too, so a capability
         // failure can drop this optional schema before transport validation.
         encode_native_schema(schema);
         *value = std::move(schema);
+        if (json_text)
+            for (auto &path : paths)
+                json_text->push_back(std::move(path));
     } catch (const UnsupportedSchema &) {
         if (!discard) throw;
         discard_parameter(owner, key, request.ignored_parameters, name);
@@ -1233,10 +1237,16 @@ Request normalize_native(std::string model, const json::object &input, bool stre
             if (tool.is_object())
                 if (auto functions = tool.as_object().if_contains("functionDeclarations"); functions && functions->is_array())
                     for (auto &function : functions->as_array())
-                        if (function.is_object())
+                        if (function.is_object()) {
+                            json::array paths;
                             for (auto key : {"parameters", "parametersJsonSchema"})
                                 prepare_optional_schema(function.as_object(), key, r,
-                                                        "tools.functionDeclarations.parameters", config.ignore_unsupported_parameters);
+                                                        "tools.functionDeclarations.parameters",
+                                                        config.ignore_unsupported_parameters, &paths);
+                            if (auto name = function.as_object().if_contains("name");
+                                !paths.empty() && name && name->is_string())
+                                r.json_text_args[name->as_string()] = std::move(paths);
+                        }
     auto contents = r.gemini.if_contains("contents");
     if (!contents)
         invalid("contents is required");
@@ -1406,6 +1416,50 @@ void filter_thoughts(json::object &event) {
             part.erase("text");
             if (part.empty()) it = items.erase(it);
             else ++it;
+        }
+    }
+}
+
+namespace {
+void decode_json_text(json::value &value, const json::array &path, std::size_t at) {
+    if (at == path.size()) {
+        if (!value.is_string()) return;
+        boost::system::error_code error;
+        auto parsed = json::parse(value.as_string(), error);
+        if (!error) value = std::move(parsed);
+        return;
+    }
+    if (path[at].is_string()) {
+        if (!value.is_object()) return;
+        if (auto child = value.as_object().if_contains(path[at].as_string()))
+            decode_json_text(*child, path, at + 1);
+    } else if (value.is_array())
+        for (auto &item : value.as_array())
+            decode_json_text(item, path, at + 1);
+}
+} // namespace
+
+void decode_json_text_args(json::object &event, const json::object &json_text_args) {
+    if (json_text_args.empty()) return;
+    auto candidates = event.if_contains("candidates");
+    if (!candidates || !candidates->is_array()) return;
+    for (auto &candidate : candidates->as_array()) {
+        if (!candidate.is_object()) continue;
+        auto content = candidate.as_object().if_contains("content");
+        if (!content || !content->is_object()) continue;
+        auto parts = content->as_object().if_contains("parts");
+        if (!parts || !parts->is_array()) continue;
+        for (auto &part : parts->as_array()) {
+            if (!part.is_object()) continue;
+            auto call = part.as_object().if_contains("functionCall");
+            if (!call || !call->is_object()) continue;
+            auto name = call->as_object().if_contains("name");
+            auto args = call->as_object().if_contains("args");
+            if (!name || !name->is_string() || !args) continue;
+            auto paths = json_text_args.if_contains(name->as_string());
+            if (!paths || !paths->is_array()) continue;
+            for (const auto &path : paths->as_array())
+                if (path.is_array()) decode_json_text(*args, path.as_array(), 0);
         }
     }
 }

@@ -860,6 +860,7 @@ class Service {
                                     }
                             if (!request.include_thoughts)
                                 filter_thoughts(event);
+                            decode_json_text_args(event, request.json_text_args);
                             if (auto usage = event.if_contains("usageMetadata");
                                 usage && usage->is_object()) {
                                 *usage = add_usage(completed_usage, usage->as_object());

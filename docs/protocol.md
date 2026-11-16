@@ -105,7 +105,11 @@ HTTP 错误体不算生成流；任何生成流字节都排除补试，包括未
 
 **降级为描述提示**（仅限非 strict schema）：`additionalProperties`（布尔或 schema）、`title`、`default` 与非字符串的标量 enum 会被接受。私有上游没有对应字段，因此这些约束会转为描述中的提示文字；`$schema`、`$id`、`$comment` 直接省略。被降级的关键字去重后记录在 `generation_parameters_ignored` 中（不记录属性名或值）。这只是对模型的提示，不是强制约束，客户端必须自行校验模型输出和工具参数。
 
-**其他规则**：字符串 `const` 转为单元素 enum；同类标量 enum/const 可推断类型。任意未知关键字、布尔 schema、元组 schema，以及无法推断具体类型的无约束 schema 仍不支持；联合类型仍需要具体或可推断的类型。OpenAI 的 strict JSON schema / strict 函数模式默认被拒绝，因为上游无法保证其语义；可通过下文的开关舍弃该要求。
+**exclusive 边界**：上游只有闭区间的 `minimum` / `maximum`。integer 的 `exclusiveMinimum` / `exclusiveMaximum`（包括 Draft 4 的布尔写法）精确换算，例如 `exclusiveMinimum: 0` 变为 `minimum: 1`，小数边界取整到区间内最近的整数；不记录为舍弃。其他类型写成同值的 `minimum` / `maximum`，并在描述中提示“Must be greater than …”或“Must be less than …”，同时记入 `generation_parameters_ignored`。已有更严的闭区间边界时只保留它。
+
+**任意 JSON 值**：嵌套位置上只有描述的子 schema（例如 `{}` 或 `{"description":"…"}`，也包括引用到这类定义的 `$ref`）表示任意 JSON 值。上游没有对应的类型，因此声明为 string，并在描述中提示模型用 JSON 文本填写。对函数参数，从根经 properties 和 items 能到达的这类位置，在返回给客户端前会把模型写的 JSON 文本解析回原值，不是合法 JSON 时保持字符串；联合分支里的同类位置和响应格式 schema 中的输出不做解析，保持字符串。空 schema 形式的 `additionalProperties: {}` 等同于 `true`。
+
+**其他规则**：字符串 `const` 转为单元素 enum；同类标量 enum/const 可推断类型。任意未知关键字、布尔 schema、元组 schema、根位置上没有类型的 schema，以及有约束（如 `minLength`）却无法推断类型的 schema 仍不支持；联合类型仍需要具体或可推断的类型。OpenAI 的 strict JSON schema / strict 函数模式默认被拒绝，因为上游无法保证其语义；可通过下文的开关舍弃该要求。
 
 ## 工具
 
@@ -153,7 +157,7 @@ Chat Completions 的 `web_search_options` 对所请求的模型应用同样的�
 - **Chat**：strict 函数/JSON 标志、强制或指定的 `tool_choice`、`parallel_tool_calls: false`、`n > 1`、`store: true`、`seed`、`logit_bias`、`service_tier`，以及无法映射的 `none` / `xhigh` 推理强度。其余工具与受支持的 schema 约束保留。
 - **Gemini**：`candidateCount > 1`、`ANY` / `VALIDATED` 函数调用模式、`cachedContent`、不支持的音频输出/语音/路由/模型选择选项、不支持的内置工具选项、与模型不兼容的代码/地图/URL 工具，以及启用的已废弃 civic-integrity 过滤。受支持的工具、内容与历史保留。不支持的选项对象整体舍弃；会检查对象形状，但不会校验其内部字段。
 - **Responses**：存储/后台/续接控制、额外的 include 数据、自动截断、service tier、摘要请求、并行限制、强制工具选择、strict 标志，以及已识别的不支持内置工具。请求仍只使用本次提交的完整历史同步执行，不保存响应。响应中的选项字段反映被移除的顶层控制和 strict 标志。
-- **Schema**：在结构校验之后，逐个移除已知不支持的 JSON Schema 约束（如 `multipleOf`、exclusive 边界、`patternProperties`、元组前缀/contains/uniqueItems、条件/依赖/unevaluated 约束、content 注解、读写标志）。如果一个合法的可选 schema 完全无法表示（远程/递归引用、布尔/元组/无约束/多类型形式），则移除整个根 schema：被移除的输出 schema 保留 application/json MIME 模式，被移除的函数 schema 保留函数名与描述。
+- **Schema**：在结构校验之后，逐个移除已知不支持的 JSON Schema 约束（如 `multipleOf`、`patternProperties`、元组前缀/contains/uniqueItems、条件/依赖/unevaluated 约束、content 注解、读写标志）。如果一个合法的可选 schema 完全无法表示（远程/递归引用、布尔/元组/多类型形式、根位置无类型），则移除整个根 schema：被移除的输出 schema 保留 application/json MIME 模式，被移除的函数 schema 保留函数名与描述。
 
 被舍弃的能力不会被强制执行或模拟。未知的请求/schema 关键字、保留字段格式错误、缺少必填输入、定义冲突、无效引用、不支持的内容或文件附件、鉴权失败与资源超限仍会明确报错。这不是对任意上游 400 的捕获重试策略，不会新增不支持的接口，也不会静默丢弃对话内容。
 

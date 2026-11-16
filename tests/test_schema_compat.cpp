@@ -4,6 +4,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#include "ais2api/protocol.hpp"
 #include "ais2api/schema.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <utility>
@@ -30,7 +31,11 @@ TEST_CASE("Schema compatibility drops only known validated keywords", "[schema][
     json::array ignored;
     auto result = prepare_schema(schema, &ignored, "response_format.schema", true);
     REQUIRE(result.size() == 2);
-    REQUIRE(result.at("properties").as_object().at("value").as_object().size() == 1);
+    // Exclusive bounds of a number become inclusive bounds plus a hint.
+    const auto &value = result.at("properties").as_object().at("value").as_object();
+    REQUIRE(value.size() == 4);
+    REQUIRE(value.at("minimum") == 0);
+    REQUIRE(value.at("maximum") == 9);
     REQUIRE(ignored.size() == 25);
     REQUIRE(ignored.front().is_string());
 }
@@ -131,4 +136,78 @@ TEST_CASE("Encoded local schema refs retain malformed and recursive reference po
     auto recursive = schema_object(R"({"$defs":{"A B":{"type":"object","properties":{"next":{"$ref":"#/$defs/A%20B"}}}},"$ref":"#/$defs/A%20B"})");
     REQUIRE_THROWS_AS(prepare_schema(recursive), UnsupportedSchema);
     REQUIRE_THROWS_AS(prepare_schema(recursive, nullptr, "schema", true), UnsupportedSchema);
+}
+
+TEST_CASE("Exclusive bounds lower to inclusive bounds by default", "[schema][compat]") {
+    auto lowered = [](std::string_view text, json::array *ignored = nullptr) {
+        return prepare_schema(schema_object(text), ignored);
+    };
+    // Integers convert exactly and record nothing as ignored.
+    json::array ignored;
+    auto limit = lowered(R"({"type":"integer","exclusiveMinimum":0,"maximum":9007199254740991})", &ignored);
+    CHECK(limit == schema_object(R"({"type":"integer","minimum":1,"maximum":9007199254740991})"));
+    CHECK(ignored.empty());
+    CHECK(lowered(R"({"type":"integer","exclusiveMaximum":10})") == schema_object(R"({"type":"integer","maximum":9})"));
+    CHECK(lowered(R"({"type":"integer","exclusiveMaximum":10,"maximum":5})") == schema_object(R"({"type":"integer","maximum":5})"));
+    CHECK(lowered(R"({"type":"integer","exclusiveMinimum":0.5,"exclusiveMaximum":2.5})") ==
+          schema_object(R"({"type":"integer","minimum":1,"maximum":2})"));
+    CHECK(lowered(R"({"type":["integer","null"],"exclusiveMinimum":-1})") ==
+          schema_object(R"({"type":["integer","null"],"minimum":0})"));
+    // Draft 4 flags.
+    CHECK(lowered(R"({"type":"integer","minimum":3,"exclusiveMinimum":true})") == schema_object(R"({"type":"integer","minimum":4})"));
+    CHECK(lowered(R"({"type":"integer","maximum":3,"exclusiveMaximum":false})") == schema_object(R"({"type":"integer","maximum":3})"));
+    CHECK(lowered(R"({"type":"integer","exclusiveMinimum":true})") == schema_object(R"({"type":"integer"})"));
+    // Numbers keep the limit inclusively and say the rest in the description.
+    auto positive = lowered(R"({"type":"number","exclusiveMinimum":0})", &ignored);
+    CHECK(positive.at("minimum") == 0);
+    CHECK(positive.at("description") == "Must be greater than 0.");
+    CHECK(ignored == json::array{"schema.exclusiveMinimum"});
+    auto draft4 = lowered(R"({"type":"number","description":"Ratio.","maximum":1.5,"exclusiveMaximum":true})");
+    CHECK(draft4.at("maximum") == 1.5);
+    CHECK(draft4.at("description") == "Ratio.\nMust be less than 1.5.");
+    // An inclusive bound that already excludes the limit needs no hint.
+    CHECK(lowered(R"({"type":"number","minimum":5,"exclusiveMinimum":0})") == schema_object(R"({"type":"number","minimum":5})"));
+}
+
+TEST_CASE("Nested schemas without a type accept any JSON value as text", "[schema][compat]") {
+    auto schema = schema_object(R"({"$defs":{"any":{}},"type":"object","properties":{
+        "args":{"description":"Input."},
+        "list":{"type":"array","items":{}},
+        "ref":{"$ref":"#/$defs/any"},
+        "union":{"anyOf":[{"type":"string"},{}]},
+        "map":{"type":"object","additionalProperties":{}}}})");
+    json::array paths;
+    auto result = prepare_schema(schema, nullptr, "schema", false, &paths);
+    const auto &properties = result.at("properties").as_object();
+    CHECK(properties.at("args").as_object().at("type") == "string");
+    CHECK(properties.at("args").as_object().at("description") == "Input.\nAny JSON value, written as JSON text.");
+    CHECK(properties.at("list").as_object().at("items").as_object().at("type") == "string");
+    CHECK(properties.at("ref").as_object().at("type") == "string");
+    CHECK(properties.at("union").as_object().at("anyOf").as_array()[1].as_object().at("type") == "string");
+    // An empty additionalProperties schema allows anything, like true.
+    CHECK(properties.at("map") == schema_object(R"({"type":"object"})"));
+    // Only values reachable through properties and items are recorded.
+    CHECK(paths == json::array{json::array{"args"}, json::array{"list", nullptr}, json::array{"ref"}});
+    // The root still needs a type, and so does a schema with constraints.
+    for (auto text : {R"({})", R"({"description":"x"})", R"({"type":"object","properties":{"x":{"minLength":1}}})"})
+        REQUIRE_THROWS_AS(prepare_schema(schema_object(text)), UnsupportedSchema);
+}
+
+TEST_CASE("JSON text arguments decode back into values", "[schema][protocol]") {
+    Config config;
+    auto body = schema_object(R"({"contents":[{"role":"user","parts":[{"text":"hi"}]}],
+        "tools":[{"functionDeclarations":[{"name":"run","parameters":{"type":"object","properties":{
+            "args":{},"steps":{"type":"array","items":{"type":"object","properties":{"input":{}}}},"name":{"type":"string"}}}}]}]})");
+    auto request = normalize_gemini("gemini-test", body, false, config);
+    CHECK(request.json_text_args == schema_object(R"({"run":[["args"],["steps",null,"input"]]})"));
+    auto event = schema_object(R"({"candidates":[{"content":{"role":"model","parts":[
+        {"functionCall":{"name":"run","args":{"args":"[1,{\"a\":true}]","name":"[1]",
+            "steps":[{"input":"{\"q\":2}"},{"input":"plain text"}]}}},
+        {"functionCall":{"name":"other","args":{"args":"[3]"}}}]}}]})");
+    decode_json_text_args(event, request.json_text_args);
+    const auto expected = schema_object(R"({"candidates":[{"content":{"role":"model","parts":[
+        {"functionCall":{"name":"run","args":{"args":[1,{"a":true}],"name":"[1]",
+            "steps":[{"input":{"q":2}},{"input":"plain text"}]}}},
+        {"functionCall":{"name":"other","args":{"args":"[3]"}}}]}}]})");
+    CHECK(event == expected);
 }
