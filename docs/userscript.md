@@ -79,5 +79,3 @@ ais2api 提供 Tampermonkey 脚本，在已登录的 AI Studio 页面读取 Cook
     node userscript/test_cookie_helper.cjs
 
 测试在隔离 VM 中模拟 DOM 与 GM API，使用合成 Cookie，覆盖设置隔离、导入范围、状态、回执、采集元数据、超时、位置和去敏。
-
-可选的浏览器 Cookie 运行时回归：设置 `AIS2API_TEST_BROWSER` 为 CloakBrowser 可执行文件，执行 `node browser/test_cookie_runtime.cjs`。它使用临时资料目录、合成 Cookie 和本地拦截页面，不能代替真实脚本管理器或真实账号验收。

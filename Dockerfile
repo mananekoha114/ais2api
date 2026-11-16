@@ -8,7 +8,7 @@
 # Debian base image for linux/amd64 or linux/arm64.
 #
 # Install the pinned vcpkg dependencies in their own layer. A source change
-# then rebuilds only the gateway, not Boost, OpenSSL, curl or libarchive.
+# then rebuilds only the gateway, not Boost, OpenSSL, ada-url or libarchive.
 FROM debian:13-slim AS build
 
 ARG BUILD_JOBS=4
@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 \
       tar \
       unzip \
+      xz-utils \
       zip \
     && rm -rf /var/lib/apt/lists/*
 
@@ -63,6 +64,9 @@ RUN baseline=$(cmake \
     && /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics \
     && cd /opt/vcpkg-manifest \
     && /opt/vcpkg/vcpkg install --triplet "$triplet" \
+      --x-no-default-features \
+      --x-feature=spidermonkey \
+      --x-feature=curl-impersonate \
       --x-install-root=/opt/vcpkg-installed \
       --clean-after-build \
     && rm -rf /root/.cache/vcpkg /opt/vcpkg/downloads /opt/vcpkg/buildtrees /opt/vcpkg/packages
@@ -82,13 +86,11 @@ RUN triplet=$(cat /tmp/vcpkg-triplet) \
     && cmake --build build/linux --parallel "${BUILD_JOBS}" \
     && cmake --install build/linux
 
-# The runtime image carries the tested CMake install tree and Debian Chromium.
-# CloakBrowser is not included: its binary license does not permit
-# redistribution. A private image or a read-only mount can provide it.
-# Camoufox is not included either: it is about 1.3 GB, and only accounts on a
+# The runtime image carries the tested CMake install tree.
+# Camoufox is not included: it is about 1.3 GB, and only accounts on a
 # Firefox backend need it. The image carries the packages it runs with (Xvfb
-# among them), and the entrypoint installs Camoufox into the data volume the
-# first time it is needed.
+# among them), and the entrypoint installs Camoufox into the data volume when
+# needed.
 FROM debian:13-slim AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -99,7 +101,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
-      chromium \
       curl \
       fontconfig \
       fonts-noto-cjk \

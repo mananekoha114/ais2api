@@ -316,11 +316,6 @@ void remove_stale_display(const fs::path& tmp, unsigned display) {
     fs::remove(tmp / ".X11-unix" / ("X" + number), error);
 }
 #endif
-std::string quote_js(std::string_view text) {
-    std::string quoted;
-    browser_detail::append_quoted(quoted, text);
-    return quoted;
-}
 
 // Preferences every launch sets, over the identity's own.
 json::object base_prefs() {
@@ -692,6 +687,7 @@ struct CamoufoxGateway::Impl {
         navigate_local(html, token);
     }
     void navigate_local(std::string_view html, std::stop_token token) {
+        bidi->clear_channel(bridge_channel, page);
         bidi->call("browsingContext.navigate", {{"context", page}, {"url", "data:text/html," + std::string(html)}, {"wait", "complete"}}, token, 30s, page);
     }
     // Launches the browser without an identity, under the display mode and
@@ -797,21 +793,47 @@ struct CamoufoxGateway::Impl {
         }
         if (!cookies.empty() && rejected == cookies.size()) incompatible("Browser refused every account cookie");
     }
+    static constexpr std::string_view bridge_channel = "ais2api-bridge";
     void preload(std::string declaration, std::stop_token token) {
         bidi->call("script.addPreloadScript", {{"functionDeclaration", std::move(declaration)}, {"contexts", json::array{json::value(page)}}}, token);
     }
+    // Installs the page bridge through a BiDi preload channel so its control
+    // object is held as a remote handle and never exposed on window/globalThis.
     void install_bridge(std::stop_token token) {
-        preload("() => {\n" + std::string(browser_detail::embedded_bridge_source()) + "\n}", token);
+        json::object channel{{"type", "channel"},
+                             {"value", json::object{{"channel", bridge_channel},
+                                                    {"ownership", "root"},
+                                                    {"serializationOptions", json::object{{"maxObjectDepth", 0}}}}}};
+        json::array arguments;
+        arguments.push_back(std::move(channel));
+        bidi->call("script.addPreloadScript",
+                   {{"functionDeclaration", "function(publish) {\n" + std::string(browser_detail::embedded_bridge_source()) + "\n}"},
+                    {"arguments", std::move(arguments)},
+                    {"contexts", json::array{json::value(page)}}},
+                   token);
     }
-    // Sends a request body to the page in pieces passed as call arguments, as
-    // BrowserGateway does over CDP.
+    std::string bridge_handle(std::stop_token token, std::chrono::milliseconds wait = 5s) {
+        auto handle = bidi->channel_handle(bridge_channel, page, token, wait);
+        if (handle.empty()) incompatible("Page bridge handle unavailable");
+        return handle;
+    }
+    json::value call_bridge(std::string_view declaration, std::initializer_list<Bidi::Argument> arguments,
+                            std::stop_token token, std::chrono::seconds timeout = 30s) {
+        const auto handle = bridge_handle(token, std::min<std::chrono::seconds>(5s, timeout));
+        std::vector<Bidi::Argument> all;
+        all.reserve(1 + arguments.size());
+        all.emplace_back(json::object{{"handle", handle}});
+        all.insert(all.end(), arguments.begin(), arguments.end());
+        return bidi->call_function(declaration, all, page, token, timeout);
+    }
+    // Sends a request body to the page in pieces passed as call arguments.
     std::string upload(std::string_view body, std::stop_token token) {
         constexpr std::size_t piece_bytes = 512 * 1024;
         const auto id = random_hex(8);
         std::size_t offset = 0;
         do {
             const auto size = browser_detail::utf8_prefix(body.substr(offset), piece_bytes);
-            bidi->call_function("function(id, chunk) { return globalThis.__ais2bridge.append(id, chunk); }", {id, body.substr(offset, size)}, page, token);
+            call_bridge("function(bridge, id, chunk) { return bridge.append(id, chunk); }", {id, body.substr(offset, size)}, token);
             offset += size;
         } while (offset < body.size());
         return id;
@@ -961,7 +983,7 @@ struct CamoufoxGateway::Impl {
                 browser_name = string_or(capabilities->as_object(), "browserName");
                 browser_version = string_or(capabilities->as_object(), "browserVersion");
             }
-            bidi->call("session.subscribe", {{"events", json::array{"browsingContext.contextDestroyed"}}}, token);
+            bidi->call("session.subscribe", {{"events", json::array{"browsingContext.contextDestroyed", "script.message"}}}, token);
             launched = identity;
             launched_config = std::move(launch_config);
             last_status = "browser_ready";
@@ -969,6 +991,7 @@ struct CamoufoxGateway::Impl {
     }
     void dispose_context(std::stop_token token) {
         authorization_cache.clear();
+        if (bidi && !page.empty()) bidi->clear_channel(bridge_channel, page);
         // Removing the user context closes its page and drops its storage.
         if (!user_context.empty()) bidi->call("browser.removeUserContext", {{"userContext", user_context}}, token);
         user_context.clear(); page.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); models_discovered = false; session_state = {};
@@ -997,7 +1020,7 @@ struct CamoufoxGateway::Impl {
         }
     }
     json::object identity(std::stop_token token, bool allow_login = false, std::chrono::seconds timeout = 30s) {
-        auto value = eval("globalThis.__ais2bridge.identity()", token, timeout);
+        auto value = call_bridge("function(bridge) { return bridge.identity(); }", {}, token, timeout);
         if (!value.is_object()) incompatible("Page identity probe unavailable");
         auto object = value.as_object();
         browser_detail::check_identity(object, allow_login);
@@ -1006,7 +1029,11 @@ struct CamoufoxGateway::Impl {
     void await_account_identity(const Account& account, std::stop_token token, bool require_editor) try {
         browser_detail::await_account_identity({
             [&](std::chrono::seconds timeout) {
-                const auto exists = eval("!!globalThis.__ais2bridge", token, timeout);
+                const auto handle = bidi->channel_handle(bridge_channel, page, token, std::min<std::chrono::seconds>(1s, timeout));
+                if (handle.empty()) return false;
+                const auto exists = bidi->call_function(
+                    "function(bridge) { return typeof bridge === 'object' && bridge !== null; }",
+                    {json::object{{"handle", handle}}}, page, token, timeout);
                 return exists.is_bool() && exists.as_bool();
             },
             [&](std::chrono::seconds timeout) { return identity(token, true, timeout); },
@@ -1023,7 +1050,9 @@ struct CamoufoxGateway::Impl {
         if (!debug || page.empty() || !bidi) return;
         const auto stem = config.data_dir / "logs" / (path_utf8(root.filename()) + "-" + std::string(what));
         try {
-            const auto state = eval(R"((async () => {
+            const auto handle = bidi->channel_handle(bridge_channel, page);
+            const auto bridge_arg = handle.empty() ? json::object{{"type", "null"}} : json::object{{"handle", handle}};
+            const auto state = bidi->call_function(R"(async function(bridge) {
   // The first read is what a script sees at once; the second allows the
   // voices two seconds to arrive.
   const voices = speechSynthesis.getVoices().length;
@@ -1034,7 +1063,6 @@ struct CamoufoxGateway::Impl {
   });
   const links = [...document.querySelectorAll('a[href*="accounts.google.com"], a[href*="myaccount.google.com"]')];
   const labelled = [...document.querySelectorAll('[data-email], [aria-label*="@"], img[alt*="@"]')];
-  const bridge = globalThis.__ais2bridge;
   let identity = null;
   try { if (bridge) { const i = bridge.identity(); identity = { login: i.login, ready: i.ready, identityReady: i.identityReady, ambiguous: i.identityAmbiguous, email: !!i.email, welcomeContinued: i.welcomeContinued }; } } catch (error) { identity = String(error); }
   return { page: location.origin + location.pathname, title: document.title, readyState: document.readyState,
@@ -1053,7 +1081,7 @@ struct CamoufoxGateway::Impl {
       voices, voicesLater,
       byob: (() => { try { new Response('x').body.getReader({ mode: 'byob' }).releaseLock(); return true; } catch (error) { return false; } })() },
     text: (document.body ? document.body.innerText : '').slice(0, 600) };
-})())", {}, 5s);
+})", {bridge_arg}, page, {}, 5s);
             std::ofstream(stem.string() + ".json", std::ios::binary) << json::serialize(state);
         } catch (...) {}
         try {
@@ -1065,6 +1093,7 @@ struct CamoufoxGateway::Impl {
         } catch (...) {}
     }
     void navigate(const std::string& url, std::stop_token token) {
+        bidi->clear_channel(bridge_channel, page);
         const auto reply = bidi->exchange("browsingContext.navigate", {{"context", page}, {"url", url}, {"wait", "interactive"}}, token, 45s, page);
         if (reply.error.empty()) return;
         // Without this an unreachable page waits out the identity check and is
@@ -1114,13 +1143,13 @@ struct CamoufoxGateway::Impl {
         }
         if (!bootstrap || !base_template.empty()) return;
         phase = "bootstrap_prepare";
-        auto prepared = eval("globalThis.__ais2bridge.bootstrap()", token);
+        auto prepared = call_bridge("function(bridge) { return bridge.bootstrap(); }", {}, token);
         if (!prepared.is_bool() || !prepared.as_bool()) incompatible("Cannot prepare the real page bootstrap prompt");
         bool template_seen = false;
         try {
             pause(token, 350ms);
             phase = "bootstrap_run";
-            auto triggered = eval("globalThis.__ais2bridge.run()", token);
+            auto triggered = call_bridge("function(bridge) { return bridge.run(); }", {}, token);
             // Without a Run button the bridge sent the editor shortcut as a
             // page event; follow with one trusted key press if nothing arrives.
             const bool shortcut = triggered.is_string() && triggered.as_string() == "shortcut";
@@ -1135,7 +1164,7 @@ struct CamoufoxGateway::Impl {
                     trusted_shortcut(token);
                 }
                 identity(token);
-                auto capability = eval("globalThis.__ais2bridge.capability()", token);
+                auto capability = call_bridge("function(bridge) { return bridge.capability(); }", {}, token);
                 if (capability.is_object()) {
                     auto t = capability.as_object().if_contains("template");
                     if (t && t->is_object()) {
@@ -1146,7 +1175,7 @@ struct CamoufoxGateway::Impl {
                                 base_template = body->as_array();
                                 timezone = string_or(capability.as_object(), "timezone", "UTC");
                                 phase = "bootstrap_finish";
-                                eval("globalThis.__ais2bridge.finishBootstrap()", token);
+                                call_bridge("function(bridge) { return bridge.finishBootstrap(); }", {}, token);
                                 last_status = "gateway_ready"; phase = "ready"; return;
                             }
                         }
@@ -1155,10 +1184,10 @@ struct CamoufoxGateway::Impl {
                 pause(token, 150ms);
             }
         } catch (...) {
-            try { eval("globalThis.__ais2bridge.finishBootstrap()", {}, 2s); } catch (...) {}
+            try { call_bridge("function(bridge) { return bridge.finishBootstrap(); }", {}, {}, 2s); } catch (...) {}
             throw;
         }
-        try { eval("globalThis.__ais2bridge.finishBootstrap()", {}, 2s); } catch (...) {}
+        try { call_bridge("function(bridge) { return bridge.finishBootstrap(); }", {}, {}, 2s); } catch (...) {}
         last_status = template_seen ? "bootstrap_snapshot_missing" : "bootstrap_template_missing";
         incompatible(template_seen
             ? "Live GenerateContent was captured but its snapshot adapter could not be verified"
@@ -1167,7 +1196,16 @@ struct CamoufoxGateway::Impl {
     // What generation depends on, checked on the current (local) page.
     json::object page_checks(std::stop_token token) {
         json::object result;
-        result["bridge"] = eval("typeof globalThis.__ais2bridge === 'object' && globalThis.__ais2bridge !== null", token);
+        const auto bridge_ok = call_bridge(
+            "function(bridge) { return typeof bridge === 'object' && bridge !== null && typeof bridge.identity === 'function' && typeof bridge.capability === 'function'; }",
+            {}, token);
+        const auto hidden = eval(
+            "!('__ais2bridge' in globalThis) && "
+            "!Object.getOwnPropertyNames(globalThis).some(k => k.includes('ais2')) && "
+            "Object.getOwnPropertySymbols(globalThis).length === 0",
+            token);
+        result["bridge"] = bridge_ok.is_bool() && bridge_ok.as_bool() && hidden.is_bool() && hidden.as_bool();
+        result["bridgeHidden"] = hidden;
         result["webdriver"] = eval("navigator.webdriver", token);
         result["byobReader"] = eval("(() => { try { new Response('x').body.getReader({mode: 'byob'}).releaseLock(); return true; } catch (error) { return false; } })()", token);
         result["userAgent"] = eval("navigator.userAgent", token);
@@ -1189,8 +1227,24 @@ struct CamoufoxGateway::Impl {
     void send(const Request& request, const Account& account, std::string_view snapshot, const EventSink& sink, std::stop_token token);
 };
 
+namespace {
+std::mutex experiment_sessions_mutex;
+std::map<const CamoufoxGateway*, json::object> experiment_sessions;
+void drop_experiment_session(const CamoufoxGateway* gateway) noexcept {
+    std::lock_guard lock(experiment_sessions_mutex);
+    experiment_sessions.erase(gateway);
+}
+} // namespace
+namespace experiment_detail {
+json::object captured_page_session(const CamoufoxGateway& gateway) {
+    std::lock_guard lock(experiment_sessions_mutex);
+    const auto found = experiment_sessions.find(&gateway);
+    return found == experiment_sessions.end() ? json::object{} : found->second;
+}
+} // namespace experiment_detail
+
 CamoufoxGateway::CamoufoxGateway(const Config& config, Store& store) : impl_(std::make_unique<Impl>(config, store)) {}
-CamoufoxGateway::~CamoufoxGateway() = default;
+CamoufoxGateway::~CamoufoxGateway() { drop_experiment_session(this); }
 json::object CamoufoxGateway::verify_runtime(std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
     try {
@@ -1234,8 +1288,13 @@ json::object CamoufoxGateway::verify_identity(std::string_view account_id, std::
         return result;
     } catch (...) { impl_->close(); throw; }
 }
-void CamoufoxGateway::close() { std::lock_guard lock(impl_->mutex); impl_->close(); }
+void CamoufoxGateway::close() {
+    drop_experiment_session(this);
+    std::lock_guard lock(impl_->mutex);
+    impl_->close();
+}
 void CamoufoxGateway::reset_session() {
+    drop_experiment_session(this);
     std::lock_guard lock(impl_->mutex);
     // A new user context reloads cookies, the page, BotGuard and the template.
     try {
@@ -1317,7 +1376,9 @@ json::array CamoufoxGateway::models(const Account& account, std::stop_token canc
     check_cancel(cancel);
     impl_->ensure_account(account, cancel, false, true);
     const auto authorization = impl_->authorization(cancel);
-    auto result = impl_->eval("globalThis.__ais2bridge.discoverModels(" + quote_js(account.auth_user) + "," + quote_js(authorization) + ")", cancel, 25s);
+    auto result = impl_->call_bridge(
+        "function(bridge, authUser, authorization) { return bridge.discoverModels(authUser, authorization); }",
+        {account.auth_user, authorization}, cancel, 25s);
     if (!result.is_array()) incompatible("ListModels returned an unsupported response");
     impl_->models_discovered = true;
     return result.as_array();
@@ -1326,7 +1387,8 @@ std::string CamoufoxGateway::Impl::ticket(const Request& request, std::stop_toke
     phase = "snapshot_ticket";
     auto wire = encode_request(request, base_template, "", timezone);
     // Covers the bridge's bounded snapshot retries (3 x 9 s).
-    auto snapshot = eval("globalThis.__ais2bridge.snapshot(" + quote_js(browser_detail::wire_content_hash(wire)) + ")", token, 30s);
+    auto snapshot = call_bridge("function(bridge, hash) { return bridge.snapshot(hash); }",
+                                {browser_detail::wire_content_hash(wire)}, token, 30s);
     if (!snapshot.is_string() || snapshot.as_string().empty()) incompatible("Snapshot service produced no request ticket");
     return std::string(snapshot.as_string());
 }
@@ -1347,13 +1409,13 @@ void CamoufoxGateway::Impl::send(const Request& request, const Account& account,
             const auto upload_id = upload(body, token);
             check();
             phase = "generation_start";
-            eval("globalThis.__ais2bridge.start({upload:" + quote_js(upload_id) + ",authUser:" + quote_js(account.auth_user) +
-                     ",authorization:" + quote_js(signature) + ",chunkBytes:" + std::to_string(chunk_bytes) + "})",
-                 token);
+            call_bridge("function(bridge, upload, authUser, authorization, chunkBytes) { return bridge.start({upload, authUser, authorization, chunkBytes}); }",
+                        {upload_id, account.auth_user, signature, chunk_bytes}, token);
             phase = "generation_read";
         };
         io.next = [&](std::uint64_t acknowledgment) {
-            return eval("globalThis.__ais2bridge.next(" + std::to_string(acknowledgment) + ",250)", token, 5s);
+            return call_bridge("function(bridge, sequence, waitMs) { return bridge.next(sequence, waitMs); }",
+                               {acknowledgment, 250}, token, 5s);
         };
         io.completed = [&] {
             phase = "generation_complete";
@@ -1362,7 +1424,7 @@ void CamoufoxGateway::Impl::send(const Request& request, const Account& account,
         };
         browser_detail::run_generation(request, config.limits, config.continuation_retry_enabled, io, sink, token);
     } catch (...) {
-        try { eval("globalThis.__ais2bridge.abort()", {}, 3s); } catch (...) { close(); }
+        try { call_bridge("function(bridge) { return bridge.abort(); }", {}, {}, 3s); } catch (...) { close(); }
         throw;
     }
 }
@@ -1375,7 +1437,29 @@ void CamoufoxGateway::generate(const Request& request, const Account& account, c
 std::string CamoufoxGateway::experiment_ticket(const Request& request, const Account& account, std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
     impl_->ensure_account(account, cancel, true);
-    return impl_->ticket(request, cancel);
+    auto ticket = impl_->ticket(request, cancel);
+    auto context = impl_->call_bridge("function(bridge) { return bridge.experimentContext(); }", {}, cancel);
+    auto ua = impl_->user_agent;
+    if (ua.empty()) {
+        const auto value = impl_->eval("navigator.userAgent", cancel);
+        if (value.is_string()) ua = std::string(value.as_string());
+    }
+    auto accept_language = string_or(impl_->launched_config, "headers.Accept-Language");
+    if (accept_language.empty()) accept_language = "en-US,en;q=0.5";
+    std::string platform;
+    if (impl_->launched && impl_->launched->identity)
+        platform = std::string(firefox_identity::os_name(impl_->launched->identity->os));
+    json::object session{{"pageId", impl_->page},
+                         {"userAgent", std::move(ua)},
+                         {"acceptLanguage", std::move(accept_language)},
+                         {"platform", std::move(platform)},
+                         {"cookies", impl_->context_cookies(cancel)},
+                         {"context", context.is_object() ? std::move(context.as_object()) : json::object{}}};
+    {
+        std::lock_guard session_lock(experiment_sessions_mutex);
+        experiment_sessions[this] = std::move(session);
+    }
+    return ticket;
 }
 void CamoufoxGateway::experiment_send(const Request& request, const Account& account, std::string_view ticket, const EventSink& sink,
                                       std::stop_token cancel) {

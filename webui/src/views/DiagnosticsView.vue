@@ -8,7 +8,6 @@ import { api, describeError } from '../api/client'
 import type { BackendEvents, BrowserDiagnostics, Capabilities, ConfigView, LogSource, Status } from '../api/types'
 import { refreshStatus } from '../stores/service'
 import { confirm, copyText, downloadFile, notify, notifyError } from '../stores/ui'
-import { cloakbrowserNotice } from '../utils/accounts'
 import { browserPhase, browserStatus, cookieRefreshLabel, modelDiscoveryLabel, proxyModeLabel } from '../utils/browser'
 import { formatBytes, formatDuration, formatTimestamp } from '../utils/format'
 
@@ -24,7 +23,7 @@ interface Diagnostics {
   google_verified?: boolean
 }
 
-const backendNames: Record<string, string> = { cloakbrowser: 'CloakBrowser', camoufox: 'Camoufox', spidermonkey: 'SpiderMonkey', custom: '其他' }
+const backendNames: Record<string, string> = { camoufox: 'Camoufox', spidermonkey: 'SpiderMonkey', custom: '其他' }
 const eventNames: Record<string, { label: string; hint: string }> = {
   permission_denied: { label: '403（Code 7）', hint: '上游以 permission_denied 拒绝了生成，包括随后被就地重建救回的' },
   login_redirect: { label: '跳转登录页', hint: '页面被重定向到 Google 登录，Cookie 可能已失效' },
@@ -34,6 +33,7 @@ const eventNames: Record<string, { label: string; hint: string }> = {
   terms_required: { label: '需要同意条款', hint: 'AI Studio 要求账号同意条款；ais2api 只会自动继续欢迎对话框' },
   session_rebuild: { label: '就地重建会话', hint: '失败后在同一浏览器内重建页面会话' },
   browser_restart: { label: '重启浏览器', hint: '失败后重启了整个浏览器进程' },
+  backend_switch: { label: '自动切换后端', hint: '自动后端账号在就地重建会话后仍遇 403，已临时切换到另一 Firefox 后端 6 小时' },
 }
 
 const data = ref<Diagnostics | null>(null)
@@ -43,7 +43,6 @@ const loadError = ref('')
 const exporting = ref(false)
 const showRaw = ref(false)
 const stopping = ref(false)
-const deprecation = computed(() => cloakbrowserNotice(data.value?.status?.deprecations))
 
 async function load() {
   loading.value = true
@@ -134,7 +133,6 @@ const capabilityList = computed(() =>
       <FInfoBar v-if="loadError" severity="error" title="加载失败" :message="loadError" />
 
       <template v-if="data">
-        <FInfoBar v-if="deprecation" severity="warning" title="CloakBrowser 已弃用" :message="deprecation" />
         <FInfoBar
           v-if="data.google_verified === false"
           severity="info"

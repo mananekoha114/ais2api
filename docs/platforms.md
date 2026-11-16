@@ -6,9 +6,9 @@
 
 | 平台 | 工具链 |
 |---|---|
-| Windows 10/11 x64 | MSVC（Visual Studio C++ 工具与 Windows SDK） |
+| Windows 10/11 x64 | MSVC 14.51 或更新（Visual Studio 2026 C++ 工具与 Windows SDK，见下文） |
 | Ubuntu 24.04 / Debian 13 x86_64 | GCC 或 Clang |
-| Ubuntu 24.04 / Debian 13 ARM64（只能用 Camoufox 后端） | GCC 或 Clang |
+| Ubuntu 24.04 / Debian 13 ARM64 | GCC 或 Clang |
 | Android ARM64（Termux 宿主） | Termux Clang |
 
 通用要求：CMake 3.25 及以上、C++20、Ninja、Git。桌面依赖由 `vcpkg.json` 中固定的 baseline（`664933b8d385dfc01f4e0cdff4c7c74e71f6a740`）锁定，源码下载由 vcpkg 校验；首次构建可能较慢。桌面构建或 GitHub Actions 任务的成功不代表 Android 上的行为已经验证。
@@ -17,7 +17,11 @@
 
 ## Windows x64
 
-安装 Visual Studio C++ 构建工具（含 Windows SDK）、Git、CMake 与 Ninja，并确保 CMake、CTest、Ninja 在 PATH 中。在 PowerShell 中执行：
+安装 Visual Studio C++ 构建工具（含 Windows SDK）、Git、CMake 与 Ninja，并确保 CMake、CTest、Ninja 在 PATH 中。
+
+默认构建包含 SpiderMonkey 后端，需要 Visual Studio 2026（MSVC 工具集 14.51 或更新）。预编译的 SpiderMonkey 静态库是对照 MSVC 14.51 的 STL 编译的，MSVC 只能用同样新或更新的工具集链接它。工具集太旧时，CMake 会在配置阶段报错，并给出工具集版本。只装了 Visual Studio 2022 时，可以直接用 CMake 配置，加上 `-DAIS2API_SPIDERMONKEY=OFF -DAIS2API_CURL_IMPERSONATE=OFF`，这样构建出的程序只有 Camoufox 后端。
+
+在 PowerShell 中执行：
 
 ```powershell
 ./scripts/build.ps1 -Package          # 加 -WebUI 嵌入网页控制台
@@ -33,7 +37,6 @@
 | `-Configuration` | `Release`（默认）、`Debug`、`RelWithDebInfo` |
 | `-Jobs N` | 并行数，默认 2 |
 | `-WebUI` | 构建并嵌入 WebUI |
-| `-BrowserBundleDirectory PATH` | 打包本地浏览器，见下文 |
 | `-SkipTests` | 跳过测试 |
 
 `build.ps1` 和 `build.sh` 只做正式版构建：构建目录如果已经被配置为开发版（见 [构建开发版](#构建开发版)），脚本会报错退出。
@@ -61,7 +64,7 @@ sudo apt-get install -y build-essential clang cmake ninja-build git curl zip unz
 sh scripts/build.sh linux --package       # 加 --webui 嵌入网页控制台
 ```
 
-脚本会获取 `vcpkg.json` 中指定提交的 vcpkg，完成配置、构建和 CTest，安装到 `build/linux/install`，并在 `build/linux/packages` 生成 TGZ。在 ARM64（aarch64）上脚本使用 `arm64-linux` 三元组；ais2api 没有为 Linux ARM64 锁定 CloakBrowser，这里只能使用 Camoufox 后端（见下文），也不能打包本地浏览器。新的依赖工具放在 `build/deps`；脚本不会把已有的 checkout 更新到其他提交。要复用已准备好的工具，把 `VCPKG_ROOT` 设为处于固定版本的 checkout。依赖下载仍需要网络或已填充的 vcpkg 缓存。
+脚本会获取 `vcpkg.json` 中指定提交的 vcpkg，完成配置、构建和 CTest，安装到 `build/linux/install`，并在 `build/linux/packages` 生成 TGZ。在 ARM64（aarch64）上脚本使用 `arm64-linux` 三元组。新的依赖工具放在 `build/deps`；脚本不会把已有的 checkout 更新到其他提交。要复用已准备好的工具，把 `VCPKG_ROOT` 设为处于固定版本的 checkout。依赖下载仍需要网络或已填充的 vcpkg 缓存。
 
 `scripts/build.sh` 的选项：
 
@@ -69,7 +72,6 @@ sh scripts/build.sh linux --package       # 加 --webui 嵌入网页控制台
 |---|---|
 | `--package` | 测试后生成 CPack TGZ |
 | `--webui` | 构建并嵌入 WebUI（需要 Node.js 20.19+ 或 22.12+） |
-| `--browser-bundle PATH` | 打包已校验的本地浏览器（仅桌面 x86_64） |
 | `--sanitizers` | 启用 ASan/UBSan（仅桌面 Linux） |
 | `--fuzzer` | 构建 Clang libFuzzer 目标（同时启用 sanitizer） |
 | `--skip-tests` | 不构建测试目标 |
@@ -89,12 +91,12 @@ build/linux/install/bin/ais2api doctor
 
 - 以普通用户运行服务；`setup --yes` 会通过 `sudo` 安装列出的系统包，需要可用的 sudo 认证会话或交互终端。
 - Debian 13 与 Ubuntu 24.04 使用 `t64` 版本的浏览器依赖包名；其他发行版或版本会被拒绝，而不是猜测包名。
-- 无界面浏览器准备不需要 WSLg、桌面会话或 Windows Chrome。`setup` 只验证本地 CDP 与隔离上下文的创建，不登录 Google。
+- 无界面浏览器准备使用 Xvfb 虚拟显示，不需要桌面会话。`setup` 只验证本地 WebDriver BiDi 与页面桥接，不登录 Google。
 - Debian 构建的可执行文件面向 Debian 的 glibc ABI，不能替代 Ubuntu 运行包。
 
 ### Camoufox 后端
 
-默认后端为 `camoufox`，或者有账号使用 Firefox 后端时，`setup` 会安装 Camoufox：
+`setup` 默认准备 Camoufox（Firefox 身份）：
 
 ```sh
 build/linux/install/bin/ais2api setup --yes
@@ -110,7 +112,7 @@ build/linux/install/bin/ais2api setup --yes
   - 身份与 Windows 上一样呈现本机 OS，即 Linux。
   - 字体只用 Camoufox 自带的、Linux 身份会读取的四组字体（约 0.9 GB），通过 Camoufox 的 Linux fontconfig 读取，不使用系统字体。`setup` 只解压这几组字体和 Linux 的 fontconfig，安装后约 1.3 GB。
   - 字体缓存放在 `<data_dir>/runtime/camoufox-fontconfig/`，第一次启动时扫描一次。
-- ARM64：`runtime-manifest.json` 没有为这个平台锁定 CloakBrowser，准备 CloakBrowser 时返回 `unsupported_platform`。新建的配置默认就是 `camoufox`；旧配置要先把 `browser_backend` 设为 `camoufox`（或让账号使用 Firefox 后端），再运行 `setup`。
+- ARM64：与 x86_64 同样使用 Camoufox（Linux ARM64 锁定版本），新建配置默认即为 `camoufox`。
 
 ### WSL 2 中的 Debian 13
 
@@ -130,11 +132,11 @@ python3 scripts/check-package.py build/linux/packages/*.tar.gz
 不安装系统包、也不访问 Google 的前提下，可以用已准备好的浏览器显式运行隐藏的集成测试：
 
 ```sh
-AIS2API_TEST_BROWSER=/absolute/path/to/chrome \
-  build/linux/ais2api_tests '[.browser-runtime]'
+AIS2API_TEST_BROWSER=/absolute/path/to/camoufox \
+  build/linux/ais2api_tests '[.camoufox-runtime]'
 ```
 
-它使用临时资料目录，验证 CDP 与隔离上下文，并检查进程和资料目录的清理。可执行文件不存在时测试失败。普通 CTest 不包含此测试，不依赖已安装的浏览器。
+它使用临时资料目录，验证 Camoufox 启动、WebDriver BiDi 与页面桥接，并检查进程和资料目录的清理。可执行文件不存在时测试失败。普通 CTest 不包含此测试，不依赖已安装的浏览器。
 
 ### 其他编译器、sanitizer 与模糊测试
 
@@ -164,10 +166,9 @@ CXXFLAGS=-fexperimental-library sh scripts/build.sh termux --install-deps --buil
 
 ### 浏览器容器
 
-C++ 服务运行在 Termux 宿主上，浏览器运行在 Ubuntu 用户空间中。两种后端共用项目专属的 proot-distro 容器 `ais2api-browser`（Ubuntu 24.04）：
+C++ 服务运行在 Termux 宿主上；在需要 Camoufox 时，浏览器运行在项目专属的 proot-distro 容器 `ais2api-browser`（Ubuntu 24.04）中（若构建包含 SpiderMonkey 引擎，`auto` 默认在宿主进程内运行，不创建此容器）：
 
 - 没有这个容器时，`setup --yes` 会创建它，并在 `<data_dir>/runtime/proot-owned.json` 中记下容器是自己创建的。同名但没有这个记录的容器，`setup` 不会改动，返回 `unknown_container`。
-- CloakBrowser：`setup` 在容器内安装它需要的包，并生成启动器 `run-browser.sh`。
 - Camoufox：
   - 使用 Linux ARM64 版，裁剪方式与 Linux 相同，安装在 Termux 一侧的 `<data_dir>/runtime/camoufox/<版本>-termux-arm64/`。
   - 系统包与 Linux 的列表相同（含 `xvfb`），装在容器内。`setup` 读取容器的 dpkg 记录，只安装缺少的包；容器和包都已就绪时，既不询问也不运行任何命令。
@@ -238,37 +239,9 @@ python3 scripts/check-package.py PATH_TO_ARCHIVE
 
 在不解压的情况下检查必需的运行文件、依赖许可证、SHA-256，以及是否混入已知的私有或构建路径；可执行文件必须是正式版构建，包中不能含有 Camoufox。需要 Python 3.11+（仅开发使用）。
 
-## 便携数据与本地浏览器包
+## 便携数据与开发版打包
 
 默认情况下，可执行文件所在目录拥有 `config.json` 和 `data/`：下载、SQLite、准备日志、服务日志和浏览器资料都在 `data/` 中。配置中保存的本地路径相对于配置文件，因此可以整体移动目录；显式的外部路径继续有效。程序目录不可写时直接失败，而不是改写到用户目录。浏览器子进程使用私有的 HOME/XDG/AppData/temp/cache/log 路径，不影响父进程环境。系统包管理器、系统服务以及 Termux/proot 容器状态由各自的工具管理。
-
-### 构建 Browser-Local 包
-
-`Browser-Local` 包附带经过校验的浏览器，仅供本人或内部使用，受 [CloakBrowser 二进制许可](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md) 约束。**不要把带浏览器的包作为不受限制的公开发行版上传。** 用于整理和检查的 Python 脚本是开发工具，不是运行依赖。
-
-从 SHA-256 已锁定在 `runtime-manifest.json` 中的原始归档开始：
-
-```sh
-python3 scripts/browser-bundle.py stage \
-  --archive /path/to/cloakbrowser-linux-x64.tar.gz --platform linux-x64 \
-  --output build/browser-bundle-linux \
-  --license-file licenses/CloakBrowser-BINARY-LICENSE.md
-sh scripts/build.sh linux --package --browser-bundle build/browser-bundle-linux
-python3 scripts/check-package.py --with-browser build/linux/packages/*Browser-Local.tar.gz
-```
-
-Windows 使用官方 ZIP 和 `--platform windows-x64`，然后：
-
-```powershell
-./scripts/build.ps1 -Package -BrowserBundleDirectory build/browser-bundle-windows
-python scripts/check-package.py --with-browser build/windows/packages/*Browser-Local.zip
-```
-
-- 同时保留两种运行包时请使用不同的构建目录。CMake 的等价参数为 `-DAIS2API_BROWSER_BUNDLE_DIR=/absolute/clean/staged/runtime`。
-- 配置和安装阶段会校验浏览器目录的完整文件清单；CPack 只包含该浏览器目录，并在归档名后加 `-Browser-Local`。含有资料目录、配置或下载缓存的目录会被拒绝，运行时数据库和 API Key 不会被打包。
-- `init` 与 `start` 会自动使用程序旁的锁定浏览器；`setup` 可以校验每个文件并准备系统库。打包浏览器并不能免除 Linux 的系统依赖，也不会登录 Google。
-- 用 `Browser-Local` 包新建的配置默认使用 `cloakbrowser` 后端（其他包默认 `camoufox`）。CloakBrowser 已弃用，这个包只为还在使用它的安装保留。
-- `Browser-Local` 不能与开发版同时构建，将随 CloakBrowser 退役一起删除。
 
 ### 构建开发版
 
@@ -307,7 +280,9 @@ Camoufox 位于运行包的 `bin/camoufox-runtime/<版本>-<平台>/`。`doctor`
 | Ubuntu 24.04 / gcc | Release 构建（含 WebUI）、CTest、CLI 与便携目录冒烟、一键脚本冒烟、运行包校验与上传 |
 | Ubuntu 24.04 / clang + sanitizer | ASan/UBSan 构建与测试、短时线路解析器模糊测试 |
 | Debian 13 / GCC | 容器内构建（含 WebUI）、测试、冒烟与运行包上传 |
-| Windows / MSVC x64 | `x64-windows-static-release` 构建（含 WebUI）、测试、冒烟与运行包上传 |
+| Ubuntu 24.04 / GCC ARM64 | ARM64 runner 上的 Release 构建（含 WebUI）、测试、冒烟与运行包上传 |
+| Windows / MSVC x64 | 在 Visual Studio 2026 镜像（`windows-2025-vs2026`）上做 `x64-windows-static-release` 构建（含 WebUI）、测试、冒烟与运行包上传 |
+| Windows / fallback without SpiderMonkey | 在 Visual Studio 2022 镜像上关闭 SpiderMonkey 与 curl-impersonate 后构建并运行 CTest |
 
 `.github/workflows/camoufox-runtime.yml` 只在 Camoufox 相关文件改动的 PR 中运行，也可以手动运行。每次运行要多次下载约 1.3 GB 的 Camoufox。它在 Ubuntu 24.04 x64 与 ARM64 上依次：
 

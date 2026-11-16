@@ -6,7 +6,6 @@
 
 #include "ais2api/config.hpp"
 #include "ais2api/runtime.hpp"
-#include "ais2api/bundle.hpp"
 #include "ais2api/proxy.hpp"
 #include <algorithm>
 #include <cstdlib>
@@ -146,8 +145,6 @@ json::object Config::to_json(bool portable_paths) const {
           {"browser_backend", browser_backend},
           {"proxy", proxy},
           {"browser_proxy_relay", browser_proxy_relay},
-          {"browser_remote_allow_origins", browser_remote_allow_origins},
-          {"browser_site_isolation", browser_site_isolation},
           {"headless", headless},
           {"ignore_unsupported_parameters", ignore_unsupported_parameters},
           {"search_model_drop_functions", search_model_drop_functions},
@@ -172,7 +169,7 @@ void Config::save() const {
   validate();
   atomic_write(config_file, formatted_config(to_json(true)), true);
 }
-static Config parse_config(Config c, json::object o, bool explicit_browser);
+static Config parse_config(Config c, json::object o);
 Config Config::load(const fs::path &file, const json::object &overrides) {
   Config c;
   c.config_file = fs::absolute(file.empty() ? default_directory() / "config.json" : file).lexically_normal();
@@ -182,14 +179,7 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   // their stored value, including an empty key that disables management.
   if (!fs::exists(c.config_file)) {
     c.admin_key = std::string(default_admin_key);
-    // New installations start on Camoufox: CloakBrowser is deprecated, and
-    // only a package that carries it (Browser-Local) still starts on it.
-    // Existing files keep their backend, since switching an account's
-    // identity is always explicit.
-    if (bundled_browser(default_directory()).empty())
-      c.browser_backend = "camoufox";
   }
-  bool explicit_browser = false;
   auto o = c.to_json();
   std::optional<json::object> upgraded;
   std::string original;
@@ -198,23 +188,28 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
     auto v = json::parse(original);
     if (!v.is_object())
       throw Error(400, "invalid_config", "Configuration must be an object");
+    // Drop removed CDP options and map legacy "cloakbrowser" configs cleanly.
+    auto &loaded = v.as_object();
+    loaded.erase("browser_remote_allow_origins");
+    loaded.erase("browser_site_isolation");
+    if (auto backend = loaded.if_contains("browser_backend");
+        backend && backend->is_string() && backend->as_string() == "cloakbrowser")
+      *backend = "camoufox";
     // Fill missing fields recursively without changing stored paths or values.
     // Keep this separate from runtime settings so temporary overrides stay out
     // of the file, and browser auto-detection is repeated after relocation.
     upgraded = c.to_json(true);
-    merge(*upgraded, v.as_object());
-    if (auto browser = v.as_object().if_contains("browser_executable"))
-      explicit_browser = !browser->is_string() || !browser->as_string().empty();
+    merge(*upgraded, loaded);
     // File paths belong to the configuration directory, regardless of the
     // shell's working directory or the detached service's startup location.
     for (auto key : {"data_dir", "browser_executable"})
-      if (auto value = v.as_object().if_contains(key);
+      if (auto value = loaded.if_contains(key);
           value && value->is_string() && !value->as_string().empty())
         *value = path_text(absolute_path(fs::u8path(std::string(value->as_string())),
                                         c.config_file.parent_path()));
-    merge(o, v.as_object());
+    merge(o, loaded);
     // Never rewrite an invalid file, even when an override could mask it.
-    (void)parse_config(c, o, explicit_browser);
+    (void)parse_config(c, o);
   }
   json::object e;
   for (auto pair : {std::pair{"AIS2API_ADMIN_KEY", "admin_key"},
@@ -227,11 +222,14 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
     if (env_exists(pair.first))
       e[pair.second] = v;
   }
+  // Containers set up for the removed CloakBrowser backend may still export
+  // AIS2API_BROWSER_BACKEND=cloakbrowser; it migrates like a stored value.
+  if (auto backend = e.if_contains("browser_backend");
+      backend && backend->is_string() && backend->as_string() == "cloakbrowser")
+    *backend = "camoufox";
   for (auto pair :
        {std::pair{"AIS2API_PORT", "port"}, {"AIS2API_HEADLESS", "headless"},
         {"AIS2API_BROWSER_PROXY_RELAY", "browser_proxy_relay"},
-        {"AIS2API_BROWSER_REMOTE_ALLOW_ORIGINS", "browser_remote_allow_origins"},
-        {"AIS2API_BROWSER_SITE_ISOLATION", "browser_site_isolation"},
         {"AIS2API_IGNORE_UNSUPPORTED_PARAMETERS", "ignore_unsupported_parameters"},
         {"AIS2API_SEARCH_MODEL_DROP_FUNCTIONS", "search_model_drop_functions"},
         {"AIS2API_CONTINUATION_RETRY_ENABLED", "continuation_retry_enabled"},
@@ -288,9 +286,7 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   }
   merge(o, e);
   merge(o, overrides);
-  explicit_browser = explicit_browser || e.contains("browser_executable") ||
-                     overrides.contains("browser_executable");
-  auto result = parse_config(std::move(c), std::move(o), explicit_browser);
+  auto result = parse_config(std::move(c), std::move(o));
   if (upgraded) {
     const auto formatted = formatted_config(*upgraded);
     if (formatted != original)
@@ -298,10 +294,11 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   }
   return result;
 }
-static Config parse_config(Config c, json::object o, bool explicit_browser) {
+static Config parse_config(Config c, json::object o) {
   fields(o, {"version", "bind", "port", "api_key", "admin_key", "admin_origins", "cookie_import_key",
              "cookie_import_max_accounts", "cookie_import_timeout_seconds", "data_dir", "browser_executable",
-             "browser_backend", "proxy", "browser_proxy_relay", "browser_remote_allow_origins", "browser_site_isolation", "headless", "ignore_unsupported_parameters", "search_model_drop_functions", "browser_idle_seconds", "limits", "model_aliases",
+             "browser_backend", "proxy", "browser_proxy_relay", "headless", "ignore_unsupported_parameters",
+             "search_model_drop_functions", "browser_idle_seconds", "limits", "model_aliases",
              "configured_models", "model_defaults", "request_retention_days", "continuation_retry_enabled"});
   auto text = [&](const char *k) {
     if (!o.at(k).is_string())
@@ -334,21 +331,13 @@ static Config parse_config(Config c, json::object o, bool explicit_browser) {
     c.data_dir = fs::absolute(c.data_dir).lexically_normal();
   if (!c.browser_executable.empty())
     c.browser_executable = fs::absolute(c.browser_executable).lexically_normal();
-  else if (!explicit_browser)
-    c.browser_executable = bundled_browser(Config::default_directory());
   c.browser_backend = text("browser_backend");
-  if (c.browser_backend != "cloakbrowser" && c.browser_backend != "camoufox")
-    throw Error(400, "invalid_config", "browser_backend must be cloakbrowser or camoufox");
+  if (c.browser_backend != "camoufox")
+    throw Error(400, "invalid_config", "browser_backend must be camoufox");
   c.proxy = text("proxy");
   if (!o.at("browser_proxy_relay").is_bool())
     throw Error(400, "invalid_config", "browser_proxy_relay must be boolean");
   c.browser_proxy_relay = o.at("browser_proxy_relay").as_bool();
-  if (!o.at("browser_remote_allow_origins").is_bool())
-    throw Error(400, "invalid_config", "browser_remote_allow_origins must be boolean");
-  c.browser_remote_allow_origins = o.at("browser_remote_allow_origins").as_bool();
-  if (!o.at("browser_site_isolation").is_bool())
-    throw Error(400, "invalid_config", "browser_site_isolation must be boolean");
-  c.browser_site_isolation = o.at("browser_site_isolation").as_bool();
   if (!o.at("headless").is_bool())
     throw Error(400, "invalid_config", "headless must be boolean");
   c.headless = o.at("headless").as_bool();
@@ -413,14 +402,12 @@ Config Config::patched(const json::object& patch) const {
   if (auto value = patch.if_contains("admin_key"); value && value->is_string() && value->as_string() == default_admin_key)
     throw Error(400, "admin_password_invalid", "The default management password cannot be configured");
   // Only limits merge recursively. Model maps and arrays replace the old value.
-  return parse_config(*this, std::move(o), true);
+  return parse_config(*this, std::move(o));
 }
 bool restart_required(const Config& previous, const Config& next) {
   return next.bind != previous.bind || next.port != previous.port ||
     next.data_dir != previous.data_dir || next.browser_executable != previous.browser_executable ||
     next.proxy != previous.proxy || next.browser_proxy_relay != previous.browser_proxy_relay ||
-    next.browser_remote_allow_origins != previous.browser_remote_allow_origins ||
-    next.browser_site_isolation != previous.browser_site_isolation ||
     next.headless != previous.headless ||
     next.limits.generation_seconds != previous.limits.generation_seconds ||
     next.limits.stream_idle_seconds != previous.limits.stream_idle_seconds ||
@@ -488,7 +475,7 @@ void Config::validate() const {
       }))
     throw Error(400, "invalid_config", "cookie_import_key must be empty or at most 4096 visible ASCII characters without whitespace");
   // Only the relay needs a single parseable proxy URL; the direct path keeps
-  // passing other forms (such as Chromium proxy rules) through unchanged.
+  // passing other forms through unchanged.
   if (browser_proxy_relay && !proxy.empty()) {
     const auto endpoint = parse_proxy(proxy);
     if (!endpoint || !relay_supports(*endpoint))

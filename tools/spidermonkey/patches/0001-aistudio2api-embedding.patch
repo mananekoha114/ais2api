@@ -116,7 +116,7 @@ diff -ruN a/js/src/vm/FrameIter.cpp b/js/src/vm/FrameIter.cpp
    }
  }
  
-+// IsHiddenScript 判断脚本是否不出现在调用方帧中：自托管脚本与嵌入方以 self-hosted 来源名编译的宿主脚本
++// IsHiddenScript hides engine self-hosted scripts and host scripts named "self-hosted".
 +static bool IsHiddenScript(JSScript* script) {
 +  if (script->selfHosted()) {
 +    return true;
@@ -170,7 +170,7 @@ diff -ruN a/js/src/vm/GlobalObject.cpp b/js/src/vm/GlobalObject.cpp
    return true;
  }
  
-+// resolveExistingConstructor 在宿主预先使用标准类后按用户脚本的使用顺序暴露构造器
++// resolveExistingConstructor exposes standard constructors in user-script access order.
 +bool GlobalObject::resolveExistingConstructor(JSContext* cx,
 +                                             Handle<GlobalObject*> global,
 +                                             JSProtoKey key) {
@@ -201,7 +201,7 @@ diff -ruN a/js/src/vm/GlobalObject.cpp b/js/src/vm/GlobalObject.cpp
 +  return resolve(cx, object, id, &resolved);
 +}
 +
-+// mozjs_delete_global_property 挂起宿主安装时定义的全局属性
++// mozjs_delete_global_property removes a global property installed during host setup.
 +extern "C" MOZ_EXPORT bool mozjs_delete_global_property(JSContext* cx,
 +                                                       JSObject* global,
 +                                                       HandleId id) {

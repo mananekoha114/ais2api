@@ -42,12 +42,10 @@
 |---|---|---|---|
 | `data_dir` | 字符串，程序旁 `data/` | 重启 | 数据库、日志、下载与浏览器临时资料所在目录。 |
 | `browser_executable` | 字符串，`""` | 重启 | 浏览器路径。留空时自动使用程序旁 `browser-runtime/` 中的锁定浏览器，或 `setup` 安装的浏览器。`camoufox` 后端只在它指向 Camoufox（`camoufox[.exe]` 或 Linux 的 `camoufox-bin`）时使用它，否则使用开发版打包的 Camoufox，再其次是 `setup` 安装的 Camoufox。 |
-| `browser_backend` | 字符串，新建的配置为 `"camoufox"`；没有这一项的旧配置按 `"cloakbrowser"` 处理 | 热更新 | **新账号**的默认浏览器后端，Cookie 导入也用它验证。已保存的账号各自记住自己的后端，修改此项不会改变它们，见 [按账号选择后端](browser.md#按账号选择后端)。`camoufox` 是 Firefox 后端（通过 WebDriver BiDi 驱动 Camoufox，见 [Firefox 后端迁移计划](firefox-backends.md)），新账号保存为“自动”；需要的运行时由 `ais2api setup` 安装，每个账号的 Firefox 身份在本机生成并随指纹保存。`cloakbrowser` **已弃用**，将在以后的版本中移除。 |
+| `browser_backend` | 字符串，`"camoufox"` | 热更新 | **新账号**的默认浏览器后端，Cookie 导入也用它验证（遗留配置中缺少此项或为 `"cloakbrowser"` 时会自动迁移为 `"camoufox"`）。已保存的账号各自记住自己的后端，修改此项不会改变它们，见 [按账号选择后端](browser.md#按账号选择后端)。设为 `"camoufox"` 时，新账号保存为 `"auto"`：桌面与服务器默认运行 Camoufox，Termux 在编译包含 SpiderMonkey 时默认运行进程内 SpiderMonkey（无需安装 `proot` 容器）；当就地重建会话后仍遇到 403 且另一 Firefox 后端已安装就绪时，该账号会自动临时切换到另一后端 6 小时（见 [Firefox 后端迁移计划](firefox-backends.md)）。需要的运行时由 `ais2api setup` 安装，每个账号的 Firefox 身份在本机生成并随指纹保存。 |
 | `headless` | 布尔，`true` | 重启 | 是否以无界面模式运行浏览器。Linux 和 Termux 上的 Camoufox 总是有界面运行：为 `true` 时使用 Xvfb 虚拟显示，为 `false` 时使用桌面会话的显示（Termux 上为 Termux:X11），见 [Camoufox 后端](platforms.md#camoufox-后端)。 |
 | `proxy` | 字符串，`""` | 重启 | 上游代理，同时用于浏览器和服务端下载。 |
 | `browser_proxy_relay` | 布尔，`false` | 重启 | 开启本机转发代理，让浏览器能使用带用户名密码的 HTTP 或 SOCKS5 代理，详见下文。 |
-| `browser_remote_allow_origins` | 布尔，`false` | 重启 | 以 `--remote-allow-origins=*` 启动浏览器，允许任意来源的网页连接本机 DevTools WebSocket。ais2api 自身不需要；仅供外部 CDP 工具使用，开启后本机浏览器中打开的网页也能尝试连接该端口。 |
-| `browser_site_isolation` | 布尔，`true` | 重启 | Chromium 站点隔离。设为 `false` 可在小内存主机上节省渲染进程内存，代价是不同站点不再分进程隔离。 |
 | `browser_idle_seconds` | `0` 或 10–86400，`0` | 热更新 | 连续空闲多少秒后关闭浏览器以释放内存；`0` 表示不关闭。 |
 | `request_retention_days` | 1–3650，`90` | 热更新 | 已结束请求明细的保存天数；后台分批清理，累计用量和费用继续保留。 |
 
@@ -93,8 +91,6 @@
 | `headless` | `AIS2API_HEADLESS` | `--headless=true\|false` |
 | `proxy` | `AIS2API_PROXY` | `--proxy URL` |
 | `browser_proxy_relay` | `AIS2API_BROWSER_PROXY_RELAY` | `--browser-proxy-relay=true\|false` |
-| `browser_remote_allow_origins` | `AIS2API_BROWSER_REMOTE_ALLOW_ORIGINS` | — |
-| `browser_site_isolation` | `AIS2API_BROWSER_SITE_ISOLATION` | — |
 | `browser_idle_seconds` | `AIS2API_BROWSER_IDLE_SECONDS` | `--browser-idle-seconds N` |
 | `request_retention_days` | `AIS2API_REQUEST_RETENTION_DAYS` | — |
 | `ignore_unsupported_parameters` | `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS` | — |
@@ -115,8 +111,8 @@
 
 ## 热更新与重启
 
-- **需要重启**的字段：`bind`、`port`、`data_dir`、`browser_executable`、`proxy`、`browser_proxy_relay`、`browser_remote_allow_origins`、`browser_site_isolation`、`headless`、`limits.generation_seconds`、`limits.stream_idle_seconds`、`limits.object_bytes`、`limits.relay_bytes`。
-- 其余字段都可热更新。热更新前会校验完整配置；校验失败时保留原配置。
+- **需要重启**的字段：`bind`、`port`、`data_dir`、`browser_executable`、`proxy`、`browser_proxy_relay`、`headless`、`limits.generation_seconds`、`limits.stream_idle_seconds`、`limits.object_bytes`、`limits.relay_bytes`。
+- 其余字段都可热更新。热更新前会校验完整配置；校验失败时保留原配置。旧版配置中的 `browser_remote_allow_origins`、`browser_site_isolation` 会在加载时自动移除。
 - `ais2api config reload` 重新读取配置文件和环境变量。存在需要重启的差异时返回 `restart_required`，不会只应用其中一部分。
 - 通过管理 API 或 WebUI 保存时，如果修改中包含需要重启的字段，整份配置会作为“待重启配置”保存到磁盘，当前进程继续使用原配置；之后的修改以待重启配置为基础叠加。详见 [管理 API](management-api.md#配置保存与重启)。
 
@@ -138,7 +134,7 @@
 
 ### 使用带账号密码的代理
 
-Chromium 不能直接使用带用户名密码的代理，也不支持 SOCKS 认证。开启本机转发代理：
+浏览器不能直接使用带用户名密码的代理，也不支持 SOCKS 认证。开启本机转发代理：
 
 ```json
 {

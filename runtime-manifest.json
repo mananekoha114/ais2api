@@ -1,24 +1,6 @@
 {
   "version": 1,
   "adapter": "aistudio-web-v1",
-  "browser_version": "146.0.7680.177.4",
-  "artifacts": {
-    "windows-x64": {
-      "url": "https://github.com/CloakHQ/CloakBrowser/releases/download/chromium-v146.0.7680.177.4/cloakbrowser-windows-x64.zip",
-      "sha256": "759670947e041a956a198c2d66be501cc767ae8bdba6e33f9b8be76909c4d829",
-      "size": 562002702
-    },
-    "linux-x64": {
-      "url": "https://github.com/CloakHQ/CloakBrowser/releases/download/chromium-v146.0.7680.177.4/cloakbrowser-linux-x64.tar.gz",
-      "sha256": "5af027faafb1fef9933eb784c094b764706de22a372a2cee84bc117fc4ab537f",
-      "size": 216887226
-    },
-    "termux-arm64": {
-      "url": "https://github.com/CloakHQ/CloakBrowser/releases/download/chromium-v146.0.7680.177.4/cloakbrowser-linux-arm64.tar.gz",
-      "sha256": "8b71ce53b4fd131327331a31fba3835d71882d19bfaabde78dd0f5390bd16f45",
-      "size": 208053005
-    }
-  },
   "camoufox": {
     "version": "158.0.1-beta.41",
     "artifacts": {

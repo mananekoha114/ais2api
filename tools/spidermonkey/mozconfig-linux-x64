@@ -1,0 +1,23 @@
+# SpiderMonkey 158.0.1 as a static PIC library for ais2api: linux-x64
+# (Ubuntu 24.04 LTS / glibc 2.39 baseline). Used by build-unix.sh.
+
+ac_add_options --enable-project=js
+ac_add_options --target=x86_64-pc-linux-gnu
+ac_add_options --enable-optimize
+ac_add_options --disable-debug
+
+ac_add_options --disable-shared-js
+ac_add_options --disable-export-js
+ac_add_options --disable-jemalloc
+ac_add_options --disable-ctypes
+ac_add_options --disable-tests
+
+# Bootstrap Mozilla's pinned Clang + cbindgen, while compiling directly against
+# the host Ubuntu 24.04 glibc 2.39 + libstdc++ headers (--without-sysroot).
+ac_add_options --enable-bootstrap
+ac_add_options --without-sysroot
+ac_add_options --enable-linker=lld
+
+export CFLAGS="-fPIC"
+export CXXFLAGS="-fPIC"
+export RUSTFLAGS="-C relocation-model=pic"

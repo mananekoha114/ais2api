@@ -82,16 +82,12 @@ class Service {
     explicit Service(Config config, std::unique_ptr<GenerationBackend> backend)
         : config_(std::move(config)), journal_(config_.data_dir), store_(config_.data_dir),
           prices_(store_, [this] { return this->config(); }, !backend),
+          custom_backend_(bool(backend)),
           gateway_(backend ? std::move(backend) : std::make_unique<BackendRouter>(config_, store_)),
           worker_([this](std::stop_token token) { work_loop(token); }) {
         store_.recover_requests();
-        // Accounts from before per-account backends keep the one they used.
+        // Unsettled accounts settle onto "auto".
         adopt_backends(store_, config_);
-        for (const auto &item : backend_deprecations(config_.browser_backend, store_.stored_backends())) {
-            json::object record{{"event", "backend_deprecated"}};
-            for (const auto &field : item.as_object()) record.insert_or_assign(field.key(), field.value());
-            log(std::move(record));
-        }
         // serve() holds the instance lock, so no other process uses them.
         try {
             if (const auto removed = remove_profile_leftovers(config_.data_dir))
@@ -231,8 +227,14 @@ class Service {
             // Every backend the accounts need must be installed.
             const auto cfg = config();
             const auto runtime = doctor(cfg, Config::default_directory(), store_.stored_backends());
-            const bool ready = (!cfg.api_key.empty() || !store_.managed_keys().empty()) && store_.choose("readiness").has_value() &&
-                               bool_or(runtime, "browser_exists");
+            bool browser_exists = bool_or(runtime, "browser_exists");
+            // Injected test backends supply only a regular-file placeholder for /ready.
+            if (!browser_exists && custom_backend_ && !cfg.browser_executable.empty()) {
+                std::error_code ec;
+                browser_exists = fs::is_regular_file(cfg.browser_executable, ec);
+            }
+            const bool ready = (!cfg.api_key.empty() || !store_.managed_keys().empty()) &&
+                               store_.choose("readiness").has_value() && browser_exists;
             std::lock_guard lock(queue_mutex_);
             return {{"running", true},
                     {"version", "0.1.0"},
@@ -335,7 +337,7 @@ class Service {
             }
             return result;
         }
-        if (action == "rotation.status") return store_.rotation_status();
+        if (action == "rotation.status") return store_.rotation_status(config());
         if (action == "browser.diagnostics") return gateway_->diagnostics();
         if (action == "rotation.next") return {{"preferred_account_id", store_.rotate_account()},
             {"browser_prepared", false}};
@@ -363,7 +365,7 @@ class Service {
         catch (...) { sources.browser = {{"status", "unavailable"}}; }
         sources.runtime = doctor(cfg, Config::default_directory(), store_.stored_backends());
         sources.config = cfg;
-        sources.accounts = store_.account_status();
+        sources.accounts = store_.account_status(cfg);
         sources.events = store_.backend_events();
         sources.journal = recent_failure_records(journal_);
         sources.logs = log_sources(cfg.data_dir);
@@ -480,6 +482,7 @@ class Service {
     Store store_;
     PriceService prices_;
     std::atomic<bool> usage_healthy_{true};
+    const bool custom_backend_;
     std::unique_ptr<GenerationBackend> gateway_;
     std::mutex queue_mutex_, operations_mutex_;
     std::condition_variable available_;
@@ -777,7 +780,10 @@ class Service {
             bool delivered = false;
             // One in-place session rebuild or browser restart per request.
             bool recovered = false;
-            for (unsigned attempt = 0; attempt < cfg.limits.max_attempts; ++attempt) {
+            // One automatic 6-hour Firefox backend switch per request.
+            bool switched_backend = false;
+            unsigned max_attempts = cfg.limits.max_attempts;
+            for (unsigned attempt = 0; attempt < max_attempts; ++attempt) {
                 ++trace.attempts;
                 check_cancel(token);
                 auto account = retry_account ? std::exchange(retry_account, std::nullopt) : store_.choose(request.model, excluded, true);
@@ -892,7 +898,8 @@ class Service {
                     count_error(backend, e.code);
                     if (token.stop_requested() || delivered || continuing)
                         throw;
-                    const bool last = attempt + 1 == cfg.limits.max_attempts;
+                    const bool last = attempt + 1 >= max_attempts;
+                    const bool was_recovered = recovered;
                     auto decision = classify_failure(e, attempt, recovered);
                     // Without an attempt left a recovery cannot run; judge the
                     // failure as if the recovery had already failed.
@@ -938,6 +945,25 @@ class Service {
                         continue;
                     }
                     case FailureAction::cool_and_switch:
+                        if (was_recovered && !switched_backend &&
+                            (decision.cooldown == "permission_temporary" || decision.cooldown == "permission")) {
+                            if (auto *router = dynamic_cast<BackendRouter *>(gateway_.get())) {
+                                if (const auto next_backend = router->alternate_firefox_backend(*account)) {
+                                    switched_backend = true;
+                                    store_.switch_backend(account->id, *next_backend, backend_switch_seconds);
+                                    count_event(backend, "backend_switch");
+                                    log({{"event", "backend_switch"},
+                                         {"request_id", work->usage->id()},
+                                         {"account_id", account->id},
+                                         {"from_backend", backend},
+                                         {"to_backend", *next_backend},
+                                         {"code", e.code}});
+                                    retry_account = account;
+                                    ++max_attempts;
+                                    continue;
+                                }
+                            }
+                        }
                         store_.failure(account->id, request.model, decision.cooldown, e.retry_after);
                         count_cooldown(backend, decision.cooldown);
                         log({{"event", "account_failure"}, {"request_id", work->usage->id()},

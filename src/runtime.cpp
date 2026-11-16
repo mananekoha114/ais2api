@@ -31,8 +31,6 @@ std::map<std::string, std::string> child_overrides(const Config &effective) {
                       {"browser_backend", "AIS2API_BROWSER_BACKEND"},
                       {"proxy", "AIS2API_PROXY"},
                       {"browser_proxy_relay", "AIS2API_BROWSER_PROXY_RELAY"},
-                      {"browser_remote_allow_origins", "AIS2API_BROWSER_REMOTE_ALLOW_ORIGINS"},
-                      {"browser_site_isolation", "AIS2API_BROWSER_SITE_ISOLATION"},
                       {"headless", "AIS2API_HEADLESS"},
                       {"continuation_retry_enabled", "AIS2API_CONTINUATION_RETRY_ENABLED"},
                       {"browser_idle_seconds", "AIS2API_BROWSER_IDLE_SECONDS"},

@@ -13,7 +13,7 @@ import { session, signIn } from '../stores/session'
 import { confirm, copyText, notify, notifyError } from '../stores/ui'
 import { formatBytes } from '../utils/format'
 
-type ScalarKey = 'bind' | 'port' | 'proxy' | 'browser_proxy_relay' | 'browser_remote_allow_origins' | 'browser_site_isolation' | 'data_dir' | 'browser_executable' | 'headless' | 'ignore_unsupported_parameters' | 'search_model_drop_functions' | 'continuation_retry_enabled' | 'browser_idle_seconds' | 'cookie_import_max_accounts' | 'cookie_import_timeout_seconds'
+type ScalarKey = 'bind' | 'port' | 'proxy' | 'browser_proxy_relay' | 'data_dir' | 'browser_executable' | 'headless' | 'ignore_unsupported_parameters' | 'search_model_drop_functions' | 'continuation_retry_enabled' | 'browser_idle_seconds' | 'cookie_import_max_accounts' | 'cookie_import_timeout_seconds'
 
 interface FieldDef {
   key: ScalarKey | `limits.${keyof Limits}`
@@ -61,10 +61,8 @@ const groups: { title: string; icon: IconName; fields: FieldDef[] }[] = [
     icon: 'desktop',
     fields: [
       { key: 'headless', label: '无头模式', desc: '关闭后会显示浏览器窗口，便于排查登录问题。', type: 'bool', restart: true },
-      { key: 'browser_executable', label: '浏览器路径', desc: '留空则自动使用程序旁的 browser-runtime。', type: 'text', restart: true, placeholder: '自动检测' },
+      { key: 'browser_executable', label: '浏览器路径', desc: '可选自定义 Camoufox 可执行文件路径；留空则自动使用打包或 setup 安装的 Camoufox。', type: 'text', restart: true, placeholder: '自动检测' },
       { key: 'data_dir', label: '数据目录', desc: '数据库、日志、浏览器资料所在目录。相对路径以配置文件所在目录为基准。', type: 'text', restart: true },
-      { key: 'browser_site_isolation', label: '站点隔离', desc: '默认开启。关闭后不同站点不再分进程隔离，可在小内存主机上节省渲染进程内存，但隔离性变弱。', type: 'bool', restart: true },
-      { key: 'browser_remote_allow_origins', label: '允许任意来源连接 DevTools', desc: '默认关闭。开启后以 --remote-allow-origins=* 启动浏览器，任意来源的网页都可以连接本机的 DevTools 端口。ais2api 自身不需要，仅供外部 CDP 工具使用。', type: 'bool', restart: true },
       { key: 'browser_idle_seconds', label: '空闲时回收浏览器', desc: '激进的内存优化，0 表示关闭（默认）。连续这么多秒没有任何请求时关闭浏览器以释放内存，关闭前会写回 Cookie；之后的第一个请求需要重新启动浏览器、打开页面并引导，会明显变慢。可设为 10–86400 秒，建议不低于 600。保存后立即生效。', type: 'number', min: 0, max: 86400, unit: 's' },
     ],
   },

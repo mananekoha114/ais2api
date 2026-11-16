@@ -858,7 +858,7 @@
       },
       "patch": {
         "operationId": "patch_accounts_id_fingerprint",
-        "summary": "Override or reset fingerprint timezone/locale (null restores host default), or change the browser backend; moving between CloakBrowser and Firefox needs confirm_identity_change",
+        "summary": "Override or reset fingerprint timezone/locale (null restores host default), or change the browser backend",
         "responses": {
           "200": {
             "description": "Fingerprint",
@@ -888,9 +888,6 @@
           },
           "404": {
             "description": "Resource or route does not exist"
-          },
-          "409": {
-            "description": "identity_change_unconfirmed: the backend change swaps the account identity"
           },
           "429": {
             "description": "Queue, operation or memory admission limit"
@@ -930,7 +927,6 @@
                   "backend": {
                     "type": "string",
                     "enum": [
-                      "cloakbrowser",
                       "auto",
                       "camoufox",
                       "spidermonkey"
@@ -938,7 +934,8 @@
                     "description": "spidermonkey is rejected with backend_unavailable by a build without that backend"
                   },
                   "confirm_identity_change": {
-                    "type": "boolean"
+                    "type": "boolean",
+                    "description": "Deprecated no-op retained for compatibility; all active backends share the Firefox identity"
                   }
                 }
               }
@@ -2925,12 +2922,25 @@
             "type": "string",
             "enum": [
               "",
-              "cloakbrowser",
               "auto",
               "camoufox",
               "spidermonkey"
             ],
             "description": "Stored browser backend; empty only before the account settles"
+          },
+          "effective_backend": {
+            "type": "string",
+            "enum": [
+              "",
+              "camoufox",
+              "spidermonkey"
+            ],
+            "description": "Gateway currently serving the account; empty only when unsettled without an active config"
+          },
+          "backend_switched_until": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Unix seconds until an automatic 6-hour backend failover for an auto account expires; omitted when not switched"
           },
           "firefox_identity": {
             "type": "boolean"
@@ -3136,7 +3146,7 @@
           },
           "deprecations": {
             "type": "array",
-            "description": "What this installation still uses that a later release removes. cloakbrowser_backend: new accounts (default_backend) or stored ones (accounts) are on CloakBrowser.",
+            "description": "Active deprecations remaining in this installation (empty array).",
             "items": {
               "type": "object",
               "properties": {
@@ -3546,7 +3556,7 @@
             "type": "integer",
             "minimum": 10000,
             "maximum": 99999,
-            "description": "Permanent seed of the CloakBrowser fingerprint and the Firefox identity"
+            "description": "Permanent seed of the Firefox identity"
           },
           "platform": {
             "type": "string",
@@ -3579,7 +3589,6 @@
           "backend": {
             "type": "string",
             "enum": [
-              "cloakbrowser",
               "auto",
               "camoufox",
               "spidermonkey"
@@ -3589,16 +3598,19 @@
           "effective_backend": {
             "type": "string",
             "enum": [
-              "cloakbrowser",
               "camoufox",
               "spidermonkey"
             ],
-            "description": "Gateway that serves the account now; auto runs on Camoufox, and so does spidermonkey in a build without that backend"
+            "description": "Gateway that serves the account now, taking any active 6-hour automatic failover switch into account"
+          },
+          "backend_switched_until": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Unix seconds until an automatic 6-hour backend failover for an auto account expires; omitted when not switched"
           },
           "identity": {
             "type": "string",
             "enum": [
-              "chrome",
               "firefox"
             ]
           },

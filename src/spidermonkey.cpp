@@ -13,13 +13,16 @@
 #include "../browser/generation.hpp"
 #include "../browser/google_auth.hpp"
 #include "ais2api/browser.hpp"
+#include "ais2api/camoufox.hpp"
 #include "ais2api/console.hpp"
 #include "ais2api/firefox_identity.hpp"
 #include "ais2api/region.hpp"
+#include "ais2api/runtime.hpp"
 #include "ais2api/store.hpp"
 #include <algorithm>
 #include <cctype>
 #include <condition_variable>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <tuple>
@@ -44,9 +47,10 @@ constexpr std::string_view waa_api_key = "AIzaSyBGb5fGAyC-pRcRU6MUHb__b_vKha71HR
 constexpr auto vm_lifetime = 12h;
 // The page counts its prompt box's tokens this long after Run.
 constexpr auto count_tokens_delay = 2200ms;
-// The Firefox the prototype claims: the version of its SpiderMonkey and of
-// the shape table the host follows.
+// The Firefox the backend claims: the version of its SpiderMonkey and of the
+// shape table the host follows.
 constexpr std::string_view claimed_firefox = "158";
+constexpr std::string_view generated_firefox_version = "158.0";
 // Firefox follows at most this many redirects in a row.
 constexpr int redirect_limit = 20;
 
@@ -122,8 +126,26 @@ struct SpiderMonkeyGateway::Impl {
 
     // The resident account: its cookies and connections, and the identity the
     // page's requests and host show.
-    std::string account_id, account_fingerprint, auth_user = "0";
+    struct SessionIdentity {
+        std::shared_ptr<const firefox_identity::Identity> identity;
+        std::string digest;
+        unsigned seed = 0;
+        std::string timezone, locale;
+        bool operator==(const SessionIdentity &other) const {
+            return digest == other.digest && seed == other.seed && timezone == other.timezone && locale == other.locale;
+        }
+    };
+    struct StoredIdentity {
+        std::string account;
+        unsigned seed = 0;
+        std::shared_ptr<const firefox_identity::Identity> identity;
+        std::string digest;
+    };
+    std::string account_id, account_fingerprint, auth_user = "0", adopted_page_id;
+    std::optional<SessionIdentity> active_identity;
+    std::optional<StoredIdentity> stored_identity;
     json::object session_state;
+    json::array base_template;
     std::unique_ptr<HttpSession> http;
     sm::HostIdentity host;
     sm::PageHeaders headers;
@@ -171,6 +193,10 @@ struct SpiderMonkeyGateway::Impl {
 
     void drop_page() noexcept {
         running = answering = nullptr;
+        pending_experiment.reset();
+        page_runs = {};
+        base_template.clear();
+        adopted_page_id.clear();
         // The program's loads use the session: they end before it does.
         vm.reset();
         page.reset();
@@ -186,6 +212,7 @@ struct SpiderMonkeyGateway::Impl {
         }
         drop_page();
         http.reset();
+        active_identity.reset();
         account_id.clear();
         account_fingerprint.clear();
         session_state = {};
@@ -197,34 +224,90 @@ struct SpiderMonkeyGateway::Impl {
         return sha256(json::serialize(account.storage_state) + "\n" + account.auth_user + "\n" + account.email);
     }
 
+    json::object identity_summary(const firefox_identity::Identity &identity) const {
+        return {{"platform", firefox_identity::os_name(identity.os)},
+                {"userAgent", headers.user_agent},
+                {"claimsHostGpu", identity.claims_host_gpu},
+                {"canvasCovered", identity.canvas_covered},
+                {"hostGpu", "not_checked"},
+                {"model", identity.model},
+                {"catalog", identity.catalog.substr(0, 12)},
+                {"generatedFor", identity.browser}};
+    }
+
+    // The account's identity: the stored one, or one generated for it now
+    // without launching a browser and stored with its seed. An account being
+    // imported is not stored yet; its identity is generated from the seed the
+    // store will assign it, so its first stored request draws the same one.
+    SessionIdentity identity_for(const Account &account) {
+        BrowserFingerprint fingerprint;
+        bool stored = true;
+        try {
+            fingerprint = store.fingerprint(account.id);
+        } catch (const Error &error) {
+            if (error.code != "account_not_found") throw;
+            fingerprint.seed = default_fingerprint_seed(account.id);
+            stored = false;
+        }
+        SessionIdentity result{nullptr, {}, fingerprint.seed,
+                               fingerprint.timezone.empty() ? host_timezone() : fingerprint.timezone,
+                               fingerprint.locale.empty() ? host_locale() : fingerprint.locale};
+        if (stored && stored_identity && stored_identity->account == account.id && stored_identity->seed == fingerprint.seed) {
+            result.identity = stored_identity->identity;
+            result.digest = stored_identity->digest;
+            return result;
+        }
+        auto saved = stored ? store.firefox_identity(account.id) : std::nullopt;
+        if (!saved) {
+            FpgenModelPin pin;
+            try {
+                pin = fpgen_model_pin();
+            } catch (const Error &error) {
+                throw Error(503, "browser_not_configured", std::string("The fpgen model is not pinned: ") + error.what());
+            }
+            const auto model = load_fpgen_model(config.data_dir, pin);
+            auto machine = firefox_identity::local_host();
+            machine.gpu = std::nullopt;
+            const auto generated = firefox_identity::generate(
+                model, pin.tag, machine,
+                browser_detail::identity_salt(store.identity_secret(), account.id, fingerprint.seed),
+                generated_firefox_version);
+            saved = firefox_identity::to_json(generated);
+            (*saved)["seed"] = fingerprint.seed;
+            if (stored) store.save_firefox_identity(account.id, *saved);
+            console::emit_record({{"event", "spidermonkey_identity"},
+                                  {"account_id", account.id},
+                                  {"stored", stored},
+                                  {"claims_host_gpu", generated.claims_host_gpu},
+                                  {"canvas_covered", generated.canvas_covered}});
+        }
+        auto identity = std::make_shared<const firefox_identity::Identity>(firefox_identity::from_json(*saved));
+        result.identity = identity;
+        result.digest = sha256(json::serialize(*saved));
+        if (stored) stored_identity = StoredIdentity{account.id, fingerprint.seed, identity, result.digest};
+        return result;
+    }
+
     // The account's cookies, identity and connections, kept while the account
     // and its stored state stay the same.
     void ensure_session(const Account &account) {
-        if (http && account.id == account_id && fingerprint_of(account) == account_fingerprint) return;
-        close();
-        phase = "session";
         if (account.auth_user.empty() || account.auth_user.size() > 3 ||
             !std::all_of(account.auth_user.begin(), account.auth_user.end(), [](unsigned char c) { return std::isdigit(c); }))
             throw Error(400, "invalid_auth_user", "auth_user must be a nonnegative integer");
         const auto *cookies = account.storage_state.if_contains("cookies");
         if (!cookies || !cookies->is_array() || cookies->as_array().empty())
             throw Error(401, "missing_cookies", "Account has no storage-state cookies");
-        const auto saved = store.firefox_identity(account.id);
-        if (!saved)
-            throw Error(503, "browser_not_configured",
-                        "The account has no Firefox identity yet: serve one request with the camoufox backend first");
-        BrowserFingerprint fingerprint;
-        try {
-            fingerprint = store.fingerprint(account.id);
-        } catch (const Error &error) {
-            if (error.code != "account_not_found") throw;
-        }
-        const auto identity = firefox_identity::from_json(*saved);
+        const auto next_identity = identity_for(account);
+        if (http && adopted_page_id.empty() && account.id == account_id && fingerprint_of(account) == account_fingerprint &&
+            active_identity == next_identity)
+            return;
+        close();
+        phase = "session";
+        const auto &identity = *next_identity.identity;
         auto config_values = identity.config;
         if (auto *user_agent = config_values.if_contains("navigator.userAgent"); user_agent && user_agent->is_string())
             *user_agent = firefox_identity::detail::rewrite_version(user_agent->as_string(), claimed_firefox);
-        firefox_identity::detail::apply_locale(config_values, fingerprint.locale.empty() ? host_locale() : fingerprint.locale,
-                                               fingerprint.timezone.empty() ? host_timezone() : fingerprint.timezone);
+        firefox_identity::detail::apply_locale(config_values, next_identity.locale, next_identity.timezone);
         host = sm::host_identity(config_values);
         if (host.user_agent.empty()) incompatible("The account's Firefox identity has no user agent");
         headers = {host.user_agent, host.accept_language, HttpSession::accept_encoding()};
@@ -233,12 +316,71 @@ struct SpiderMonkeyGateway::Impl {
         options.proxy = config.proxy;
         options.cookies = browser_detail::injected_cookies(cookies->as_array());
         http = std::make_unique<HttpSession>(std::move(options));
+        active_identity = next_identity;
         account_id = account.id;
         account_fingerprint = fingerprint_of(account);
         auth_user = std::to_string(std::stoul(account.auth_user));
         session_state = account.storage_state;
         cookies_saved_at = Clock::now();
         last_status = "session_ready";
+    }
+
+    // Reuses a live Camoufox page's UA, cookies, template and RPC context for
+    // the hybrid transport experiment cell.
+    void adopt_experiment_page(const Account &account, const json::object &session) {
+        if (account.auth_user.empty() || account.auth_user.size() > 3 ||
+            !std::all_of(account.auth_user.begin(), account.auth_user.end(), [](unsigned char c) { return std::isdigit(c); }))
+            throw Error(400, "invalid_auth_user", "auth_user must be a nonnegative integer");
+        const auto *cookies = session.if_contains("cookies");
+        if (!cookies || !cookies->is_array() || cookies->as_array().empty())
+            throw Error(401, "missing_cookies", "Camoufox page session has no cookies");
+        const auto *context = session.if_contains("context");
+        if (!context || !context->is_object())
+            incompatible("Camoufox page session has no captured template context");
+        const auto &ctx = context->as_object();
+        const auto api_key = string_or(ctx, "apiKey");
+        if (api_key.empty()) incompatible("Camoufox page session has no API key");
+        const auto user_agent = string_or(session, "userAgent");
+        if (user_agent.empty()) incompatible("Camoufox page session has no user agent");
+        const auto page_id = string_or(session, "pageId");
+        const auto next_page_id = page_id.empty() ? std::string("camoufox") : page_id;
+        const auto next_fingerprint = sha256(json::serialize(*cookies) + "\n" + account.auth_user + "\n" + next_page_id);
+        if (!http || adopted_page_id != next_page_id || account_id != account.id || account_fingerprint != next_fingerprint) {
+            close();
+            HttpSession::Options options;
+            options.proxy = config.proxy;
+            options.cookies = cookies->as_array();
+            http = std::make_unique<HttpSession>(std::move(options));
+            account_id = account.id;
+            account_fingerprint = next_fingerprint;
+            adopted_page_id = next_page_id;
+            auth_user = std::to_string(std::stoul(account.auth_user));
+            cookies_saved_at = Clock::now();
+        }
+        auto accept_language = string_or(session, "acceptLanguage");
+        if (accept_language.empty()) accept_language = "en-US,en;q=0.5";
+        headers = {user_agent, std::move(accept_language), HttpSession::accept_encoding()};
+        platform = string_or(session, "platform");
+        host = {};
+        host.user_agent = user_agent;
+        host.accept_language = headers.accept_language;
+        host.profile.timezone = string_or(ctx, "timezone", "UTC");
+        if (const auto *body = ctx.if_contains("body"); body && body->is_array()) base_template = body->as_array();
+        else base_template.clear();
+        Page adopted;
+        adopted.url = string_or(ctx, "url");
+        adopted.api_key = api_key;
+        adopted.visit_id = string_or(ctx, "visitId");
+        adopted.extension = string_or(ctx, "extension");
+        page = std::move(adopted);
+        const auto captured_tier = string_or(ctx, "tier", "unknown");
+        if (captured_tier != "unknown") {
+            tier = captured_tier;
+            tier_expires = Clock::now() + 10min;
+            tier_retry = {};
+        }
+        last_status = "page_ready";
+        phase = "ready";
     }
 
     std::string authorization() {
@@ -590,6 +732,7 @@ struct SpiderMonkeyGateway::Impl {
         // box stays empty.
         std::optional<int> rerun;
     };
+    std::optional<Content> pending_experiment;
     Content content_of(const Request &request) const;
     // The same, with the conversation recorded as run by the account's page.
     Content run_content(const Request &request, const Account &account);
@@ -601,13 +744,34 @@ struct SpiderMonkeyGateway::Impl {
               std::stop_token cancel);
 };
 
+namespace {
+std::mutex staged_experiment_mutex;
+std::map<const SpiderMonkeyGateway *, json::object> staged_experiment_sessions;
+void clear_staged_experiment_session(const SpiderMonkeyGateway *gateway) noexcept {
+    std::lock_guard lock(staged_experiment_mutex);
+    staged_experiment_sessions.erase(gateway);
+}
+std::optional<json::object> take_staged_experiment_session(const SpiderMonkeyGateway *gateway) {
+    std::lock_guard lock(staged_experiment_mutex);
+    const auto node = staged_experiment_sessions.extract(gateway);
+    if (!node) return std::nullopt;
+    return std::move(node.mapped());
+}
+} // namespace
+namespace experiment_detail {
+void stage_page_session(SpiderMonkeyGateway &gateway, json::object session) {
+    std::lock_guard lock(staged_experiment_mutex);
+    staged_experiment_sessions[&gateway] = std::move(session);
+}
+} // namespace experiment_detail
+
 SpiderMonkeyGateway::SpiderMonkeyGateway(const Config &config, Store &store) : impl_(std::make_unique<Impl>(config, store)) {}
-SpiderMonkeyGateway::~SpiderMonkeyGateway() = default;
+SpiderMonkeyGateway::~SpiderMonkeyGateway() { clear_staged_experiment_session(this); }
 
 SpiderMonkeyGateway::Impl::Content SpiderMonkeyGateway::Impl::content_of(const Request &request) const {
     Content content;
     content.timezone = host.profile.timezone.empty() ? std::string("UTC") : host.profile.timezone;
-    auto wire = encode_request(request, {}, "", content.timezone);
+    auto wire = encode_request(request, base_template, "", content.timezone);
     content.digest = browser_detail::wire_content_hash(wire);
     content.model = wire.empty() || !wire[0].is_string() ? std::string() : std::string(wire[0].as_string());
     content.prompt = sm::page_prompt(request);
@@ -680,7 +844,9 @@ void SpiderMonkeyGateway::Impl::send(const Request &request, const Account &acco
         ~CloseAnswer() { impl.close_answer(); }
     } close_answer_at_end{*this};
     browser_detail::GenerationIO io;
-    io.encode = [&](std::string_view checkpoint) { return json::serialize(encode_request(request, {}, proof, content.timezone, checkpoint)); };
+    io.encode = [&](std::string_view checkpoint) {
+        return json::serialize(encode_request(request, base_template, proof, content.timezone, checkpoint));
+    };
     io.start = [&](std::string_view body, const std::function<void()> &check) {
         check();
         transfer = {};
@@ -764,16 +930,24 @@ std::string SpiderMonkeyGateway::experiment_proof(const Request &request, const 
     std::lock_guard lock(impl_->mutex);
     auto &impl = *impl_;
     impl.bootstrap(account, request.model, true, cancel);
-    return impl.prove(impl.content_of(request), cancel);
+    auto content = impl.run_content(request, account);
+    auto proof = impl.prove(content, cancel);
+    impl.pending_experiment = std::move(content);
+    return proof;
 }
 
 void SpiderMonkeyGateway::experiment_send(const Request &request, const Account &account, std::string_view proof, const EventSink &sink,
                                           std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
     auto &impl = *impl_;
-    // The page and its RPC context, without starting a program.
-    impl.bootstrap(account, request.model, false, cancel);
-    impl.send(request, account, impl.content_of(request), proof, sink, cancel);
+    if (auto staged = take_staged_experiment_session(this)) {
+        impl.adopt_experiment_page(account, *staged);
+    } else if (impl.adopted_page_id.empty() || !impl.http || !impl.page) {
+        // The page and its RPC context, without starting a program.
+        impl.bootstrap(account, request.model, false, cancel);
+    }
+    const auto content = impl.pending_experiment ? *std::exchange(impl.pending_experiment, std::nullopt) : impl.content_of(request);
+    impl.send(request, account, content, proof, sink, cancel);
 }
 
 json::array SpiderMonkeyGateway::models(const Account &account, std::stop_token cancel) {
@@ -808,7 +982,10 @@ json::object SpiderMonkeyGateway::diagnostics() {
         vm = json::object{{"ageSeconds", std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - impl.vm_started).count()},
                           {"interpreter", impl.interpreter_hash.substr(0, 12)}};
     json::value identity = nullptr;
-    if (impl.http) identity = json::object{{"platform", impl.platform}, {"userAgent", impl.headers.user_agent}};
+    if (impl.http) {
+        if (impl.active_identity && impl.active_identity->identity) identity = impl.identity_summary(*impl.active_identity->identity);
+        else identity = json::object{{"platform", impl.platform}, {"userAgent", impl.headers.user_agent}};
+    }
     return {{"status", impl.last_status}, {"phase", impl.phase}, {"backend", "spidermonkey"},
             {"running", impl.vm != nullptr}, {"pageLoaded", impl.page.has_value()}, {"vm", std::move(vm)},
             {"vmsStarted", impl.vms_started}, {"claimedFirefox", claimed_firefox}, {"host", waa::host_versions()},
@@ -829,11 +1006,13 @@ void SpiderMonkeyGateway::reconfigure(const Config &config) {
 }
 
 void SpiderMonkeyGateway::close() {
+    clear_staged_experiment_session(this);
     std::lock_guard lock(impl_->mutex);
     impl_->close();
 }
 
 void SpiderMonkeyGateway::reset_session() {
+    clear_staged_experiment_session(this);
     std::lock_guard lock(impl_->mutex);
     // A new page and program on the same connections and cookies.
     impl_->drop_page();

@@ -5,7 +5,6 @@
 from __future__ import annotations
 import argparse
 import hashlib
-import importlib.util
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -14,10 +13,6 @@ import struct
 import sys
 import tarfile
 import zipfile
-
-spec = importlib.util.spec_from_file_location('browser_bundle', Path(__file__).with_name('browser-bundle.py'))
-bundle = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(bundle)
 
 TERMUX_PREFIX = '/data/data/com.termux/files/usr'
 # src/common.cpp keeps the build mode in the executable as this tag.
@@ -134,13 +129,65 @@ def check_termux(relative, read) -> None:
             raise ValueError('invalid_termux_library_provider')
     if not required_libraries.issubset(libraries):
         raise ValueError('unreported_termux_runtime_library')
-    component = info.get('static_components', {}).get('libc++experimental.a', {})
-    if component.get('package') not in packages or not re.fullmatch(r'[0-9a-f]{64}', component.get('sha256', '')):
+    static_components = info.get('static_components')
+    if not isinstance(static_components, dict):
+        raise ValueError('missing_experimental_library_provenance')
+    component = static_components.get('libc++experimental.a', {})
+    if (not isinstance(component, dict) or component.get('package') not in packages
+            or not re.fullmatch(r'[0-9a-f]{64}', component.get('sha256', ''))):
         raise ValueError('missing_experimental_library_provenance')
     required_licenses.add(component['package'])
     notices = info.get('dependency_notices')
     if not isinstance(notices, dict):
         raise ValueError('missing_termux_dependency_notices')
+    for name, entry in static_components.items():
+        if name == 'libc++experimental.a':
+            continue
+        if not isinstance(entry, dict) or not re.fullmatch(r'[0-9a-f]{64}', entry.get('sha256', '')):
+            raise ValueError('invalid_static_component_provenance')
+        if 'package' in entry:
+            if entry['package'] not in packages:
+                raise ValueError('invalid_static_component_provenance')
+            required_licenses.add(entry['package'])
+            continue
+        provider = entry.get('provider')
+        if provider not in {'source-archive', 'prebuilt-archive'} or not isinstance(entry.get('version'), str) or not entry['version']:
+            raise ValueError('invalid_static_component_provenance')
+        if provider == 'source-archive' and not re.fullmatch(r'[0-9a-f]{128}', entry.get('source_sha512', '')):
+            raise ValueError('invalid_static_component_provenance')
+        if provider == 'prebuilt-archive':
+            archives = entry.get('archives')
+            if not isinstance(archives, dict) or not archives or any(
+                    not (isinstance(key, str) and key.startswith('lib/') and key.endswith('.a')
+                         and re.fullmatch(r'[0-9a-f]{64}', str(value)))
+                    for key, value in archives.items()):
+                raise ValueError('invalid_static_component_provenance')
+            if name == 'curl-impersonate' and entry.get('boringssl_prefix') != 'bssl_':
+                raise ValueError('invalid_static_component_provenance')
+        license_files = entry.get('license_files')
+        license_prefix = f'share/doc/ais2api/licenses/{name}/'
+        if not isinstance(license_files, list) or not license_files or any(
+                not isinstance(lic, str) or not lic.startswith(license_prefix)
+                or lic not in relative or not read(lic, 100000).strip()
+                for lic in license_files):
+            raise ValueError('missing_termux_dependency_license')
+        if notices.get(name) != 'included':
+            raise ValueError('missing_termux_dependency_license')
+    direct_needed = {termux_soname(name) for name in actual['needed']}
+    has_sm_licenses = any(item.startswith(('share/doc/ais2api/licenses/spidermonkey/',
+                                           'share/doc/ais2api/licenses/ada-url/')) for item in relative)
+    if has_sm_licenses or 'spidermonkey' in static_components or 'ada-url' in static_components:
+        if (static_components.get('spidermonkey', {}).get('provider') != 'prebuilt-archive'
+                or static_components.get('ada-url', {}).get('provider') != 'source-archive'):
+            raise ValueError('missing_spidermonkey_static_provenance')
+        if any(item.startswith('libmozjs') for item in direct_needed):
+            raise ValueError('unexpected_dynamic_spidermonkey_dependency')
+    has_ci_licenses = any(item.startswith('share/doc/ais2api/licenses/curl-impersonate/') for item in relative)
+    if has_ci_licenses or 'curl-impersonate' in static_components:
+        if static_components.get('curl-impersonate', {}).get('provider') != 'prebuilt-archive':
+            raise ValueError('missing_curl_impersonate_static_provenance')
+        if any(item.startswith('libcurl.') for item in direct_needed):
+            raise ValueError('unexpected_dynamic_curl_dependency')
     for package in required_licenses | runtime_packages:
         name = f'share/licenses/ais2api-dependencies/{package}/copyright'
         declaration = notices.get(package)
@@ -152,6 +199,13 @@ def check_termux(relative, read) -> None:
                 raise ValueError('termux_notice_metadata_mismatch')
         else:
             raise ValueError('missing_termux_dependency_license')
+
+
+def sha256_digest(source) -> str:
+    result = hashlib.sha256()
+    while block := source.read(1024 * 1024):
+        result.update(block)
+    return result.hexdigest()
 
 
 def check_build_mode(binary: bytes, dev: bool) -> None:
@@ -198,13 +252,11 @@ def check_camoufox(files, relative, read, manifest, platform, mode=None) -> None
         raise ValueError('camoufox_is_not_executable')
 
 
-def check(path: Path, with_browser=False, target='desktop', dev=False) -> int:
+def check(path: Path, target='desktop', dev=False) -> int:
     if target not in {'desktop', 'termux-aarch64'}:
         raise ValueError('invalid_package_target')
-    if target == 'termux-aarch64' and (with_browser or dev or not path.name.endswith('.tar.gz')):
+    if target == 'termux-aarch64' and (dev or not path.name.endswith('.tar.gz')):
         raise ValueError('termux_requires_backend_tar_gz')
-    if dev and with_browser:
-        raise ValueError('dev_bundle_cannot_carry_cloakbrowser')
     archive = zipfile.ZipFile(path) if path.suffix == '.zip' else tarfile.open(path, 'r:gz')
     with archive:
         names = {}
@@ -278,6 +330,30 @@ def check(path: Path, with_browser=False, target='desktop', dev=False) -> int:
             raise ValueError('missing_dependency_licenses')
         if target == 'termux-aarch64':
             check_termux(relative, lambda name, limit=None: read(original[name], limit))
+        if any(name.startswith('bin/browser-runtime/') for name in relative):
+            raise ValueError('unexpected_browser_bundle')
+        non_camoufox_files = {name for name in relative
+                              if not name.startswith('bin/camoufox-runtime/')}
+        if any(re.search(r'\.(?:dll|dylib|a|lib|pdb|exp|ilk)$|\.so(?:\.[0-9]+)*$', name, re.IGNORECASE)
+               for name in non_camoufox_files):
+            raise ValueError('unexpected_bundled_library')
+        sm_licenses = {name for name in relative if name.startswith('share/doc/ais2api/licenses/spidermonkey/')}
+        ada_licenses = {name for name in relative if name.startswith('share/doc/ais2api/licenses/ada-url/')}
+        ci_licenses = {name for name in relative if name.startswith('share/doc/ais2api/licenses/curl-impersonate/')}
+        if bool(sm_licenses) != bool(ada_licenses):
+            raise ValueError('missing_spidermonkey_or_ada_licenses')
+        if sm_licenses and not {'share/doc/ais2api/licenses/spidermonkey/LICENSE',
+                                'share/doc/ais2api/licenses/spidermonkey/ICU-LICENSE.txt'}.issubset(sm_licenses):
+            raise ValueError('missing_spidermonkey_or_ada_licenses')
+        if ada_licenses and not {'share/doc/ais2api/licenses/ada-url/LICENSE-MIT',
+                                 'share/doc/ais2api/licenses/ada-url/LICENSE-APACHE'}.issubset(ada_licenses):
+            raise ValueError('missing_spidermonkey_or_ada_licenses')
+        if ci_licenses and not {'share/doc/ais2api/licenses/curl-impersonate/LICENSE_CURL',
+                                'share/doc/ais2api/licenses/curl-impersonate/LICENSE_BORINGSSL'}.issubset(ci_licenses):
+            raise ValueError('missing_curl_impersonate_licenses')
+        for name in sm_licenses | ada_licenses | ci_licenses:
+            if not read(original[name], 100000).strip():
+                raise ValueError('empty_component_license')
         check_build_mode(read(original[executable], 200_000_000), dev)
         camoufox_files = {name for name in relative if name.startswith('bin/camoufox-runtime/')}
         if camoufox_files and not dev:
@@ -287,59 +363,23 @@ def check(path: Path, with_browser=False, target='desktop', dev=False) -> int:
                            json.loads(read(original['bin/runtime-manifest.json'], 100000)),
                            'windows-x64' if path.suffix == '.zip' else 'linux-x64',
                            None if path.suffix == '.zip' else lambda name: names[original[name]].mode)
-        browser_files = {name for name in relative if name.startswith('bin/browser-runtime/')}
-        if with_browser:
-            platform = 'windows-x64' if path.suffix == '.zip' else 'linux-x64'
-            prefix = 'bin/browser-runtime/' + platform + '/'
-            manifest = json.loads(read(original['bin/runtime-manifest.json'], 100000))
-            marker_name = prefix + bundle.MARKER
-            if marker_name not in relative:
-                raise ValueError('missing_browser_bundle_marker')
-            marker = json.loads(read(original[marker_name], 4000000))
-            expected = {'platform': platform, 'browser_version': manifest['browser_version'], 'sha256': manifest['artifacts'][platform]['sha256']}
-            if any(marker.get(key) != value for key, value in expected.items()):
-                raise ValueError('browser_bundle_manifest_mismatch')
-            actual = {}
-            # Compressed tar seeks backwards by replaying decompression. Hash in
-            # archive order so a large browser is read sequentially.
-            ordered_browser_files = sorted(browser_files, key=lambda name:
-                names[original[name]].header_offset if isinstance(archive, zipfile.ZipFile)
-                else names[original[name]].offset_data)
-            for name in ordered_browser_files:
-                if not name.startswith(prefix):
-                    raise ValueError('unexpected_browser_platform')
-                local = bundle.safe_name(name[len(prefix):])
-                if local == bundle.MARKER:
-                    continue
-                source = archive.open(names[original[name]]) if isinstance(archive, zipfile.ZipFile) else archive.extractfile(names[original[name]])
-                with source:
-                    actual[local] = bundle.digest(source)
-            if 'BINARY-LICENSE.md' not in actual or marker.get('usage') != 'local-internal':
-                raise ValueError('missing_browser_binary_license_or_local_usage')
-            if not actual or marker.get('files') != actual:
-                raise ValueError('browser_bundle_inventory_mismatch')
-            if ('chrome.exe' if platform == 'windows-x64' else 'chrome') not in actual:
-                raise ValueError('missing_browser_executable')
-        elif browser_files:
-            raise ValueError('unexpected_browser_bundle_use_with_browser')
     expected = Path(str(path) + '.sha256').read_text(encoding='utf-8').split()[0].lower()
     with path.open('rb') as source:
-        digest = bundle.digest(source)
+        digest = sha256_digest(source)
     if digest != expected:
         raise ValueError('archive_checksum_mismatch')
-    print(f'Runtime archive verified: {len(names)} files, SHA-256 matches' + (', browser inventory matches' if with_browser else '')
+    print(f'Runtime archive verified: {len(names)} files, SHA-256 matches'
           + (', dev bundle' if dev else ''))
     return 0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--with-browser', action='store_true')
     parser.add_argument('--dev', action='store_true', help='check a dev bundle (scripts/build-dev.ps1) instead')
     parser.add_argument('--target', choices=['desktop', 'termux-aarch64'], default='desktop')
     parser.add_argument('archive', type=Path)
     args = parser.parse_args()
     try:
-        sys.exit(check(args.archive, args.with_browser, args.target, args.dev))
+        sys.exit(check(args.archive, args.target, args.dev))
     except Exception as error:
         print(f'Runtime archive validation failed: {type(error).__name__}: {error}', file=sys.stderr)
         sys.exit(1)

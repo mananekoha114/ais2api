@@ -35,21 +35,16 @@ struct Config {
     fs::path data_dir;
     fs::path config_file;
     fs::path browser_executable;
-    // "cloakbrowser" (Chromium over CDP) or "camoufox" (Firefox over WebDriver
-    // BiDi, experimental). Camoufox runs the build setup installed, or
-    // browser_executable when that names a Camoufox executable.
-    std::string browser_backend = "cloakbrowser";
+    // Firefox backend configuration ("camoufox"). Camoufox runs the build
+    // setup installed, or browser_executable when that names a Camoufox
+    // executable; new accounts settle as "auto" and can also select
+    // "camoufox" or "spidermonkey" individually.
+    std::string browser_backend = "camoufox";
     std::string proxy;
     // Route the browser through a local relay that authenticates to `proxy`
     // (http:// or socks5://, with or without credentials). Without it the
     // browser uses `proxy` directly and cannot use one with credentials.
     bool browser_proxy_relay = false;
-    // Let pages of any origin open the browser's DevTools WebSocket. The
-    // gateway's own CDP client sends no Origin header and does not need it.
-    bool browser_remote_allow_origins = false;
-    // Chromium site isolation. Turning it off saves renderer memory on small
-    // hosts at the cost of cross-site process separation.
-    bool browser_site_isolation = true;
     bool headless = true;
     bool ignore_unsupported_parameters = false;
     // A `*-search` model request carrying function declarations either drops

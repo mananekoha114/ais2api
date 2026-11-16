@@ -5,8 +5,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 /* ais2api page bridge. No credentials, snapshots or response bodies are persisted. */
-(() => {
-  if (globalThis.__ais2bridge) return;
+(function(publish) {
+  if (typeof publish !== 'function') return;
+  if (globalThis.top && globalThis.top !== globalThis) return;
   const nativeFetch = globalThis.fetch.bind(globalThis);
   const state = { template: null, snapshotCall: null, models: [], transfer: null, discoveryRequest: null, templateTransport: null, snapshotCandidates: 0, snapshotHooked: 0 };
   const fail = message => { throw new Error(message); };
@@ -372,7 +373,7 @@
       if (lower === 'authorization' && typeof value === 'string' && value.trim()) capturedAuthorization = value;
       if (!['host', 'content-length', 'authorization', 'x-goog-authuser', 'x-aistudio-g1-tier'].includes(lower)) headers[lower] = value;
     }
-    // The native host signs current CDP cookies. As in the reference transport,
+    // The native host signs current cookies. As in the reference transport,
     // use only this page's captured Authorization when a fresh one is unavailable.
     const selected = typeof authorization === 'string' && authorization.trim() ? authorization : capturedAuthorization;
     if (!selected) fail('browser_incompatible: current signing cookies and captured Authorization unavailable');
@@ -494,7 +495,7 @@
     } finally { clearTimeout(timer); }
   }
   // The host sends a request body in pieces as call arguments. Each piece is
-  // kept as a Blob, which Chromium stores outside the JavaScript heap, so the
+  // kept as a Blob, which the browser stores outside the JavaScript heap, so the
   // page never holds the whole body as a string.
   let upload = null;
   function append(id, chunk) {
@@ -608,11 +609,13 @@
     const resolve = t.credit; t.credit = null; resolve();
     return true;
   }
-  globalThis.__ais2bridge = {
+  const bridge = {
     identity, bootstrap, finishBootstrap, run, snapshot, append, start, ack, next, abort, discoverModels,
     poll: () => relayState(state.transfer),
     capability: () => ({ benefitTier: Date.now() < benefit.expires ? benefit.tier : 'unknown', template: state.template ? { body: state.template.body } : null, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', snapshot: !!state.snapshotCall, discovery: !!state.discoveryRequest, templateTransport: state.templateTransport, snapshotCandidates: state.snapshotCandidates, snapshotHooked: state.snapshotHooked }),
+    experimentContext: () => state.template ? { url: state.template.url, body: state.template.body, apiKey: state.template.headers['x-goog-api-key'] || '', visitId: state.template.headers['x-aistudio-visit-id'] || '', extension: state.template.headers['x-goog-ext-519733851-bin'] || '', tier: Date.now() < benefit.expires ? benefit.tier : 'unknown', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' } : null,
     models: () => state.models,
     dispose: () => { abort(); benefit.controller?.abort(); clearInterval(installTimer); }
   };
-})()
+  publish(bridge);
+})(typeof arguments !== 'undefined' ? arguments[0] : undefined)

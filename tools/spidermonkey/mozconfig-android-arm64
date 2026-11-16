@@ -1,0 +1,28 @@
+# SpiderMonkey 158.0.1 as a static PIC library for ais2api: android-arm64
+# (Android NDK r27 LTS / aarch64-linux-android24 for native Termux Bionic).
+# Used by build-unix.sh with ANDROID_NDK_HOME set in the environment.
+
+ac_add_options --enable-project=js
+ac_add_options --target=aarch64-linux-android
+ac_add_options --with-android-ndk="$ANDROID_NDK_HOME"
+ac_add_options --with-android-version=24
+ac_add_options --enable-optimize
+ac_add_options --disable-debug
+
+ac_add_options --disable-shared-js
+ac_add_options --disable-export-js
+ac_add_options --disable-jemalloc
+ac_add_options --disable-ctypes
+ac_add_options --disable-tests
+
+# Bootstrap Mozilla's pinned Clang + cbindgen (NDK r27c ships Clang 18, which
+# rejects C++20 consteval escalation in SpiderMonkey 158's irregexp), while
+# keeping NDK r27c's Android API 24 sysroot and bionic/libc++ ABI.
+ac_add_options --enable-bootstrap=clang,cbindgen
+ac_add_options --without-host-sysroot
+ac_add_options --enable-linker=lld
+
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+export CFLAGS="-fPIC"
+export CXXFLAGS="-fPIC"
+export RUSTFLAGS="-C relocation-model=pic"

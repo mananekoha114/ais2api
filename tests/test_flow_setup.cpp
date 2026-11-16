@@ -470,7 +470,7 @@ TEST_CASE("doctor tells the launcher when Camoufox needs setup", "[setup]") {
     Config config;
     config.data_dir = d.root;
     config.browser_backend = "camoufox";
-    auto result = doctor(config);
+    auto result = doctor(config, Config::default_directory(), std::vector<std::string>{"camoufox"});
     CHECK(string_or(result, "build_mode") == build_mode());
     CHECK_FALSE(bool_or(result, "browser_configured"));
     CHECK_FALSE(bool_or(result, "browser_exists"));
@@ -478,7 +478,7 @@ TEST_CASE("doctor tells the launcher when Camoufox needs setup", "[setup]") {
 
     fake_camoufox(d.root, "1.0");
     select_camoufox(d.root, "1.0-windows-x64");
-    result = doctor(config);
+    result = doctor(config, Config::default_directory(), std::vector<std::string>{"camoufox"});
     CHECK(bool_or(result, "browser_configured"));
     // The fpgen model is still missing.
     CHECK_FALSE(bool_or(result, "browser_exists"));
@@ -511,7 +511,7 @@ TEST_CASE("the Camoufox bundled beside the program comes before setup's", "[setu
     const auto found = camoufox_executable(config, program);
     CHECK(found.source == "bundle");
     CHECK(found.path == bundle / camoufox_program(pin->platform));
-    auto result = doctor(config, program);
+    auto result = doctor(config, program, std::vector<std::string>{"camoufox"});
     CHECK(string_or(result, "program_directory") == path_utf8(program));
     auto camoufox = result.at("camoufox").as_object();
     CHECK(string_or(camoufox, "source") == "bundle");
@@ -519,7 +519,7 @@ TEST_CASE("the Camoufox bundled beside the program comes before setup's", "[setu
     CHECK(string_or(camoufox.at("bundle").as_object(), "state") == "installed");
     // It ships with the program: rolling back means the previous package.
     try {
-        rollback_runtime(config, program);
+        rollback_runtime(config, program, "camoufox");
         FAIL("a rollback replaced the bundled Camoufox");
     } catch (const Error &error) {
         CHECK(error.code == "bundled_runtime");
@@ -533,7 +533,7 @@ TEST_CASE("the Camoufox bundled beside the program comes before setup's", "[setu
     owner["kept"] = json::array{};
     atomic_write(bundle / ".ais2api-runtime.json", json::serialize(owner));
     CHECK(camoufox_executable(config, program).source == "setup");
-    camoufox = doctor(config, program).at("camoufox").as_object();
+    camoufox = doctor(config, program, std::vector<std::string>{"camoufox"}).at("camoufox").as_object();
     CHECK(string_or(camoufox, "source") == "setup");
     CHECK(string_or(camoufox.at("bundle").as_object(), "state") == "damaged");
     install_camoufox(archive, bundle, *pin);
@@ -541,17 +541,11 @@ TEST_CASE("the Camoufox bundled beside the program comes before setup's", "[setu
     fs::remove(bundle / "application.ini");
     CHECK(camoufox_executable(config, program).source == "setup");
 }
-TEST_CASE("Linux setup accepts exact supported os-release identities", "[setup]") {
-    auto debian = linux_runtime_packages("PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\n"
-                                         "VERSION_ID=\"13\"\nID=debian\n");
-    REQUIRE(debian == linux_runtime_packages("ID=\"ubuntu\"\nVERSION_ID=24.04\n"));
-    REQUIRE(debian == linux_runtime_packages("# metadata\r\nID='debian'\r\nVERSION_ID='13'\r\n"));
-    for (auto package : {"libasound2t64", "libcups2t64", "libgtk-3-0t64",
-                         "libatk1.0-0t64", "libatk-bridge2.0-0t64"})
-        REQUIRE(std::find(debian.begin(), debian.end(), package) != debian.end());
+TEST_CASE("Camoufox Linux dependency selection normalizes Debian 13 and Ubuntu 24.04", "[setup]") {
     // Camoufox runs on Xvfb with Mesa, and brings its own fonts.
     const auto camoufox = camoufox_linux_packages("ID=debian\nVERSION_ID=13\n");
     REQUIRE(camoufox == camoufox_linux_packages("ID=ubuntu\nVERSION_ID=\"24.04\"\n"));
+    REQUIRE(camoufox == camoufox_linux_packages("# metadata\r\nID='debian'\r\nVERSION_ID='13'\r\n"));
     for (auto package : {"xvfb", "libgtk-3-0t64", "libasound2t64", "libgl1-mesa-dri"})
         REQUIRE(std::find(camoufox.begin(), camoufox.end(), package) != camoufox.end());
     for (const auto &package : camoufox) REQUIRE_FALSE(package.starts_with("fonts-"));
@@ -576,7 +570,6 @@ TEST_CASE("Linux setup rejects unsupported distributions and substring lookalike
                          "NAME=ubuntu 24.04\n", "# ID=ubuntu\nVERSION_ID=24.04\n",
                          "ID=ubuntu-derivative\nVERSION_ID=24.04\n",
                          "ID=ubuntu\nVERSION_ID=\"24.04\n", "ID=debian\n"}) {
-        REQUIRE_THROWS_AS(linux_runtime_packages(release), Error);
         REQUIRE_THROWS_AS(camoufox_linux_packages(release), Error);
     }
 }

@@ -5,12 +5,12 @@
 ## 命令速查
 
 ```text
-ais2api init | serve | start | stop | status | setup | doctor
+ais2api init | serve | start | stop | status | setup [--backend BACKEND] | doctor
 ais2api browser update [BACKEND] | browser rollback [BACKEND]
 ais2api accounts list
 ais2api accounts import (--file PATH | --stdin) [--name NAME]
 ais2api accounts select ID | remove ID | reset ID | probe (ID | all)
-ais2api accounts backend (ID | --all) (cloakbrowser | auto | camoufox | spidermonkey) [--yes]
+ais2api accounts backend (ID | --all) (auto | camoufox | spidermonkey) [--yes]
 ais2api keys list
 ais2api stats | diagnostics
 ais2api models list
@@ -60,13 +60,11 @@ ais2api stop      停止服务
 
 ### setup、doctor 与浏览器版本
 
-- `setup` 准备当前平台的浏览器和依赖，需要联网；`--yes` 授权本次列出的系统包变更。它准备“需要的后端”：默认后端（`browser_backend`），加上已保存账号用到的后端，所以 CloakBrowser 账号和 Firefox 账号并存时两者都会安装。返回的 `backends` 列出准备了哪些，第一个之外的结果放在以后端命名的字段中。
-- `doctor` 检查本地前提，并列出实际使用的程序、配置、下载、数据与日志路径。`backends_needed` 列出需要的后端，全部就绪时 `browser_exists` 才为 true。浏览器文件存在不代表 Google 调用成功。
-- `doctor` 和 `setup` 的结果都带有 `deprecations`：默认后端或有账号仍是已弃用的 CloakBrowser 时，其中有一项 `cloakbrowser_backend`，`default_backend` 和 `accounts` 说明是哪一处在用；没有时为空数组。迁移方法见 [按账号选择后端](browser.md#按账号选择后端)。
-- `browser update` 与 `browser rollback` 管理浏览器版本，可以用 `cloakbrowser` 或 `camoufox` 指定后端：`update` 默认准备所有需要的后端，`rollback` 默认退回默认后端。
+- `setup` 准备当前平台的浏览器和依赖，需要联网；`--yes` 授权本次列出的系统包变更，`--backend BACKEND` 可指定只准备单个后端（`camoufox` 或 `spidermonkey`）。未指定 `--backend` 时，它准备“需要的后端”：默认后端（`browser_backend`），加上已保存账号用到的后端。在包含 SpiderMonkey 的 Termux 构建上，`auto` 默认只需要 `spidermonkey`，因此默认只下载 fpgen 模型，不创建 `proot` 容器，也不下载 Camoufox；若需要把 Camoufox 作为手动后端或 403 自动切换备选，可运行 `ais2api setup --backend camoufox --yes`。返回的 `backends` 列出准备了哪些，第一个之外的结果放在以后端命名的字段中。
+- `doctor` 检查本地前提，并列出实际使用的程序、配置、下载、数据与日志路径。`backends_needed` 列出需要的后端，全部就绪时 `browser_exists` 才为 true；`deprecations` 当前返回空数组。浏览器文件存在不代表 Google 调用成功。
+- `browser update` 与 `browser rollback` 管理运行时版本，可以用 `camoufox` 或 `spidermonkey` 指定后端：`update` 默认准备所有需要的后端，`rollback` 默认退回默认后端（`spidermonkey` 内置在主程序中，不支持单独退回）。
 - 执行 `setup`、`browser update`、`browser rollback` 前需先停止服务，它们与服务使用同一把数据目录独占锁。
-- 程序旁存在 `browser-runtime/PLATFORM/chrome[.exe]`（Browser-Local 包）时会自动使用，无需下载；`setup` 仍会校验其完整文件清单并准备系统依赖。
-- 需要 `camoufox` 后端时（新建配置的默认后端），`setup` 安装以下两项，都按 `runtime-manifest.json` 锁定的版本下载并核对 SHA-256；不下载 CloakBrowser，也不改写 `browser_executable`：
+- 需要 `camoufox` 后端时（新建配置的默认后端），`setup` 安装以下两项，都按 `runtime-manifest.json` 锁定的版本下载并核对 SHA-256，也不改写 `browser_executable`：
   - 生成 Firefox 身份所需的 fpgen 模型，逐个文件核对；
   - Camoufox，支持 Windows x64、Linux x64、Linux ARM64 和 Termux（ARM64）：
     - 压缩包约 1.3 GB，下载时需要约 3 GiB 空闲空间；
@@ -83,6 +81,9 @@ ais2api stop      停止服务
   - 显示模型的来源（`setup` 或开发版的 `embedded`）和状态：`installed`、`missing`、`damaged`，或不是 `setup` 创建的 `foreign`；
   - 显示 Camoufox 的来源（`browser_executable`、`bundle` 或 `setup`）、当前版本、上一版本和锁定版本；程序旁有打包目录时，`camoufox.bundle` 给出它的位置和状态；
   - 使用 `setup` 安装的版本时，如果当前版本不是锁定版本，或锁定版本的安装与本程序的解压规则不符，`camoufox.setup_needed` 为 true、`browser_exists` 为 false，因此程序升级后启动脚本会自动运行 `setup`。
+- 需要 `spidermonkey` 后端时：
+  - `setup` 只下载并核对 fpgen 模型（约几 MB），不调用系统包管理器、不创建 Termux `proot-distro` 容器、不下载 Camoufox，也无需 `--yes`；
+  - `doctor` 的 `spidermonkey` 字段给出 `available`、`state`（`ready`、`missing`、`damaged`、`foreign` 或 `unavailable`）与 `setup_needed`。
 - `camoufox` 后端会保留上一个 Camoufox：
   - `browser rollback` 退回上一版本并保持，启动脚本不再自动升级；
   - `browser update` 重新安装锁定版本，并解除保持；
@@ -117,15 +118,15 @@ ais2api accounts list
 ais2api accounts select ACCOUNT_ID
 ais2api accounts remove ACCOUNT_ID
 ais2api accounts reset ACCOUNT_ID
-ais2api accounts backend ACCOUNT_ID camoufox --yes
-ais2api accounts backend --all auto --yes
+ais2api accounts backend ACCOUNT_ID camoufox
+ais2api accounts backend --all auto
 ais2api accounts probe ACCOUNT_ID
 ais2api accounts probe all
 ```
 
 - **import**：输入可以是 Cookie 请求头文本、Netscape Cookie 文本、Cookie JSON、storage state 或已有凭据包。只有显式指定 `--stdin` 才会读取标准输入。不要把 Cookie 写在命令参数里，避免进入 shell 历史。导入与列表结果不包含 Cookie 值，但账号名称和邮箱对本机用户可见。
 - **select**：设为首选账号。
-- **backend**：修改账号的浏览器后端；`--all` 一次修改所有账号，用于把账号整体迁移到 Firefox 身份或迁回。在 CloakBrowser 与 Firefox 后端之间切换会换成另一种身份（Google 会把它看作新设备），必须加 `--yes`，否则返回 `identity_change_unconfirmed`；Firefox 后端之间可以直接切换。`spidermonkey` 是实验性后端，只有开启 `AIS2API_SPIDERMONKEY` 编译的版本接受它，见 [SpiderMonkey 后端](browser.md#spidermonkey-后端实验性原型)。见 [按账号选择后端](browser.md#按账号选择后端)。
+- **backend**：修改账号的浏览器后端；`--all` 一次修改所有账号。`auto`、`camoufox`、`spidermonkey` 共用同一 Firefox 身份，可以直接切换（为兼容旧脚本，`--yes` 仍保留并忽略）。`spidermonkey` 是实验性后端，只有开启 `AIS2API_SPIDERMONKEY` 编译的版本接受它，见 [SpiderMonkey 后端](browser.md#spidermonkey-后端实验性原型)。见 [按账号选择后端](browser.md#按账号选择后端)。
 - **reset**：清除账号记录的失败/禁用状态，不能修复已过期的 Google Cookie。账号因“需要同意条款”冷却时（欢迎对话框会自动继续，这里指其他条款对话框），先用该账号在普通浏览器中登录 AI Studio 并同意条款，再执行 reset。
 - **probe**：使用账号凭据实际访问上游，需要服务正在运行，可能会启动浏览器。不要把它当作离线健康检查。
 

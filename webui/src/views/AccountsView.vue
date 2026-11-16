@@ -13,12 +13,11 @@ import { api, describeError, enc, runOperation } from '../api/client'
 import type { Account, ProbeResult, Rotation } from '../api/types'
 import { refreshStatus, service } from '../stores/service'
 import { confirm, notify, notifyError } from '../stores/ui'
-import { accountLabel, accountState, backendLabel, cloakbrowserNotice, cooldownReason, now } from '../utils/accounts'
+import { accountBackendSummary, accountLabel, accountState, cooldownReason, now } from '../utils/accounts'
 import { formatRelative, formatTimestamp, isIndefinite } from '../utils/format'
 import { usePolling } from '../utils/media'
 
 const rotation = ref<Rotation | null>(null)
-const deprecation = computed(() => cloakbrowserNotice(service.status?.deprecations))
 const loading = ref(true)
 const loadError = ref('')
 const busy = reactive<Record<string, string>>({})
@@ -178,7 +177,12 @@ function menuFor(a: Account): MenuItem[] {
     { label: '检测并更新邮箱', icon: 'mail', action: () => probe(a, 'detect-email') },
     { label: '浏览器指纹…', icon: 'desktop', action: () => (fingerprintTarget.value = a) },
     { divider: true },
-    { label: '清除全部冷却', icon: 'timer', disabled: !(a.failures?.length ?? 0), action: () => clearCooldown(a) },
+    {
+      label: '清除全部冷却',
+      icon: 'timer',
+      disabled: !(a.failures?.length ?? 0) && !(a.backend_switched_until && a.backend_switched_until > clock.value),
+      action: () => clearCooldown(a),
+    },
     { label: '重置失败与禁用状态', icon: 'arrow_reset', action: () => reset(a) },
     { divider: true },
     { label: '删除账号', icon: 'delete', danger: true, action: () => remove(a) },
@@ -201,7 +205,6 @@ function menuFor(a: Account): MenuItem[] {
 
     <div class="stack" style="--gap: 12px">
       <FInfoBar v-if="loadError" severity="error" title="加载失败" :message="loadError" />
-      <FInfoBar v-if="deprecation" severity="warning" title="CloakBrowser 已弃用" :message="deprecation" />
       <FInfoBar v-if="globalBusy === 'probe'" severity="info" title="正在探测">
         后端正在通过浏览器逐个确认账号身份，可能需要数分钟。
       </FInfoBar>
@@ -253,7 +256,16 @@ function menuFor(a: Account): MenuItem[] {
                 >
                   <FIcon name="desktop" :size="12" /> #{{ account.fingerprint.seed }}
                 </span>
-                <span v-if="account.backend" :title="`浏览器后端：${backendLabel(account.backend)}`">{{ backendLabel(account.backend) }}</span>
+                <span
+                  v-if="account.backend"
+                  :title="
+                    account.backend_switched_until && account.backend_switched_until > clock
+                      ? `${accountBackendSummary(account, clock).title}，至 ${formatTimestamp(account.backend_switched_until)}`
+                      : accountBackendSummary(account, clock).title
+                  "
+                >
+                  {{ accountBackendSummary(account, clock).text }}
+                </span>
               </div>
             </div>
             <span class="badge state" :class="accountState(account, clock).tone !== 'neutral' ? accountState(account, clock).tone : ''">

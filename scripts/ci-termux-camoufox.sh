@@ -26,7 +26,7 @@ export LD_PRELOAD="$PREFIX/lib/libtermux-exec-ld-preload.so"
 test -f "$LD_PRELOAD"
 apt-get update
 apt-get upgrade -y -o Dpkg::Options::=--force-confnew
-pkg install -y clang cmake ninja git curl pkg-config boost boost-headers libcurl openssl libarchive libsqlite zstd python tar
+pkg install -y clang cmake ninja git curl pkg-config boost boost-headers libnghttp2 openssl libarchive libsqlite zlib zstd xz-utils python tar
 # libc++ supplies syncstream declarations through its experimental feature gate.
 CC=clang CXX=clang++ CXXFLAGS=-fexperimental-library sh scripts/build.sh termux --jobs "$(nproc)"
 
@@ -38,13 +38,15 @@ keep_logs() {
   cp -R "$data/logs/." /out/logs/ 2>/dev/null || true
 }
 trap keep_logs EXIT
+# A native build with SpiderMonkey runs "auto" accounts in-process, so setup
+# prepares Camoufox only when asked for it, as a user choosing it would.
 # Without the container, setup asks before it creates anything.
-if run setup > /out/refused.json 2>&1; then
+if run setup --backend camoufox > /out/refused.json 2>&1; then
   echo 'setup created the container without --yes' >&2
   exit 1
 fi
 grep -q system_confirmation_required /out/refused.json
-run setup --yes > /out/setup.json
+run setup --backend camoufox --yes > /out/setup.json
 run doctor > /out/doctor.json
 python - /out/setup.json /out/doctor.json > "$HOME/camoufox-paths" <<'EOF'
 import json, sys
@@ -53,12 +55,15 @@ camoufox = setup['camoufox']
 print(json.dumps({'system_packages': setup.get('system_packages'), 'version': camoufox['version'],
                   'page': camoufox['browser_verification']['page']}, indent=1), file=sys.stderr)
 assert setup['system_packages']['status'] == 'installed', setup['system_packages']
-assert doctor['browser_exists'] is True and doctor['camoufox']['source'] == 'setup', doctor
-print(doctor['camoufox']['executable'])
-print(doctor['fpgen_model']['directory'])
+assert camoufox['source'] == 'setup', camoufox
+# The fpgen model setup installed for Camoufox also readies SpiderMonkey,
+# which "auto" accounts need here.
+assert doctor['backends_needed'] == ['spidermonkey'] and doctor['browser_exists'] is True, doctor
+print(camoufox['executable'])
+print(setup['fpgen_model']['directory'])
 EOF
 # Ready now: a second setup asks for nothing and installs nothing.
-run setup > /out/again.json
+run setup --backend camoufox > /out/again.json
 grep -q '"system_packages":{"status":"ready"' /out/again.json
 grep -q '"installed_now":false' /out/again.json
 AIS2API_TEST_CAMOUFOX=$(sed -n 1p "$HOME/camoufox-paths") AIS2API_TEST_FPGEN_MODEL=$(sed -n 2p "$HOME/camoufox-paths") \

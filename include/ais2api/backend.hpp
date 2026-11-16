@@ -8,8 +8,9 @@
 #include "protocol.hpp"
 
 namespace ais2api {
-// A generation session boundary. Production uses BrowserGateway; deterministic
-// transports can exercise scheduling and HTTP cancellation without Google.
+// A generation session boundary. Production uses BackendRouter (Camoufox /
+// SpiderMonkey); deterministic transports can exercise scheduling and HTTP
+// cancellation without Google.
 class GenerationBackend {
   public:
     virtual ~GenerationBackend() = default;

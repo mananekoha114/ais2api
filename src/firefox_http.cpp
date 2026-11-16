@@ -94,11 +94,15 @@ struct CurlInit {
 };
 void initialise_curl() { static CurlInit init; }
 
-Error transport_error(CURLcode code, std::string_view detail, bool proxied) {
+bool pre_tunnel_error(CURLcode code) {
+    return code == CURLE_COULDNT_CONNECT || code == CURLE_RECV_ERROR || code == CURLE_SEND_ERROR || code == CURLE_GOT_NOTHING;
+}
+
+Error transport_error(CURLcode code, std::string_view detail, bool proxied, bool before_upstream) {
     std::string message = curl_easy_strerror(code);
     if (!detail.empty()) message += ": " + std::string(detail);
-    // With a proxy, the connection that failed to open is the one to it.
-    if (proxied && code == CURLE_COULDNT_CONNECT) code = CURLE_PROXY;
+    // With a proxy, failures before a tunnel response or upstream status/TLS handshake belong to the proxy.
+    if (proxied && (code == CURLE_COULDNT_CONNECT || (before_upstream && pre_tunnel_error(code)))) code = CURLE_PROXY;
     switch (code) {
     case CURLE_COULDNT_RESOLVE_PROXY:
     case CURLE_PROXY: return Error(502, "proxy_failed", "Could not reach Google through the configured proxy (" + message + ")");
@@ -166,10 +170,6 @@ void apply_firefox(CURL *easy) {
     set(easy, CURLOPT_SSL_ENABLE_ALPN, 1L, "ALPN");
     set(easy, CURLOPT_SSL_ENABLE_ALPS, 0L, "ALPS setting");
     set(easy, CURLOPT_SSL_ENABLE_TICKET, 1L, "session tickets");
-    // Firefox resumes a TLS 1.3 session without the session_ticket extension;
-    // BoringSSL keeps it beside pre_shared_key, a ClientHello no Firefox
-    // sends. Without resumption every connection sends the full handshake's.
-    set(easy, CURLOPT_SSL_SESSIONID_CACHE, 0L, "session resumption setting");
     set(easy, CURLOPT_TLS_SIGNED_CERT_TIMESTAMPS, 1L, "certificate timestamps");
     set(easy, CURLOPT_TLS_STATUS_REQUEST, 1L, "status request");
     set(easy, CURLOPT_ECH, firefox::ech, "encrypted client hello");
@@ -303,11 +303,12 @@ struct Transfer {
     std::function<void(std::string_view)> set_cookie;
 
     // What ended the transfer early; call with the mutex held.
-    Error failure() const { return transport_error(result, error, proxied); }
+    Error failure() const { return transport_error(result, error, proxied, connect_code == 0 && appconnect == 0 && status == 0); }
 
     std::mutex mutex;
     std::condition_variable_any changed;
-    long status = 0;
+    long status = 0, connect_code = 0;
+    curl_off_t appconnect = 0;
     HttpHeaders headers;
     bool headers_complete = false, finished = false, paused = false;
     CURLcode result = CURLE_OK;
@@ -341,13 +342,17 @@ struct Transfer {
     // Reads the connection's timers once the transfer is over; on the
     // session's thread.
     void measure() {
-        curl_off_t resolved = 0, connected = 0;
-        long connects = 0, version = 0;
+        curl_off_t resolved = 0, connected = 0, appconnected = 0;
+        long connects = 0, version = 0, proxy_status = 0;
         curl_easy_getinfo(easy, CURLINFO_NAMELOOKUP_TIME_T, &resolved);
         curl_easy_getinfo(easy, CURLINFO_CONNECT_TIME_T, &connected);
+        curl_easy_getinfo(easy, CURLINFO_APPCONNECT_TIME_T, &appconnected);
         curl_easy_getinfo(easy, CURLINFO_NUM_CONNECTS, &connects);
         curl_easy_getinfo(easy, CURLINFO_HTTP_VERSION, &version);
+        curl_easy_getinfo(easy, CURLINFO_HTTP_CONNECTCODE, &proxy_status);
         std::lock_guard lock(mutex);
+        connect_code = proxy_status;
+        appconnect = appconnected;
         protocol = version == CURL_HTTP_VERSION_3 ? "h3" : version == CURL_HTTP_VERSION_2_0 ? "h2" : "http/1.1";
         timing.new_connection = connects > 0;
         timing.resolved = std::chrono::microseconds(resolved);

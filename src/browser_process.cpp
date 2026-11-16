@@ -195,7 +195,7 @@ void OwnedProcess::start(const fs::path& executable, const std::vector<std::stri
         if (key != "HOME" || !termux) inherited[key] = value;
 #if defined(__linux__) && !defined(__ANDROID__)
     if (!termux) {
-        // Chromium binds AF_UNIX singleton sockets below TMPDIR. Their
+        // Browser runtimes may bind AF_UNIX singleton sockets below TMPDIR. Their
         // 108-byte address limit otherwise breaks portable installs in
         // deeply nested directories. Keep the actual files in this private
         // profile; a held parent directory fd provides a short kernel alias.

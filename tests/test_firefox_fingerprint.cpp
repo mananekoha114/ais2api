@@ -39,6 +39,8 @@ const std::vector<std::string> firefox_ciphers{"1301", "1303", "1302", "c02b", "
                                                "c030", "c013", "c014", "009c", "009d", "002f", "0035"};
 const std::vector<std::string> firefox_extensions{"0000", "0017", "ff01", "000a", "000b", "0023", "0010", "0005", "0022",
                                                   "0012", "0033", "002b", "000d", "002d", "001c", "001b", "fe0d"};
+const std::vector<std::string> firefox_resumed_extensions{"0000", "0017", "ff01", "000a", "000b", "0010", "0005", "0022",
+                                                          "0012", "0033", "002b", "000d", "002d", "001c", "001b", "fe0d", "0029"};
 const std::vector<std::string> firefox_groups{"11ec", "001d", "0017", "0018", "0019"};
 const std::vector<std::string> firefox_key_shares{"11ec", "001d", "0017"};
 const std::vector<std::string> firefox_signature_algorithms{"0403", "0503", "0603", "0804", "0805", "0806",
@@ -49,7 +51,10 @@ const std::vector<std::string> firefox_versions{"0304", "0303"};
 const std::vector<std::string> firefox_certificate_compression{"0001", "0002", "0003"};
 const std::vector<std::string> firefox_alpn{"h2", "http/1.1"};
 constexpr unsigned firefox_record_size_limit = 16385;
+constexpr std::size_t firefox_ech_bytes = 282;
+constexpr std::size_t firefox_resumed_ech_bytes = 570;
 constexpr std::string_view firefox_ja4 = "t13d1517h2_8daaf6152771_3cbfd9057e0d";
+constexpr std::string_view firefox_resumed_ja4 = "t13d1517h2_8daaf6152771_e6dcd7ae0a9e";
 // HEADER_TABLE_SIZE, ENABLE_PUSH, INITIAL_WINDOW_SIZE, MAX_FRAME_SIZE.
 const std::vector<std::pair<unsigned, std::uint32_t>> firefox_settings{{1, 65536}, {2, 0}, {4, 131072}, {5, 16384}};
 constexpr std::uint32_t firefox_connection_window_update = 12517377;
@@ -102,6 +107,8 @@ struct ClientHello {
         certificate_compression, alpn;
     std::string server_name;
     unsigned record_size_limit = 0;
+    std::size_t ech_bytes = 0;
+    bool ech_outer = false;
     bool any_grease = false;
 
     std::string ja4() const {
@@ -184,6 +191,11 @@ ClientHello parse_client_hello(std::string_view handshake) {
                 hello.key_shares.push_back(hex4(shares.u16()));
                 shares.take(shares.u16());
             }
+            break;
+        }
+        case 0xfe0d: { // encrypted_client_hello
+            hello.ech_outer = !data.empty() && field.u8() == 0;
+            hello.ech_bytes = data.size();
             break;
         }
         default: break;
@@ -472,7 +484,7 @@ std::vector<Frame> page_and_rpc(Http2Server &server) {
 }
 } // namespace
 
-TEST_CASE("The ClientHello is Firefox's", "[firefox-http][fingerprint]") {
+TEST_CASE("The ClientHello is Firefox's", "[firefox][firefox-http][fingerprint]") {
     const auto hello = capture_client_hello();
     CHECK(hello.ciphers == firefox_ciphers);
     CHECK(hello.extensions == firefox_extensions);
@@ -484,12 +496,14 @@ TEST_CASE("The ClientHello is Firefox's", "[firefox-http][fingerprint]") {
     CHECK(hello.certificate_compression == firefox_certificate_compression);
     CHECK(hello.alpn == firefox_alpn);
     CHECK(hello.record_size_limit == firefox_record_size_limit);
+    CHECK(hello.ech_outer);
+    CHECK(hello.ech_bytes == firefox_ech_bytes);
     CHECK(hello.server_name == "localhost");
     CHECK_FALSE(hello.any_grease);
     CHECK(hello.ja4() == firefox_ja4);
 }
 
-TEST_CASE("The HTTP/2 connection opens as Firefox's does", "[firefox-http][fingerprint]") {
+TEST_CASE("The HTTP/2 connection opens as Firefox's does", "[firefox][firefox-http][fingerprint]") {
     Http2Server server;
     const auto frames = page_and_rpc(server);
     REQUIRE(frames.size() >= 3);
@@ -509,7 +523,7 @@ TEST_CASE("The HTTP/2 connection opens as Firefox's does", "[firefox-http][finge
     CHECK(frames[2].type == frame_headers);
 }
 
-TEST_CASE("HTTP/2 requests carry Firefox's priorities and header order", "[firefox-http][fingerprint]") {
+TEST_CASE("HTTP/2 requests carry Firefox's priorities and header order", "[firefox][firefox-http][fingerprint]") {
     Http2Server server;
     const auto blocks = header_blocks(page_and_rpc(server));
     REQUIRE(blocks.size() == 2);
@@ -541,10 +555,9 @@ TEST_CASE("HTTP/2 requests carry Firefox's priorities and header order", "[firef
 }
 
 // Firefox resumes a TLS 1.3 session without the session_ticket extension, so
-// that its ClientHello still has 17 extensions. BoringSSL keeps it next to
-// pre_shared_key, which makes a JA4 that no Firefox sends; so the session
-// never resumes and every connection opens with the full handshake's.
-TEST_CASE("A new connection opens with a full handshake's ClientHello", "[firefox-http][fingerprint]") {
+// that its ClientHello still carries 17 extensions, with a 570-byte outer ECH
+// GREASE extension before pre_shared_key.
+TEST_CASE("A resumed connection sends Firefox's PSK ClientHello", "[firefox][firefox-http][fingerprint]") {
     Http2Server server(true);
     {
         HttpSession session(server.options());
@@ -554,25 +567,33 @@ TEST_CASE("A new connection opens with a full handshake's ClientHello", "[firefo
     server.finish();
     REQUIRE_FALSE(server.second_hello.empty());
     const auto hello = parse_client_hello(server.second_hello);
-    CHECK(hello.extensions == firefox_extensions);
-    CHECK(hello.ja4() == firefox_ja4);
+    CHECK(hello.ciphers == firefox_ciphers);
+    CHECK(hello.extensions.size() == 17);
+    CHECK(std::find(hello.extensions.begin(), hello.extensions.end(), "0023") == hello.extensions.end());
+    CHECK(hello.extensions == firefox_resumed_extensions);
+    CHECK(hello.ech_outer);
+    CHECK(hello.ech_bytes == firefox_resumed_ech_bytes);
+    CHECK_FALSE(hello.any_grease);
+    CHECK(hello.ja4() == firefox_resumed_ja4);
 }
 
 // Firefox opens each stream's window to 12 MiB with a WINDOW_UPDATE right
-// after its HEADERS. The prebuilt curl-impersonate sends none there (it caps a
-// stream's window at 1 MiB and has no option for it), so this stays a known
-// difference until it is built with a patch.
-TEST_CASE("Each HTTP/2 stream's window opens as Firefox's does", "[firefox-http][fingerprint][!mayfail]") {
+// after its HEADERS.
+TEST_CASE("Each HTTP/2 stream's window opens as Firefox's does", "[firefox][firefox-http][fingerprint]") {
     Http2Server server;
     const auto frames = page_and_rpc(server);
-    const auto first = std::find_if(frames.begin(), frames.end(), [](const Frame &item) { return item.type == frame_headers; });
-    REQUIRE(first != frames.end());
-    // The client's own frames between may only be connection-wide ones (an
-    // acknowledgement of the server's SETTINGS).
-    const auto update = std::find_if(std::next(first), frames.end(), [&](const Frame &item) { return item.stream == first->stream; });
-    REQUIRE(update != frames.end());
-    UNSCOPED_INFO("first frame on the stream after its HEADERS: type " << update->type);
-    REQUIRE(update->type == frame_window_update);
-    CHECK(Reader{update->payload}.u32() == firefox_stream_window_update);
+    std::size_t streams = 0;
+    for (auto it = frames.begin(); it != frames.end(); ++it) {
+        if (it->type != frame_headers) continue;
+        ++streams;
+        // The client's own frames between may only be connection-wide ones (an
+        // acknowledgement of the server's SETTINGS).
+        const auto update = std::find_if(std::next(it), frames.end(), [&](const Frame &item) { return item.stream == it->stream; });
+        REQUIRE(update != frames.end());
+        UNSCOPED_INFO("first frame on stream " << it->stream << " after its HEADERS: type " << update->type);
+        REQUIRE(update->type == frame_window_update);
+        CHECK(Reader{update->payload}.u32() == firefox_stream_window_update);
+    }
+    CHECK(streams == 2);
 }
 #endif

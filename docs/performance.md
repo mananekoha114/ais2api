@@ -20,7 +20,7 @@ ais2api_replay --seconds 7200
 - 4 个客户端，每个请求新建一条回环 TCP 连接，完成后等待 100 ms。这把建连速率限制在每秒 40 次，与后端速度无关；观察到的吞吐量是该负载下的吞吐量，而不是服务器的最大容量。
 - 客户端发送带鉴权的 Gemini SSE 请求，目标为合成模型。后端输出 8 个内容事件（每个 1024 字节 ASCII 文本），再输出 1 个结束/usage 事件，没有人为的上游延迟。每个成功响应必须恰好解码出这 9 个事件、8192 字节内容和 STOP 结束原因。
 - 服务端配置：队列容量 8、转发窗口 4096 字节、对象上限 65536 字节、队列/生成/空闲时限均为 10 秒；客户端接收超时 10 秒。
-- 测试用的配置、SQLite 状态和生成的 API Key 只存在于唯一命名的临时目录中，不导入真实 Google Cookie，运行结束后停止并删除。整个负载不涉及 Chromium 进程、浏览器准备、外部媒体抓取或 Google 请求。
+- 测试用的配置、SQLite 状态和生成的 API Key 只存在于唯一命名的临时目录中，不导入真实 Google Cookie，运行结束后停止并删除。整个负载不涉及浏览器进程、运行时准备、外部媒体抓取或 Google 请求。
 
 当前版本只有固定的 Gemini SSE 请求，没有混合非流式响应、OpenAI 格式、取消请求、大图片、多账号轮换或浏览器故障恢复，这些需要单独的负载。报告中明确标记浏览器与上游状态未验证。
 
@@ -34,7 +34,7 @@ stdout 输出一个 JSON 对象，`scope: "offline_backend_replay"`；服务生�
 - **`backend_cpu_seconds`** 统计生成工作线程构造和推送合成事件消耗的 CPU（Windows 为 GetThreadTimes，Linux/Termux 为 CLOCK_THREAD_CPUTIME_ID），包含后端侧的事件转发工作，不含休眠/阻塞时间和 HTTP/客户端线程的工作。**`process_cpu_seconds`** 覆盖整个共址测试进程，包括 HTTP 客户端和采样（Windows 为 GetProcessTimes，Linux/Termux 为 std::clock）。两者都不是浏览器 CPU。
 - **RSS** 在 Windows 上为 GetProcessMemoryInfo 的工作集，在 Linux/Termux 上为 `/proc/self/statm` 的常驻页数乘以页大小。首末两次采样时测试服务仍在运行。100 ms 采样器记录 RSS，并通过真实的本地控制通道查询队列深度。这些是**采样**峰值，不保证是瞬时最大值。`sample_errors` 统计失败的采样，合格的运行应为 0。采样器和 HTTP 客户端本身也消耗 CPU 与内存，因此这些数字不是独立的服务器资源占用。
 - **退出码** 0 表示运行完成，且没有计入的请求/采样错误或服务线程失败；它不是通用的性能合格阈值。非零表示中断、准备/运行失败、请求错误或采样失败，请保留 JSON 报告并调查。
-- 报告标记 `browser: null`、`browser_verified: false`、`google_verified: false` 与 `original_project_comparison: null`，避免把合成管线与 BrowserGateway 性能或与原项目的对比混为一谈。
+- 报告标记 `browser: null`、`browser_verified: false`、`google_verified: false` 与 `original_project_comparison: null`，避免把合成管线与真实浏览器性能或与原项目的对比混为一谈。
 
 ## 解读结果
 

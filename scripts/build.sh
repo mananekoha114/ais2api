@@ -13,7 +13,6 @@ usage() {
 Usage: sh scripts/build.sh [linux|termux] [options]
   --install-deps       install Termux host packages (changes shared packages)
   --package            create desktop CPack TGZ after tests
-  --browser-bundle PATH include a verified local browser (desktop x86_64 only)
   --webui              build and embed the WebUI (requires Node.js 20.19+ or 22.12+)
   --sanitizers         enable desktop Linux ASan/UBSan
   --fuzzer             build Clang libFuzzer target (also enables sanitizers)
@@ -26,7 +25,7 @@ EOF
 }
 target=linux
 case "${1:-}" in linux|termux) target=$1; shift ;; esac
-packages=0; package=0; sanitize=OFF; fuzz=OFF; testing=ON; webui=OFF; jobs=2; build_dir=; browser_bundle=
+packages=0; package=0; sanitize=OFF; fuzz=OFF; testing=ON; webui=OFF; jobs=2; build_dir=
 [ "$target" != termux ] || jobs=1
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -37,9 +36,9 @@ while [ "$#" -gt 0 ]; do
     --fuzzer) fuzz=ON; sanitize=ON; shift ;;
     --skip-tests) testing=OFF; shift ;;
     --webui) webui=ON; shift ;;
-    --build-dir|--jobs|--browser-bundle)
+    --build-dir|--jobs)
       [ "$#" -ge 2 ] || { echo "Missing argument: $1" >&2; exit 2; }
-      case "$1" in --build-dir) build_dir=$2 ;; --jobs) jobs=$2 ;; --browser-bundle) browser_bundle=$2 ;; esac
+      case "$1" in --build-dir) build_dir=$2 ;; --jobs) jobs=$2 ;; esac
       shift 2 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -68,20 +67,40 @@ retry() {
 if [ "$target" = termux ]; then
   [ -n "${PREFIX:-}" ] && command -v pkg >/dev/null 2>&1 || { echo 'Run in the Termux host, outside proot.' >&2; exit 1; }
   [ "$(uname -m)" = aarch64 ] || { echo 'Supported Termux target: ARM64 (aarch64).' >&2; exit 1; }
-  [ "$sanitize" = OFF ] && [ "$fuzz" = OFF ] && [ "$package" -eq 0 ] && [ -z "$browser_bundle" ] || { echo 'Desktop sanitizer/fuzzer/archive targets are separate from Termux device acceptance.' >&2; exit 2; }
+  [ "$sanitize" = OFF ] && [ "$fuzz" = OFF ] && [ "$package" -eq 0 ] || { echo 'Desktop sanitizer/fuzzer/archive targets are separate from Termux device acceptance.' >&2; exit 2; }
   if [ "$packages" -eq 1 ]; then
-    pkg install -y clang cmake ninja git curl pkg-config boost libcurl openssl libarchive libsqlite zstd
+    pkg install -y clang cmake ninja git curl pkg-config boost boost-headers libnghttp2 openssl libarchive libsqlite zlib zstd xz-utils
   fi
-  for tool in cmake ninja clang++ curl tar sha512sum; do need "$tool"; done
-  prefix_path=$PREFIX
+  for tool in cmake ninja clang clang++ curl tar sha512sum; do need "$tool"; done
+  deps="$project/build/deps"
+  mkdir -p "$deps"
+  # Same version and archive checksum as the pinned vcpkg ada-url port.
+  ada_version=4.0.0
+  ada_hash=9ced1aedc22298a6393c35575f7d7b452a25b2249c19270987a17d9969c9b821dd9f6b165ee1dcf275741fc7de2e1d83fd8c4780bd87926b1f236ea3f9f7c965
+  ada_archive="$deps/ada-$ada_version.tar.gz"
+  ada_source="$deps/ada-$ada_version"
+  if [ ! -f "$ada_archive" ]; then
+    curl --fail --location --retry 2 --connect-timeout 20 --output "$ada_archive.part" "https://github.com/ada-url/ada/archive/v$ada_version.tar.gz"
+    printf '%s  %s\n' "$ada_hash" "$ada_archive.part" | sha512sum --check --status
+    mv -- "$ada_archive.part" "$ada_archive"
+  fi
+  printf '%s  %s\n' "$ada_hash" "$ada_archive" | sha512sum --check --status
+  if [ ! -d "$ada_source" ]; then
+    tar -xzf "$ada_archive" -C "$deps"
+    printf '%s\n' "$ada_hash" > "$ada_source/.ais2api-archive"
+  else
+    [ -f "$ada_source/.ais2api-archive" ] && [ "$(cat "$ada_source/.ais2api-archive")" = "$ada_hash" ] || { echo "Unrecognized ada-url directory: $ada_source" >&2; exit 1; }
+  fi
+  cmake -S "$ada_source" -B "$deps/ada-build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$deps/ada-install" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_C_COMPILER="${CC:-clang}" -DCMAKE_CXX_COMPILER="${CXX:-clang++}" -DBUILD_SHARED_LIBS=OFF -DADA_TESTING=OFF -DADA_BENCHMARKS=OFF -DADA_TOOLS=OFF -DADA_USE_SIMDUTF=OFF -DCMAKE_DISABLE_FIND_PACKAGE_Python3=ON
+  cmake --build "$deps/ada-build" --parallel "$jobs"
+  cmake --install "$deps/ada-build"
+  prefix_path="$deps/ada-install;$PREFIX"
   if [ "$testing" = ON ]; then
     # Same version and archive checksum as the pinned vcpkg Catch2 port.
     catch_version=3.16.0
     catch_hash=b17a1d03bd206ec2a006bfd2cb6a40cb641dd6c3ee192f4e4830ecc2c7fe60ffb2d98397adbb7c039b065c891ebc5dcd0e02331dff472ced7411f8263e1d7b29
-    deps="$project/build/deps"
     archive="$deps/Catch2-$catch_version.tar.gz"
     source="$deps/Catch2-$catch_version"
-    mkdir -p "$deps"
     if [ ! -f "$archive" ]; then
       curl --fail --location --retry 2 --connect-timeout 20 --output "$archive.part" "https://github.com/catchorg/Catch2/archive/v$catch_version.tar.gz"
       printf '%s  %s\n' "$catch_hash" "$archive.part" | sha512sum --check --status
@@ -97,14 +116,13 @@ if [ "$target" = termux ]; then
     cmake -S "$source" -B "$deps/catch2-build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$deps/catch2-install" -DCATCH_BUILD_TESTING=OFF -DCATCH_INSTALL_DOCS=OFF
     cmake --build "$deps/catch2-build" --parallel "$jobs"
     cmake --install "$deps/catch2-build"
-    prefix_path="$deps/catch2-install;$PREFIX"
+    prefix_path="$deps/catch2-install;$prefix_path"
   fi
   cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DAIS2API_BUILD_WEBUI="$webui" -DAIS2API_DEV_BUNDLE=OFF -DCMAKE_PREFIX_PATH="$prefix_path" -DCMAKE_CXX_COMPILER="${CXX:-clang++}" -DCMAKE_INSTALL_PREFIX="$build_dir/install"
 else
-  # ARM64 builds the Camoufox backend only: no CloakBrowser is pinned for Linux ARM64.
   case "$(uname -m)" in
     x86_64) triplet=x64-linux ;;
-    aarch64) triplet=arm64-linux; [ -z "$browser_bundle" ] || { echo '--browser-bundle needs Linux x86_64.' >&2; exit 2; } ;;
+    aarch64) triplet=arm64-linux ;;
     *) echo 'This desktop preset targets Linux x86_64 and ARM64.' >&2; exit 1 ;;
   esac
   [ "$packages" -eq 0 ] || { echo 'Install Linux build prerequisites using your OS package manager; see docs/platforms.md.' >&2; exit 2; }
@@ -120,7 +138,7 @@ else
   actual=$(git -C "$vcpkg_root" rev-parse HEAD)
   [ "$actual" = "$baseline" ] || { echo 'VCPKG_ROOT must match the manifest baseline; existing checkout was left unchanged.' >&2; exit 1; }
   [ -f "$vcpkg_root/vcpkg" ] || "$vcpkg_root/bootstrap-vcpkg.sh" -disableMetrics
-  cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DAIS2API_SANITIZE="$sanitize" -DAIS2API_BUILD_FUZZER="$fuzz" -DAIS2API_BUILD_WEBUI="$webui" -DAIS2API_DEV_BUNDLE=OFF -DCMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET="$triplet" -DCMAKE_INSTALL_PREFIX="$build_dir/install" -DAIS2API_BROWSER_BUNDLE_DIR="$browser_bundle"
+  cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DAIS2API_SANITIZE="$sanitize" -DAIS2API_BUILD_FUZZER="$fuzz" -DAIS2API_BUILD_WEBUI="$webui" -DAIS2API_DEV_BUNDLE=OFF -DCMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET="$triplet" -DCMAKE_INSTALL_PREFIX="$build_dir/install"
 fi
 cmake --build "$build_dir" --parallel "$jobs"
 if [ "$testing" = ON ]; then ctest --test-dir "$build_dir" --output-on-failure; fi

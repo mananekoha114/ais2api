@@ -8,6 +8,7 @@
 #include "ais2api/management.hpp"
 #include "ais2api/runtime.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <sqlite3.h>
 #include <algorithm>
 
 using namespace ais2api;
@@ -67,39 +68,34 @@ Account account(std::string id) {
 } // namespace
 
 TEST_CASE("account backends map onto the gateways that serve them", "[router]") {
-    CHECK(adopted_backend("cloakbrowser") == "cloakbrowser");
     CHECK(adopted_backend("camoufox") == "auto");
-    CHECK(effective_backend("cloakbrowser", "camoufox") == "cloakbrowser");
-    for (auto stored : {"auto", "camoufox"}) CHECK(effective_backend(stored, "cloakbrowser") == "camoufox");
+    CHECK(adopted_backend("auto") == "auto");
+    CHECK(adopted_backend("") == "auto");
+    for (auto stored : {"auto", "camoufox"})
+        CHECK(effective_backend(stored, "camoufox", "windows-x64") == "camoufox");
+    CHECK(effective_backend("auto", "camoufox") == default_firefox_backend());
     // Without the engine compiled in, Camoufox stands in for it.
-    CHECK(effective_backend("spidermonkey", "cloakbrowser") == (spidermonkey_available() ? "spidermonkey" : "camoufox"));
+    CHECK(effective_backend("spidermonkey", "camoufox") == (spidermonkey_available() ? "spidermonkey" : "camoufox"));
     CHECK(identity_family("spidermonkey") == "firefox");
-    CHECK(effective_backend("", "camoufox") == "camoufox");
-    CHECK(effective_backend("unknown", "cloakbrowser") == "cloakbrowser");
-    CHECK(identity_family("cloakbrowser") == "chrome");
+    CHECK(effective_backend("", "camoufox") == default_firefox_backend());
+    CHECK(effective_backend("unknown", "camoufox") == default_firefox_backend());
     CHECK(identity_family("auto") == "firefox");
     CHECK(identity_family("camoufox") == "firefox");
     CHECK(valid_account_backend("spidermonkey"));
+    CHECK(valid_account_backend("auto"));
+    CHECK(valid_account_backend("camoufox"));
+    CHECK_FALSE(valid_account_backend("cloakbrowser"));
     CHECK_FALSE(valid_account_backend(""));
     CHECK_FALSE(valid_account_backend("Camoufox"));
-    CHECK(backends_needed("cloakbrowser", {}) == std::vector<std::string>{"cloakbrowser"});
-    CHECK(backends_needed("cloakbrowser", {"", "cloakbrowser", "auto"}) == std::vector<std::string>{"cloakbrowser", "camoufox"});
-    CHECK(backends_needed("camoufox", {"camoufox", "cloakbrowser"}) == std::vector<std::string>{"camoufox", "cloakbrowser"});
-    // The SpiderMonkey backend serves identities Camoufox's setup provides.
-    CHECK(backends_needed("cloakbrowser", {"spidermonkey"}) == std::vector<std::string>{"cloakbrowser", "camoufox"});
-}
-
-TEST_CASE("CloakBrowser is reported as deprecated wherever it is still used", "[router]") {
-    const auto entry = [](bool by_default, bool accounts) {
-        return json::array{json::object{{"code", "cloakbrowser_backend"}, {"default_backend", by_default}, {"accounts", accounts}}};
-    };
+    CHECK(backends_needed("camoufox", {}, "windows-x64") == std::vector<std::string>{"camoufox"});
+    CHECK(backends_needed("camoufox", {"", "auto"}, "windows-x64") == std::vector<std::string>{"camoufox"});
+    CHECK(backends_needed("camoufox", {"camoufox"}, "windows-x64") == std::vector<std::string>{"camoufox"});
+    // SpiderMonkey stays distinct when compiled in; otherwise Camoufox stands in for it.
+    CHECK(backends_needed("camoufox", {"spidermonkey"}, "windows-x64") ==
+          (spidermonkey_available() ? std::vector<std::string>{"camoufox", "spidermonkey"}
+                                    : std::vector<std::string>{"camoufox"}));
     CHECK(backend_deprecations("camoufox", {}).empty());
     CHECK(backend_deprecations("camoufox", {"auto", "camoufox", "spidermonkey", ""}).empty());
-    CHECK(backend_deprecations("camoufox", {"auto", "cloakbrowser"}) == entry(false, true));
-    CHECK(backend_deprecations("cloakbrowser", {}) == entry(true, false));
-    CHECK(backend_deprecations("cloakbrowser", {"auto"}) == entry(true, false));
-    // An unsettled account follows the default.
-    CHECK(backend_deprecations("cloakbrowser", {""}) == entry(true, true));
 }
 
 TEST_CASE("stored accounts settle on the backend they used and keep it", "[router][state]") {
@@ -110,11 +106,11 @@ TEST_CASE("stored accounts settle on the backend they used and keep it", "[route
         first = import_account(store, "first");
         CHECK(store.account_backend(first) == std::string{});
         CHECK(store.stored_backends() == std::vector<std::string>{""});
-        CHECK(store.adopt_backends("cloakbrowser") == 1);
+        CHECK(store.adopt_backends("auto") == 1);
         CHECK(store.adopt_backends("auto") == 0);
         second = import_account(store, "second");
         CHECK(store.adopt_backends("auto") == 1);
-        CHECK(store.fingerprint(first).backend == "cloakbrowser");
+        CHECK(store.fingerprint(first).backend == "auto");
         CHECK(store.fingerprint(second).backend == "auto");
         CHECK_FALSE(store.account_backend("acc_missing"));
         CHECK_THROWS_AS(store.set_backend("acc_missing", "camoufox"), Error);
@@ -130,94 +126,126 @@ TEST_CASE("stored accounts settle on the backend they used and keep it", "[route
     CHECK(stored_backends(dir.path / "missing").empty());
 }
 
+TEST_CASE("Store migrates legacy CloakBrowser accounts to auto once on open", "[router][state]") {
+    Directory dir;
+    std::string id;
+    {
+        Store store(dir.path);
+        id = import_account(store, "legacy");
+        store.set_backend(id, "camoufox");
+    }
+    sqlite3 *db = nullptr;
+    REQUIRE(sqlite3_open(path_utf8(dir.path / "state.sqlite3").c_str(), &db) == SQLITE_OK);
+    REQUIRE(sqlite3_exec(db, "UPDATE fingerprints SET backend='cloakbrowser'", nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close(db);
+
+    CHECK(stored_backends(dir.path) == std::vector<std::string>{"auto"});
+    {
+        Store reopened(dir.path);
+        CHECK(reopened.migrated_cloakbrowser_backends() == 1);
+        CHECK(reopened.fingerprint(id).backend == "auto");
+        CHECK(reopened.account_backend(id) == std::string{"auto"});
+    }
+    Store third(dir.path);
+    CHECK(third.migrated_cloakbrowser_backends() == 0);
+}
+
 TEST_CASE("the router serves each account on its own gateway and keeps one browser", "[router]") {
     Directory dir;
     Store store(dir.path);
-    const auto chrome = import_account(store, "chrome"), firefox = import_account(store, "firefox");
-    store.set_backend(chrome, "cloakbrowser");
-    store.set_backend(firefox, "auto");
+    const auto sm = import_account(store, "sm"), cam = import_account(store, "cam");
+    store.set_backend(sm, "spidermonkey");
+    store.set_backend(cam, "camoufox");
     Config config;
     config.data_dir = dir.path;
     Calls calls;
-    BackendRouter router(config, store, recording(calls));
+    BackendRouter router(config, store, recording(calls), {}, "windows-x64");
 
     // Before any work the default backend's gateway answers diagnostics.
     auto diagnostics = router.diagnostics();
-    CHECK(string_or(diagnostics, "status") == "cloakbrowser_status");
-    CHECK(string_or(diagnostics, "backend") == "cloakbrowser");
-    CHECK(string_or(diagnostics, "default_backend") == "cloakbrowser");
+    CHECK(string_or(diagnostics, "status") == "camoufox_status");
+    CHECK(string_or(diagnostics, "backend") == "camoufox");
+    CHECK(string_or(diagnostics, "default_backend") == "camoufox");
 
-    router.generate({}, account(chrome), {}, {});
-    router.generate({}, account(firefox), {}, {});
-    CHECK(calls.log == std::vector<std::string>{"create:cloakbrowser", "cloakbrowser:generate:" + chrome, "create:camoufox",
-                                                "cloakbrowser:close", "camoufox:generate:" + firefox});
+    router.generate({}, account(sm), {}, {});
+    router.generate({}, account(cam), {}, {});
+    if (spidermonkey_available()) {
+        CHECK(calls.log == std::vector<std::string>{"create:camoufox", "create:spidermonkey", "spidermonkey:generate:" + sm,
+                                                    "spidermonkey:close", "camoufox:generate:" + cam});
+        CHECK(router.backend_for(account(sm)) == "spidermonkey");
+    } else {
+        CHECK(calls.log == std::vector<std::string>{"create:camoufox", "camoufox:generate:" + sm,
+                                                    "camoufox:generate:" + cam});
+        CHECK(router.backend_for(account(sm)) == "camoufox");
+    }
     CHECK(string_or(router.diagnostics(), "backend") == "camoufox");
-    CHECK(router.backend_for(account(firefox)) == "camoufox");
+    CHECK(router.backend_for(account(cam)) == "camoufox");
 
     calls.log.clear();
     router.reset_session();
     router.clear_template();
     CHECK(router.release_idle());
-    CHECK(calls.log == std::vector<std::string>{"camoufox:reset_session", "camoufox:clear_template",
-                                                "camoufox:release_idle", "cloakbrowser:release_idle"});
+    if (spidermonkey_available()) {
+        CHECK(calls.log == std::vector<std::string>{"camoufox:reset_session", "camoufox:clear_template",
+                                                    "camoufox:release_idle", "spidermonkey:release_idle"});
+    } else {
+        CHECK(calls.log == std::vector<std::string>{"camoufox:reset_session", "camoufox:clear_template",
+                                                    "camoufox:release_idle"});
+    }
 
-    // An account being imported is not stored yet: it uses the default,
-    // which follows the configuration without a restart.
     calls.log.clear();
     Account candidate = account("acc_candidate");
     router.probe_import(candidate);
-    CHECK(calls.log == std::vector<std::string>{"camoufox:close", "cloakbrowser:probe:acc_candidate"});
+    CHECK(calls.log == std::vector<std::string>{"camoufox:probe:acc_candidate"});
     config.browser_backend = "camoufox";
     calls.log.clear();
     router.reconfigure(config);
-    CHECK(calls.log == std::vector<std::string>{"camoufox:reconfigure:camoufox", "cloakbrowser:reconfigure:camoufox"});
+    if (spidermonkey_available()) {
+        CHECK(calls.log == std::vector<std::string>{"camoufox:reconfigure:camoufox", "spidermonkey:reconfigure:camoufox"});
+    } else {
+        CHECK(calls.log == std::vector<std::string>{"camoufox:reconfigure:camoufox"});
+    }
     CHECK(router.backend_for(Account{}) == "camoufox");
-    CHECK(router.backend_for(account(chrome)) == "cloakbrowser");
     calls.log.clear();
     router.close();
-    CHECK(calls.log == std::vector<std::string>{"camoufox:close", "cloakbrowser:close"});
+    if (spidermonkey_available()) {
+        CHECK(calls.log == std::vector<std::string>{"camoufox:close", "spidermonkey:close"});
+    } else {
+        CHECK(calls.log == std::vector<std::string>{"camoufox:close"});
+    }
 }
 
-TEST_CASE("moving accounts between Chrome and Firefox identities needs confirmation", "[router][admin][fingerprint]") {
+TEST_CASE("accounts switch freely between Firefox backends and reject CloakBrowser", "[router][admin][fingerprint]") {
     Directory dir;
     Store store(dir.path);
     Config config;
     config.data_dir = dir.path;
     const auto id = import_account(store, "switch");
     const auto other = import_account(store, "other");
-    // Listing settles the accounts on the configured backend.
+    // Listing settles the accounts on "auto".
     const auto listed = manage(store, config, {{"command", "accounts.list"}}).at("accounts").as_array();
-    CHECK(string_or(listed[0].as_object(), "backend") == "cloakbrowser");
+    CHECK(string_or(listed[0].as_object(), "backend") == "auto");
 
     auto view = manage(store, config, {{"command", "accounts.fingerprint"}, {"id", id}});
-    CHECK(string_or(view, "backend") == "cloakbrowser");
-    CHECK(string_or(view, "identity") == "chrome");
-    CHECK(view.at("firefox_identity_saved") == false);
+    CHECK(string_or(view, "backend") == "auto");
+    CHECK(string_or(view, "identity") == "firefox");
 
     const auto update = [&](json::object fields) {
         fields["command"] = "accounts.fingerprint.update";
         fields["id"] = id;
         return manage(store, config, fields);
     };
-    try {
-        update({{"backend", "camoufox"}});
-        FAIL("expected a confirmation error");
-    } catch (const Error &error) {
-        CHECK(error.status == 409);
-        CHECK(error.code == "identity_change_unconfirmed");
-    }
-    CHECK(store.fingerprint(id).backend == "cloakbrowser");
-    view = update({{"backend", "camoufox"}, {"confirm_identity_change", true}, {"locale", "en-US"}});
+    view = update({{"backend", "camoufox"}, {"locale", "en-US"}});
     CHECK(string_or(view, "backend") == "camoufox");
     CHECK(string_or(view, "effective_backend") == "camoufox");
     CHECK(string_or(view, "identity") == "firefox");
     CHECK(string_or(view, "locale") == "en-US");
-    // Between Firefox backends the identity stays.
-    view = update({{"backend", "auto"}});
+    // Deprecated boolean confirm_identity_change remains tolerated as a no-op.
+    view = update({{"backend", "auto"}, {"confirm_identity_change", true}});
     CHECK(string_or(view, "backend") == "auto");
-    CHECK(string_or(view, "effective_backend") == "camoufox");
-    for (const auto &fields : std::vector<json::object>{{{"backend", "firefox"}}, {{"backend", 1}},
-                                                       {{"backend", "auto"}, {"confirm_identity_change", "yes"}}})
+    CHECK(string_or(view, "effective_backend") == std::string(default_firefox_backend()));
+    for (const auto &fields : std::vector<json::object>{{{"backend", "cloakbrowser"}}, {{"backend", "firefox"}},
+                                                       {{"backend", 1}}, {{"backend", "auto"}, {"confirm_identity_change", "yes"}}})
         CHECK_THROWS_AS(update(fields), Error);
     if (spidermonkey_available()) {
         view = update({{"backend", "spidermonkey"}});
@@ -234,53 +262,35 @@ TEST_CASE("moving accounts between Chrome and Firefox identities needs confirmat
         }
     }
 
-    // The bulk move is the explicit migration command.
     const auto all = [&](json::object fields) {
         fields["command"] = "accounts.backend.all";
         return manage(store, config, fields);
     };
     CHECK_THROWS_AS(all({{"backend", "cloakbrowser"}}), Error);
-    auto moved = all({{"backend", "camoufox"}, {"confirm_identity_change", true}});
+    auto moved = all({{"backend", "camoufox"}});
     CHECK(moved.at("updated") == 2);
-    CHECK(moved.at("identity_changed") == 1);
+    CHECK(moved.at("identity_changed") == 0);
     CHECK(store.fingerprint(other).backend == "camoufox");
     moved = all({{"backend", "auto"}});
     CHECK(moved.at("identity_changed") == 0);
     CHECK(moved.at("updated") == 2);
-
-    // Changing the configured default leaves stored accounts alone.
-    config.browser_backend = "camoufox";
-    const auto fresh = import_account(store, "fresh");
-    manage(store, config, {{"command", "accounts.list"}});
-    CHECK(store.fingerprint(fresh).backend == "auto");
-    config.browser_backend = "cloakbrowser";
-    CHECK(string_or(manage(store, config, {{"command", "accounts.fingerprint"}, {"id", fresh}}), "identity") == "firefox");
 }
 
 TEST_CASE("doctor checks every backend the stored accounts need", "[router][setup]") {
     Directory dir;
     Config config;
     config.data_dir = dir.path;
-    config.browser_executable = dir.path / "missing-chrome";
-    auto result = doctor(config, dir.path, std::vector<std::string>{});
-    CHECK(result.at("backends_needed").as_array() == json::array{"cloakbrowser"});
-    CHECK(result.at("deprecations").as_array().size() == 1);
-    CHECK(result.at("deprecations").at(0).at("default_backend") == true);
-    CHECK(result.at("deprecations").at(0).at("accounts") == false);
-    CHECK_FALSE(result.contains("camoufox"));
-    // A Firefox account adds Camoufox, whose runtime this directory lacks.
-    atomic_write(config.browser_executable, "stub");
-    result = doctor(config, dir.path, std::vector<std::string>{"cloakbrowser"});
-    CHECK(result.at("browser_exists") == true);
-    result = doctor(config, dir.path, std::vector<std::string>{"cloakbrowser", "auto"});
-    CHECK(result.at("backends_needed").as_array() == json::array{"cloakbrowser", "camoufox"});
+    config.browser_executable = dir.path / "missing-camoufox";
+    auto result = doctor(config, dir.path, std::vector<std::string>{}, "windows-x64");
+    CHECK(result.at("backends_needed").as_array() == json::array{"camoufox"});
+    CHECK(result.at("deprecations").as_array().empty());
     CHECK(result.contains("camoufox"));
+    CHECK(result.contains("fpgen_model"));
     CHECK(result.at("browser_exists") == false);
-    // On Camoufox nothing is deprecated until an account stays on CloakBrowser.
-    config.browser_backend = "camoufox";
-    CHECK(doctor(config, dir.path, std::vector<std::string>{"auto"}).at("deprecations").as_array().empty());
-    result = doctor(config, dir.path, std::vector<std::string>{"auto", "cloakbrowser"});
-    CHECK(result.at("deprecations").at(0).at("code") == "cloakbrowser_backend");
-    CHECK(result.at("deprecations").at(0).at("default_backend") == false);
-    CHECK(result.at("deprecations").at(0).at("accounts") == true);
+    if (spidermonkey_available()) {
+        result = doctor(config, dir.path, std::vector<std::string>{"auto"}, "termux-arm64");
+        CHECK(result.at("backends_needed").as_array() == json::array{"spidermonkey"});
+        CHECK(result.contains("spidermonkey"));
+        CHECK_FALSE(result.contains("camoufox"));
+    }
 }

@@ -58,42 +58,45 @@ TEST_CASE("unsupported parameter compatibility config persists and updates witho
     }
     CHECK(json::parse(read_file(cfg.config_file)).as_object().at("ignore_unsupported_parameters") == true);
 }
-TEST_CASE("browser DevTools origins and site isolation keep Chromium defaults and need a restart", "[config][admin][browser]") {
+TEST_CASE("removed Chromium DevTools origins and site isolation keys are migrated on load and rejected on patch", "[config][admin][browser]") {
     AdminDirectory dir;
     auto cfg = Config::load(dir.path / "config.json");
-    CHECK_FALSE(cfg.browser_remote_allow_origins);
-    CHECK(cfg.browser_site_isolation);
-    CHECK(cfg.to_json().at("browser_remote_allow_origins") == false);
-    CHECK(cfg.to_json().at("browser_site_isolation") == true);
-    auto relaxed = cfg.patched({{"browser_remote_allow_origins", true}});
-    CHECK(relaxed.browser_remote_allow_origins);
-    CHECK(restart_required(cfg, relaxed));
-    auto shared = cfg.patched({{"browser_site_isolation", false}});
-    CHECK_FALSE(shared.browser_site_isolation);
-    CHECK(restart_required(cfg, shared));
-    shared.save();
-    CHECK_FALSE(Config::load(cfg.config_file).browser_site_isolation);
-    for (const auto& invalid : json::array{0, 1, "true", nullptr})
+    CHECK_FALSE(cfg.to_json().contains("browser_remote_allow_origins"));
+    CHECK_FALSE(cfg.to_json().contains("browser_site_isolation"));
+    for (const auto& removed : json::array{true, false})
         for (auto key : {"browser_remote_allow_origins", "browser_site_isolation"})
-            CHECK_THROWS_AS(cfg.patched({{key, invalid}}), Error);
+            CHECK_THROWS_AS(cfg.patched({{key, removed}}), Error);
+    atomic_write(cfg.config_file, R"({"version":1,"browser_remote_allow_origins":true,"browser_site_isolation":false})");
+    auto migrated = Config::load(cfg.config_file);
+    CHECK(migrated.browser_backend == "camoufox");
+    auto persisted = json::parse(read_file(cfg.config_file)).as_object();
+    CHECK_FALSE(persisted.contains("browser_remote_allow_origins"));
+    CHECK_FALSE(persisted.contains("browser_site_isolation"));
 }
-TEST_CASE("a file without a browser backend stays on CloakBrowser, accepts Camoufox and applies without a restart", "[config][admin][browser]") {
+TEST_CASE("a legacy or empty browser backend migrates to Camoufox and accepts no CloakBrowser overrides", "[config][admin][browser]") {
     AdminDirectory dir;
-    // A file that names no backend is an older installation; a new one starts on Camoufox.
-    atomic_write(dir.path / "config.json", R"({"version":1})");
+    atomic_write(dir.path / "config.json", R"({"version":1,"browser_backend":"cloakbrowser"})");
     auto cfg = Config::load(dir.path / "config.json");
-    CHECK(Config{}.browser_backend == "cloakbrowser");
-    CHECK(cfg.browser_backend == "cloakbrowser");
-    CHECK(cfg.to_json().at("browser_backend") == "cloakbrowser");
+    CHECK(Config{}.browser_backend == "camoufox");
+    CHECK(cfg.browser_backend == "camoufox");
+    CHECK(cfg.to_json().at("browser_backend") == "camoufox");
+    CHECK(json::parse(read_file(cfg.config_file)).as_object().at("browser_backend") == "camoufox");
     auto camoufox = cfg.patched({{"browser_backend", "camoufox"}});
-    CHECK(camoufox.browser_backend == "camoufox");
-    // It only names the backend of accounts stored from now on.
     CHECK_FALSE(restart_required(cfg, camoufox));
-    camoufox.save();
-    CHECK(Config::load(cfg.config_file).browser_backend == "camoufox");
-    CHECK(Config::load(cfg.config_file, {{"browser_backend", "cloakbrowser"}}).browser_backend == "cloakbrowser");
-    for (const auto& invalid : json::array{"", "firefox", "Camoufox", 1, nullptr, json::array{}})
+    for (const auto& invalid : json::array{"", "cloakbrowser", "firefox", "Camoufox", 1, nullptr, json::array{}})
         CHECK_THROWS_AS(cfg.patched({{"browser_backend", invalid}}), Error);
+    CHECK_THROWS_AS(Config::load(cfg.config_file, {{"browser_backend", "cloakbrowser"}}), Error);
+}
+TEST_CASE("a CloakBrowser backend left in the environment migrates to Camoufox", "[config][admin][browser]") {
+    CompatibilityEnvironment environment("AIS2API_BROWSER_BACKEND");
+    AdminDirectory dir;
+    Config::load(dir.path / "config.json").save();
+    environment.set("cloakbrowser");
+    const auto cfg = Config::load(dir.path / "config.json");
+    CHECK(cfg.browser_backend == "camoufox");
+    CHECK(json::parse(read_file(cfg.config_file)).as_object().at("browser_backend") == "camoufox");
+    environment.set("chromium");
+    CHECK_THROWS_AS(Config::load(dir.path / "config.json"), Error);
 }
 TEST_CASE("search model function policy defaults to dropping functions and updates without restart", "[config][admin][search-model]") {
     AdminDirectory dir;
@@ -271,11 +274,8 @@ TEST_CASE("new configurations start on Camoufox in every build", "[config]") {
     CHECK(fresh.browser_backend == "camoufox");
     fresh.save();
     CHECK(Config::load(fresh.config_file).browser_backend == "camoufox");
-    // The environment still starts a new installation on CloakBrowser.
-    CHECK(Config::load(dir.path / "other.json", {{"browser_backend", "cloakbrowser"}}).browser_backend == "cloakbrowser");
-    // A file that names no backend keeps CloakBrowser.
     atomic_write(fresh.config_file, R"({"version":1})");
-    CHECK(Config::load(fresh.config_file).browser_backend == "cloakbrowser");
+    CHECK(Config::load(fresh.config_file).browser_backend == "camoufox");
 }
 TEST_CASE("management password replacement policy", "[config][admin]") {
     CHECK_NOTHROW(validate_admin_password("strong-password-1", "admin"));

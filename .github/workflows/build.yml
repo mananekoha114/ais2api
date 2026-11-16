@@ -30,6 +30,7 @@ jobs:
         run: |
           sh -n scripts/build.sh
           sh -n scripts/build-dev.sh
+          sh -n scripts/ci-termux.sh
           sh -n scripts/ci-termux-camoufox.sh
           sh -n docker/entrypoint.sh
           sh -n launcher/start.sh
@@ -37,7 +38,6 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_check_package.py'
           python3 -m unittest discover -s tests -p 'test_pricing_scraper.py'
           node --check browser/bridge.js
-          node --check browser/test_cookie_runtime.cjs
           node --test browser/test_bridge.cjs
           node --check userscript/ais2api-cookie.user.js
           node userscript/test_cookie_helper.cjs
@@ -56,7 +56,11 @@ jobs:
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/build/vcpkg-cache
       VCPKG_ROOT: ${{ github.workspace }}/build/deps/vcpkg
-      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      # The prebuilt SpiderMonkey shim frees std::string buffers through
+      # mozalloc's inline operator delete, which calls free(), while the linker
+      # may keep our libstdc++ code that allocated them with operator new. Both
+      # reach the same allocator, and Firefox's ASan builds disable the check too.
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:allow_user_segv_handler=1:alloc_dealloc_mismatch=0
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -66,7 +70,7 @@ jobs:
       - name: Install development tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang cmake ninja-build git curl zip unzip tar pkg-config autoconf automake libtool python3
+          sudo apt-get install -y build-essential clang cmake ninja-build git curl zip unzip tar xz-utils pkg-config autoconf automake libtool python3
       - name: Compute dependency cache key
         id: deps
         run: echo "scope=ubuntu24-${{ matrix.compiler }}-x64-linux-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
@@ -109,11 +113,8 @@ jobs:
           python3 tests/cli_smoke.py --exe build/linux/install/bin/ais2api
           python3 tests/portable_smoke.py --exe build/linux/install/bin/ais2api
       - name: One-click launcher smoke without a browser download
-        env:
-          # The stand-in executable is a CloakBrowser one; a new configuration starts on Camoufox.
-          AIS2API_BROWSER_BACKEND: cloakbrowser
         run: |
-          sh build/linux/install/start.sh --background --port 18460 --browser /usr/bin/true < /dev/null
+          sh build/linux/install/start.sh --background --skip-setup --port 18460 < /dev/null
           build/linux/install/bin/ais2api stop
       - name: Short wire-parser fuzz smoke
         if: matrix.compiler == 'clang' && matrix.sanitize == 'ON'
@@ -143,7 +144,7 @@ jobs:
       - name: Install Debian development tools
         run: |
           apt-get update
-          apt-get install -y build-essential cmake ninja-build git curl zip unzip tar pkg-config autoconf automake libtool python3 ca-certificates
+          apt-get install -y build-essential cmake ninja-build git curl zip unzip tar xz-utils pkg-config autoconf automake libtool python3 ca-certificates
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -184,11 +185,8 @@ jobs:
           python3 tests/cli_smoke.py --exe build/linux/install/bin/ais2api
           python3 tests/portable_smoke.py --exe build/linux/install/bin/ais2api
       - name: One-click launcher smoke without a browser download
-        env:
-          # The stand-in executable is a CloakBrowser one; a new configuration starts on Camoufox.
-          AIS2API_BROWSER_BACKEND: cloakbrowser
         run: |
-          sh build/linux/install/start.sh --background --port 18460 --browser /usr/bin/true < /dev/null
+          sh build/linux/install/start.sh --background --skip-setup --port 18460 < /dev/null
           build/linux/install/bin/ais2api stop
       - name: Verify runtime archive contents and checksum
         run: python3 scripts/check-package.py build/linux/packages/*.tar.gz
@@ -198,9 +196,71 @@ jobs:
           path: build/linux/packages/*.tar.gz*
           if-no-files-found: error
           retention-days: 28
+  linux-arm64:
+    name: Ubuntu 24.04 / GCC ARM64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/build/vcpkg-cache
+      VCPKG_ROOT: ${{ github.workspace }}/build/deps/vcpkg
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.12'
+      - name: Install development tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build git curl zip unzip tar xz-utils pkg-config autoconf automake libtool python3
+      - name: Compute dependency cache key
+        id: deps
+        run: echo "scope=ubuntu24-gcc-arm64-linux-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      - name: Restore dependency cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: build/vcpkg-cache
+          key: ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-
+            ${{ steps.deps.outputs.scope }}-
+      - name: Count restored dependency archives
+        id: restored
+        run: |
+          mkdir -p build/vcpkg-cache
+          echo "count=$(find build/vcpkg-cache -name '*.zip' | wc -l)" >> "$GITHUB_OUTPUT"
+      - name: Build, test, install, and package
+        run: sh scripts/build.sh linux --webui --package --jobs "$(nproc)"
+      - name: Check for newly built dependencies
+        id: built
+        if: ${{ !cancelled() }}
+        run: echo "changed=$(( $(find build/vcpkg-cache -name '*.zip' | wc -l) > ${{ steps.restored.outputs.count || 0 }} ))" >> "$GITHUB_OUTPUT"
+      - name: Save dependency cache
+        if: ${{ !cancelled() && steps.built.outputs.changed == '1' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: build/vcpkg-cache
+          key: ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
+      - name: CLI and IPC smoke without Google credentials
+        run: |
+          python3 tests/cli_smoke.py --exe build/linux/install/bin/ais2api
+          python3 tests/portable_smoke.py --exe build/linux/install/bin/ais2api
+      - name: One-click launcher smoke without a browser download
+        run: |
+          sh build/linux/install/start.sh --background --skip-setup --port 18460 < /dev/null
+          build/linux/install/bin/ais2api stop
+      - name: Verify runtime archive contents and checksum
+        run: python3 scripts/check-package.py build/linux/packages/*.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ubuntu24-arm64-gcc-runtime
+          path: build/linux/packages/*.tar.gz*
+          if-no-files-found: error
+          retention-days: 28
   windows:
     name: Windows / MSVC x64
-    runs-on: windows-2022
+    # The prebuilt SpiderMonkey was compiled against the MSVC 14.51 STL, and
+    # MSVC links it only with that toolset or newer: Visual Studio 2026.
+    runs-on: windows-2025-vs2026
     timeout-minutes: 90
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\build\vcpkg-cache
@@ -262,11 +322,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Portable smoke failed' }
       - name: One-click launcher smoke without a browser download
         shell: cmd
-        env:
-          # The stand-in executable is a CloakBrowser one; a new configuration starts on Camoufox.
-          AIS2API_BROWSER_BACKEND: cloakbrowser
         run: |
-          call build\windows\install\start.cmd --background --port 18460 --browser %SystemRoot%\System32\whoami.exe < NUL || exit /b 1
+          call build\windows\install\start.cmd --background --skip-setup --port 18460 < NUL || exit /b 1
           build\windows\install\bin\ais2api.exe stop
       - name: Verify runtime archive contents and checksum
         shell: pwsh
@@ -282,11 +339,10 @@ jobs:
           if-no-files-found: error
           retention-days: 28
 
-  # The SpiderMonkey backend's network layer, built with curl-impersonate and
-  # checked against Firefox's TLS and HTTP/2 fingerprints on loopback. It
-  # reuses the Windows job's dependency cache and does not save one.
-  windows-curl-impersonate:
-    name: Windows / curl-impersonate network tests
+  # Release builds enable SpiderMonkey and static curl-impersonate by default;
+  # verify that disabling both still builds and passes tests cleanly.
+  windows-minimal:
+    name: Windows / fallback without SpiderMonkey
     runs-on: windows-2022
     timeout-minutes: 60
     env:
@@ -298,7 +354,7 @@ jobs:
       - name: Compute dependency cache key
         id: deps
         shell: bash
-        run: echo "scope=windows-msvc-$VCPKG_TRIPLET-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+        run: echo "scope=windows-msvc-minimal-$VCPKG_TRIPLET-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
       - name: Restore dependency cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -307,18 +363,32 @@ jobs:
           restore-keys: |
             ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-
             ${{ steps.deps.outputs.scope }}-
-      - name: Build and run the network tests
+      - name: Count restored dependency archives
+        id: restored
+        shell: bash
+        run: |
+          mkdir -p build/vcpkg-cache
+          echo "count=$(find build/vcpkg-cache -name '*.zip' | wc -l)" >> "$GITHUB_OUTPUT"
+      - name: Build and run fallback tests
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path build/vcpkg-cache | Out-Null
-          # The developer shell points VCPKG_ROOT at Visual Studio's own vcpkg,
-          # so read it first, as scripts/build.ps1 does.
           $vcpkg = $env:VCPKG_ROOT
           . ./scripts/build-common.ps1
           Enter-BuildTools
           Initialize-Vcpkg $PWD.Path $vcpkg
-          Invoke-Checked cmake.exe @('-S', '.', '-B', 'build/impersonate', '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',
+          Invoke-Checked cmake.exe @('-S', '.', '-B', 'build/minimal', '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',
             "-DCMAKE_TOOLCHAIN_FILE=$vcpkg/scripts/buildsystems/vcpkg.cmake", "-DVCPKG_TARGET_TRIPLET=$env:VCPKG_TRIPLET",
-            '-DAIS2API_CURL_IMPERSONATE=ON', '-DAIS2API_BUILD_WEBUI=OFF')
-          Invoke-Checked cmake.exe @('--build', 'build/impersonate', '--target', 'ais2api_tests', '--parallel', "$env:NUMBER_OF_PROCESSORS")
-          Invoke-Checked build/impersonate/ais2api_tests.exe @('[firefox-http],[setup][download]')
+            '-DAIS2API_SPIDERMONKEY=OFF', '-DAIS2API_CURL_IMPERSONATE=OFF', '-DAIS2API_BUILD_WEBUI=OFF')
+          Invoke-Checked cmake.exe @('--build', 'build/minimal', '--target', 'ais2api_tests', '--parallel', "$env:NUMBER_OF_PROCESSORS")
+          Invoke-Checked ctest.exe @('--test-dir', 'build/minimal', '--output-on-failure')
+      - name: Check for newly built dependencies
+        id: built
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: echo "changed=$(( $(find build/vcpkg-cache -name '*.zip' | wc -l) > ${{ steps.restored.outputs.count || 0 }} ))" >> "$GITHUB_OUTPUT"
+      - name: Save dependency cache
+        if: ${{ !cancelled() && steps.built.outputs.changed == '1' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: build/vcpkg-cache
+          key: ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}

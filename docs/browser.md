@@ -4,53 +4,44 @@
 
 ## 架构
 
-C++ 进程直接启动配置的 Chromium / CloakBrowser 可执行文件；在 Termux 上，这个可执行文件是 `setup` 生成的启动器，会进入项目专属的 proot 环境。整个链路不依赖 Python、Node、Playwright 或外部 CDP 服务。
+C++ 进程直接启动配置的 Camoufox 可执行文件（通过 WebDriver BiDi 通信）；在包含 SpiderMonkey 引擎的构建中，`spidermonkey` 后端直接在进程内执行 WAA 程序并由 `curl-impersonate` 模拟 Firefox 网络栈。在 Termux 上若使用 Camoufox，会通过 `proot-distro` 进入项目专属的 `ais2api-browser` 容器。整个链路不依赖 Python、Node、Playwright 或外部浏览器控制服务。
 
-- 每次启动使用随机的私有资料目录，只读取其中的 `DevToolsActivePort`。
-- 通过 Boost.Beast 连接本机回环地址上的浏览器 WebSocket，创建一个隐身 BrowserContext，写入 storage state 中的 Cookie，在该上下文中创建页面并以扁平化 CDP 会话附加。
-- CDP 连接由专用线程持有，持续读取所有消息并按 id 分发回复；无关事件读到即丢弃。单次调用取消或超时只放弃该调用，不会断开浏览器连接。
-- 切换账号时先销毁旧上下文。
+- Camoufox 每次启动使用随机的私有资料目录，按 `storage state` 写入 Cookie 并通过 WebDriver BiDi 复用同一个隐私会话与标签页。
+- BiDi 连接由专用线程持有，持续读取所有消息并按 id 分发回复；无关事件读到即丢弃。单次调用取消或超时只放弃该调用，不会断开浏览器连接。
+- 切换账号时销毁旧上下文或按需重建新身份的浏览器进程。
 - Windows 上所有子进程属于“关闭即终止”的 Job Object；POSIX 上浏览器拥有独立进程组，关闭时只针对该进程组。
 - 关闭后删除运行时资料目录；导入的凭据保留在数据库中。
-- 页面会话启用 `Inspector`，渲染进程崩溃时进行中的调用立即以 `browser_disconnected` 失败，由重启逻辑接管。
-- 磁盘缓存上限 64 MB；`data/logs/browser-*.log` 只保留最近 8 份。
-- Cookie 与页面快照从不写入诊断日志。
+- 会话断开或崩溃时进行中的调用立即以 `browser_disconnected` 失败，由重启逻辑接管。
+- `data/logs/browser-*.log` 只保留最近 8 份；Cookie 与页面快照从不写入诊断日志。
 
-默认只有一个浏览器进程、一个驻留账号，同一时间处理一个生成请求，最多排队 8 个（`limits.queue_size`）。取消贯穿 HTTP、原生层和浏览器读取。
+默认只有一个活动后端实例、一个驻留账号，同一时间处理一个生成请求，最多排队 8 个（`limits.queue_size`）。取消贯穿 HTTP、原生层和浏览器/网络读取。
 
 ## 浏览器指纹
 
-每个账号拥有永久固定的浏览器指纹：
+每个账号拥有永久固定的 Firefox 浏览器指纹：
 
-- 账号首次保存（命令行导入、管理 API 导入或 Cookie 导入验证通过）时分配一个 10000–99999 之间的 CloakBrowser 种子；重新导入和凭据更新保留原种子，旧数据库中的账号在首次打开时补发。
-- 启动参数包括 `--fingerprint=<seed>`、`--fingerprint-platform`（macOS 主机上为 `macos`，其他情况一律为 `windows`）、`--fingerprint-timezone` 与 `--fingerprint-locale`。
-- 时区与语言默认跟随本机区域设置，也可以按账号覆盖（IANA 时区名与 BCP 47 语言标签）。检测来源：Windows 为用户区域和系统时区；POSIX 为 `TZ`、`/etc/localtime`、`/etc/timezone` 与 `LC_ALL` / `LC_MESSAGES` / `LANG`；Android/Termux 为系统属性。检测失败时回退为 `UTC` 与 `en-US`。CloakBrowser 把语言应用到 `navigator.language(s)`、`Intl` 与 `Accept-Language`。
-- `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` 阻止 WebRTC 在代理之外发送 UDP，避免 ICE 候选暴露真实地址。
-- 其他 Chromium 构建会忽略指纹参数。没有种子时 CloakBrowser 每次启动随机选择设备，没有时区/语言时呈现 UTC + en-US。
+- 账号首次保存（命令行导入、管理 API 导入或 Cookie 导入验证通过）时分配一个 10000–99999 之间的指纹种子；重新导入和凭据更新保留原种子，旧数据库中的账号在首次打开时补发。
+- 每个账号在本机 fpgen 模型下由种子和主机平台（`macos`、`windows` 或 `linux`）生成对应的 Firefox 身份并持久化保存在数据库中，由 Camoufox 与 SpiderMonkey 后端共同复用。
+- 时区与语言默认跟随本机区域设置，也可以按账号覆盖（IANA 时区名与 BCP 47 语言标签）。检测来源：Windows 为用户区域和系统时区；POSIX 为 `TZ`、`/etc/localtime`、`/etc/timezone` 与 `LC_ALL` / `LC_MESSAGES` / `LANG`；Android/Termux 为系统属性。检测失败时回退为 `UTC` 与 `en-US`。
 
-CloakBrowser 的指纹作用于整个进程，因此切换到指纹不同的账号时会重启浏览器；指纹相同的账号复用同一进程。管理 API 与 WebUI 可以查看指纹、覆盖时区和语言，或重新生成种子（Google 会把它视为新设备）；修改在该账号下次使用时生效。诊断信息中的 `fingerprint` 字段显示当前运行的身份。
+Camoufox 的身份在启动前写入临时配置并作用于进程，因此切换到身份不同的账号时会重启浏览器；管理 API 与 WebUI 可以查看指纹、覆盖时区和语言，或重新生成种子（Google 会把它视为新设备）；修改在该账号下次使用时生效。诊断信息中的 `fingerprint` 字段显示当前运行的身份。
 
 ### 按账号选择后端
 
 每个账号记住自己的浏览器后端：
 
-| 取值 | 身份 | 使用的浏览器 |
+| 取值 | 身份 | 使用的后端 |
 |---|---|---|
-| `cloakbrowser` | Chrome | CloakBrowser（**已弃用**，将在以后的版本中移除） |
-| `auto` | Firefox | 由 ais2api 选择 Firefox 后端，目前即 Camoufox |
-| `camoufox` | Firefox | Camoufox |
-| `spidermonkey` | Firefox | 不启动浏览器（**实验性**，只在开启 `AIS2API_SPIDERMONKEY` 编译的版本中提供，见下文） |
+| `auto` | Firefox | 由 ais2api 自动选择 Firefox 后端（桌面与服务器默认 Camoufox，Termux 在包含 SpiderMonkey 时默认 SpiderMonkey），并在就地重建后仍遇 403 且另一后端就绪时自动临时切换 6 小时 |
+| `camoufox` | Firefox | 固定使用 Camoufox |
+| `spidermonkey` | Firefox | 不启动浏览器，进程内运行 WAA（**实验性**，只在开启 `AIS2API_SPIDERMONKEY` 编译的版本中提供，见下文） |
 
-- **CloakBrowser 已弃用**：
-  - 新建的配置默认使用 `camoufox`；已有的配置和账号保持原样，不会被自动换成另一种身份。
-  - 默认后端或任何账号仍是 `cloakbrowser` 时，`doctor`、`GET /status`、`setup` 的结果和诊断报告都带有 `deprecations`（代号 `cloakbrowser_backend`，`default_backend` 和 `accounts` 说明是哪一处在用），服务启动时写一条 `backend_deprecated` 日志，WebUI 的账号页和诊断页显示提示。
-  - 迁移：把 `browser_backend` 改为 `camoufox`，再运行 `ais2api accounts backend --all auto --yes` 把账号换成 Firefox 身份。Google 会把换了身份的账号看作一台新设备。
-- 新账号保存时取配置项 `browser_backend` 对应的值：`cloakbrowser` 保存为 `cloakbrowser`，`camoufox` 保存为 `auto`。升级前已有的账号在第一次启动时保存为当时实际使用的后端。之后修改 `browser_backend` 只影响新账号和 Cookie 导入的验证，不会把已有账号换成另一种身份。
-- 在 CloakBrowser 与 Firefox 之间切换必须显式操作并确认（命令行 `accounts backend`、管理 API 或 WebUI 的指纹对话框），因为 Google 会把新身份看作一台新设备。Firefox 后端之间可以直接切换，身份不变。两种身份都由同一个种子确定，切回时得到原来的身份。
-- 同一时间只有一个浏览器驻留：轮到另一个后端的账号时，先关闭当前浏览器，再启动另一个。
+- 新账号保存时取默认后端对应的策略（`browser_backend: "camoufox"` 存为 `auto`）；旧版本遗留的 `cloakbrowser` 配置会在读取配置或打开数据库时自动迁移为 `camoufox` / `auto`。
+- 所有后端共用同一 Firefox 身份种子，彼此之间可以直接切换（命令行 `accounts backend`、管理 API 或 WebUI 的指纹对话框）。
+- 同一时间只有一个活动后端驻留：轮到另一个后端的账号时，先关闭当前后端，再启动另一个。
 - `setup` 和 `doctor` 按“需要的后端”工作：默认后端加上已保存账号用到的后端。诊断信息的 `backend` 是当前运行的后端，`default_backend` 是默认后端。
 - Linux 上的 Camoufox 在 Xvfb 虚拟显示中以有界面模式运行（`headless=true` 时），字体使用 Camoufox 自带的 Linux 字体组，见 [Camoufox 后端](platforms.md#camoufox-后端)。
-- Termux 上的 Camoufox 与 Xvfb 都运行在 proot 容器 `ais2api-browser` 中，见 [浏览器容器](platforms.md#浏览器容器)。
+- Termux 上的 Camoufox 与 Xvfb 都运行在 proot 容器 `ais2api-browser` 中，见 [浏览器容器](platforms.md#浏览器容器)；包含 SpiderMonkey 引擎时 `auto` 默认直接运行原生进程内后端，无需创建容器。
 
 ### SpiderMonkey 后端（实验性原型）
 
@@ -109,7 +100,7 @@ Google 会在页面使用过程中轮换会话 Cookie（例如 `__Secure-1PSIDTS
 1. 关闭可能出现的弹窗，但只点击 Close、Dismiss、Got it、No thanks、Not now、Maybe later、Skip、Cancel 一类按钮或发送 Escape；**从不**勾选复选框或点击同意/接受/继续，唯一的例外是下面的欢迎对话框。
    - **欢迎对话框**：AI Studio 的“欢迎使用 AI Studio”对话框在新会话中会反复出现，账号同意过也一样，所以桥接脚本会点击它的按钮继续。点击即表示同意对话框中链接的《Gemini API 附加服务条款》和《Google 隐私权政策》。识别只看结构，不看语言：对话框链接了 Google 的条款页面，只有一个可用的按钮，没有复选框或输入框。
    - **其他条款弹窗**：有多个按钮、有复选框，或按钮不可用的，保持原样，由用户自行处理（`terms_required`）。点击 10 秒后仍未关闭的欢迎对话框也按此处理。
-2. 插入一段很短的引导提示并点击 Run；找不到 Run 按钮时在输入框发送 Ctrl+Enter（macOS 指纹使用 Meta），1 秒内仍未捕获到模板时再通过 CDP 发送一次可信按键。
+2. 插入一段很短的引导提示并点击 Run；找不到 Run 按钮时在输入框发送 Ctrl+Enter（macOS 指纹使用 Meta），1 秒内仍未捕获到模板时再通过 WebDriver BiDi 发送一次可信按键。
 3. 捕获到的引导生成请求和保存提示词请求都会在本地返回空响应，因此引导不会真正发出生成，也不会保存聊天记录。
 4. 尽量启用 Temporary chat，完成或失败后停止探针并恢复输入框。
 
@@ -123,7 +114,7 @@ fetch 与 XHR 两种捕获方式都支持。页面内部结构变化时报告 `b
 
 ## 请求签名与会员等级
 
-生成与模型发现使用所选页面的 CDP 签名 Cookie 缓存（包括 HttpOnly Cookie），以新时间戳重新计算 SAPISIDHASH、SAPISID1PHASH 与 SAPISID3PHASH：
+生成与模型发现使用所选页面中的 Cookie 缓存（包括 HttpOnly Cookie），以新时间戳重新计算 SAPISIDHASH、SAPISID1PHASH 与 SAPISID3PHASH：
 
 - SAPISID 优先于 `__Secure-1PAPISID`；缺少 1P/3P 值时回退为主值。
 - 缓存在签名 Cookie 缺失或过期、以及每 60 秒刷新一次，账号上下文销毁或浏览器关闭时清空。有效的缓存可以在临时刷新失败时继续使用；取消会正常传播。
@@ -139,9 +130,9 @@ fetch 与 XHR 两种捕获方式都支持。页面内部结构变化时报告 `b
 - 桥接方法 `next(sequence, waitMs)` 同时确认上一块并在页面中等待下一块或结束（最多 250 ms），不做轮询休眠。
 - C++ 解码数据块并增量解析深度为 3 的线路记录。下游消费完成后事件接收端才返回，此时 C++ 才确认该序号并允许浏览器继续读取。整个过程从不构建或保存完整的原始响应。
 - 不支持 BYOB 的实现会明确失败。
-- 取消、生成时限和空闲时限会中止页面 fetch；CDP 操作也有超时和取消检查。流式请求使用空闲时限，只要数据持续到达就可以超过 `generation_seconds`；非流式请求还受总时限约束。
+- 取消、生成时限和空闲时限会中止页面 fetch；BiDi 操作也有超时和取消检查。流式请求使用空闲时限，只要数据持续到达就可以超过 `generation_seconds`；非流式请求还受总时限约束。
 - 状态码为 200 但内容为 `google.rpc.Status` 错误信封的响应会在解码数据块前分类：`RESOURCE_EXHAUSTED`、`PERMISSION_DENIED`、`UNAUTHENTICATED` 分别映射为 429、403、401。
-- 内联媒体和非流式响应有独立的对象上限，但这并不意味着 C++ 能精确限制整个 Chromium 进程的内存占用。
+- 内联媒体和非流式响应有独立的对象上限，但这并不意味着 C++ 能精确限制整个 Camoufox 进程的内存占用。
 
 ## 失败重试与冷却
 
@@ -153,12 +144,12 @@ fetch 与 XHR 两种捕获方式都支持。页面内部结构变化时报告 `b
 | 首次尝试返回空的 204 | 清除模板后在原账号重试一次（不占用下面的“重建/重启”机会）；再次 204 则返回错误。 |
 | 普通 404 和其他客户端错误、地区限制、生成/空闲超时 | 直接返回，不影响账号状态。 |
 | 上游 5xx、传输不完整 | 短暂等待（0.5 秒、1 秒……）后在原账号重试，不冷却。 |
-| 403（BotGuard 快照过期或不匹配也表现为 PERMISSION_DENIED） | 先就地重建该账号的页面会话（新上下文、Cookie、页面、BotGuard 与请求模板，浏览器进程保留）再重试原账号。再次 403 才让该模型冷却 5 分钟；等级未知时的 403 直接返回，不冷却。 |
+| 403（BotGuard 快照过期或不匹配也表现为 PERMISSION_DENIED） | 先就地重建该账号的页面会话（新上下文、Cookie、页面、BotGuard 与请求模板，浏览器进程保留）再重试原账号。再次 403 时，若为 `auto` 账号且另一 Firefox 后端已就绪，则临时切换至另一后端 6 小时并立刻再试一次原账号；否则让该模型冷却 5 分钟；等级未知时的 403 直接返回，不冷却。 |
 | RPC UNAUTHENTICATED、身份未确认、签名失败 | 同样先重建一次；再次失败则整个账号进入 5 分钟 `auth` 冷却。 |
 | AI Studio 条款对话框（`terms_required`） | 欢迎对话框自动继续，不算失败。其他条款对话框先重建一次；仍出现则整个账号冷却 1 小时，认证放行不适用。 |
 | Cookie 背后是另一个 Google 账号（`identity_mismatch`） | 直接进入 5 分钟 `auth` 冷却。 |
 | 在全新会话上仍跳转登录页，或账号没有 Cookie | 标记账号已过期。 |
-| 浏览器不兼容、断开、CDP 超时、启动失败 | 重启浏览器一次后重试原账号，不冷却。 |
+| 浏览器不兼容、断开、BiDi 超时、启动失败 | 重启浏览器一次后重试原账号，不冷却。 |
 | 代理错误（`proxy_failed`） | 直接失败，不冷却账号。 |
 | 无法连接 Google（`network_failed`） | 按 5xx 处理，在原账号重试。 |
 
@@ -192,7 +183,6 @@ fetch 与 XHR 两种捕获方式都支持。页面内部结构变化时报告 `b
 
 - `browser_idle_seconds` 大于 0 时，工作线程在队列空闲到期后先写回 Cookie 再关闭浏览器，诊断状态为 `idle_closed`，日志事件为 `browser_idle_released`；之后在有新任务前不会再次尝试。
 - `browser_proxy_relay` 开启时，浏览器只连接本机转发代理，由 ais2api 向上游 HTTP 或 SOCKS5 代理认证。隧道建立阶段超时 20 秒，最多 128 条隧道。诊断中的 `proxy.mode`（`none`、`direct` 或 `relay`）与 `proxy.relayError` 显示当前状态。配置方法见 [配置参考](configuration.md#使用带账号密码的代理)。
-- 浏览器启动参数沿用桌面版的配置（单 GPU 进程、SwiftShader 等），以便 CloakBrowser 在容器内稳定运行。仅在无界面模式下额外加入低内存渲染参数（V8 堆上限 128 MiB、低端设备模式等）；显示窗口时保持正常渲染，便于排查登录。Linux 上始终以 `--no-zygote` 启动，并同时加入 `--no-sandbox`（沙箱依赖 zygote），非 root 用户也不例外；Windows 与 macOS 没有 zygote，两者都不加入。`--remote-allow-origins=*` 与关闭站点隔离分别由 `browser_remote_allow_origins`、`browser_site_isolation` 控制，默认不启用。
 - 页面导航失败时会检查 `errorText`：代理类错误报 `502 proxy_failed`，无法连接 Google 报 `502 network_failed`，不会再等满超时后冷却账号。
 
 ## 验证边界

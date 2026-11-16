@@ -29,7 +29,6 @@ const saveButton = () => wrapper!.get<HTMLButtonElement>('.save-bar button.accen
 beforeEach(() => {
   config = {
     bind: '127.0.0.1', port: 18451, proxy: '', browser_proxy_relay: false,
-    browser_remote_allow_origins: false, browser_site_isolation: true,
     data_dir: 'data', browser_executable: '', headless: true,
     ignore_unsupported_parameters: false, search_model_drop_functions: true,
     continuation_retry_enabled: true, browser_idle_seconds: 0,

@@ -447,9 +447,9 @@ TEST_CASE("management HTTP exposes and edits per-account browser fingerprints", 
     CHECK(string_or(view, "effective_locale") == host_locale());
     auto listed = object(server.get("/accounts")).at("accounts").as_array()[0].as_object();
     CHECK(listed.at("fingerprint").as_object().at("seed").to_number<unsigned>() == seed);
-    CHECK(string_or(listed, "backend") == "cloakbrowser");
-    CHECK(string_or(view, "backend") == "cloakbrowser");
-    CHECK(string_or(view, "identity") == "chrome");
+    CHECK(string_or(listed, "backend") == "auto");
+    CHECK(string_or(view, "backend") == "auto");
+    CHECK(string_or(view, "identity") == "firefox");
 
     auto updated = server.send(http::verb::patch, route, {{"timezone", "America/New_York"}, {"locale", "en-US"}});
     REQUIRE(updated.result_int() == 200);
@@ -459,13 +459,14 @@ TEST_CASE("management HTTP exposes and edits per-account browser fingerprints", 
     CHECK(string_or(reset, "timezone").empty());
     CHECK(string_or(reset, "locale") == "en-US");
     for (const auto& body : std::vector<json::object>{{{"timezone", "Bad Zone"}}, {{"locale", "en_US"}},
-                                                     {{"seed", 12345}}, {{"timezone", 7}}, {}})
+                                                     {{"seed", 12345}}, {{"timezone", 7}},
+                                                     {{"backend", "cloakbrowser"}},
+                                                     {{"backend", "camoufox"}, {"confirm_identity_change", "yes"}}, {}})
         CHECK(server.send(http::verb::patch, route, body).result_int() == 400);
 
-    // A Firefox identity is a new device to Google: the move needs confirming.
-    CHECK(server.send(http::verb::patch, route, {{"backend", "camoufox"}}).result_int() == 409);
-    // A build without the SpiderMonkey backend refuses it outright.
-    CHECK(server.send(http::verb::patch, route, {{"backend", "spidermonkey"}}).result_int() == (spidermonkey_available() ? 409 : 400));
+    // Firefox backend switches apply without an identity-change confirmation,
+    // while boolean confirm_identity_change stays accepted as a deprecated no-op.
+    CHECK(server.send(http::verb::patch, route, {{"backend", "spidermonkey"}}).result_int() == (spidermonkey_available() ? 200 : 400));
     auto moved = server.send(http::verb::patch, route, {{"backend", "camoufox"}, {"confirm_identity_change", true}});
     REQUIRE(moved.result_int() == 200);
     CHECK(string_or(object(moved), "identity") == "firefox");
