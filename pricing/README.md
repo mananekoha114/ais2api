@@ -1,7 +1,7 @@
 # 价格快照
 
-`gemini.json` 由 `scripts/scrape-gemini-pricing.py` 从 [Google 官方价格页](https://ai.google.dev/gemini-api/docs/pricing)
-（`pricing.md.txt` 版本）抓取，构建时嵌入程序，作为从未联网成功时的价格。
+`gemini.json` 由 `scripts/scrape-gemini-pricing.py` 从 [Google 官方价格页](https://aistudio.google.com/docs/pricing)
+（Markdown 版本 `pricing.md`）抓取，构建时嵌入程序，作为从未联网成功时的价格。
 
 运行中的服务从 `pricing-data` 分支下载最新版本，该分支由 `.github/workflows/pricing.yml` 每 6 小时更新一次，只在价格变化时提交。
 发布新版本前可以刷新这份快照：
