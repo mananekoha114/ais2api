@@ -8,7 +8,8 @@
 # native targets: windows-x64, linux-x64, linux-arm64 and android-arm64.
 #
 # Sets AIS2API_SPIDERMONKEY_TARGET, AIS2API_SPIDERMONKEY_VERSION,
-# AIS2API_SPIDERMONKEY_LICENSES and AIS2API_RESOLVED_SPIDERMONKEY_DIR.
+# AIS2API_SPIDERMONKEY_PLATFORM, AIS2API_SPIDERMONKEY_LICENSES and
+# AIS2API_RESOLVED_SPIDERMONKEY_DIR.
 set(AIS2API_SPIDERMONKEY_RELEASE_REPO "mananekoha114/ais2api-spidermonkey" CACHE STRING
   "GitHub repository providing SpiderMonkey static archives")
 set(AIS2API_SPIDERMONKEY_TAG "spidermonkey-158.0.1-r2" CACHE STRING
@@ -201,4 +202,5 @@ else()
     ${spidermonkey_system_libraries})
 endif()
 set(AIS2API_SPIDERMONKEY_TARGET ais2api_spidermonkey)
+set(AIS2API_SPIDERMONKEY_PLATFORM "${spidermonkey_platform}")
 message(STATUS "SpiderMonkey ${AIS2API_SPIDERMONKEY_VERSION} (${spidermonkey_platform}) from ${spidermonkey_dir}")

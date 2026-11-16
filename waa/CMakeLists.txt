@@ -39,3 +39,6 @@ target_include_directories(ais2api_waa PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/gene
 target_compile_definitions(ais2api_waa PUBLIC AIS2API_HAS_SPIDERMONKEY
   PRIVATE AIS2API_SPIDERMONKEY_VERSION="${AIS2API_SPIDERMONKEY_VERSION}")
 target_link_libraries(ais2api_waa PRIVATE ada::ada ZLIB::ZLIB PUBLIC ${AIS2API_SPIDERMONKEY_TARGET})
+if(AIS2API_SPIDERMONKEY_PLATFORM STREQUAL "android-arm64")
+  target_sources(ais2api_waa PRIVATE src/android_libcxx.cpp)
+endif()
