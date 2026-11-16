@@ -12,7 +12,8 @@
 
 namespace ais2api {
 namespace {
-// Desktop/server default for "auto" pending Stage 4 experiment; 1-line switch.
+// "auto" runs on Camoufox on desktops and servers, as the Stage 4 experiment
+// settled (docs/reports/spidermonkey-experiment-2026-11-15.md).
 constexpr std::string_view default_desktop_firefox_backend = "camoufox";
 bool default_readiness(std::string_view backend, const Config &config) {
     return firefox_backend_ready(backend, config);

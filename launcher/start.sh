@@ -62,7 +62,7 @@ if [ "$skip_setup" = 0 ]; then
   case $doctor in
     *'"browser_exists":true'*) ;;
     *)
-      echo "浏览器尚未准备或需要更新。setup 会下载浏览器，并安装所需的系统依赖（Linux 可能通过 sudo 使用 apt-get，Termux 会创建 proot Ubuntu 容器）。"
+      echo "运行环境尚未准备或需要更新。setup 会下载所需的浏览器或 fpgen 模型，并安装所需的系统依赖（Linux 可能通过 sudo 使用 apt-get；Termux 只在使用 Camoufox 时创建 proot Ubuntu 容器）。"
       if [ ! -t 0 ]; then
         echo "请在终端中确认后运行：\"$program\" setup --yes" >&2
         exit 1
@@ -74,7 +74,7 @@ if [ "$skip_setup" = 0 ]; then
         *) echo "已取消。"; exit 1 ;;
       esac
       "$program" setup --yes "$@" >/dev/null
-      echo "浏览器已准备完成。"
+      echo "运行环境已准备完成。"
       ;;
   esac
 fi
