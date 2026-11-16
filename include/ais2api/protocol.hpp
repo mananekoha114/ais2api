@@ -76,6 +76,16 @@ bool joins_text(const json::object& a, const json::object& b);
 // The size_bound growth merge_event allows for an event with these counts of
 // candidates and content parts.
 std::size_t merge_growth_bound(const json::object& event, std::size_t candidates, std::size_t parts);
+// Tool call ids this service issues: "call_gemini_" + base64url of
+// [upstream id or null, thought signature or null, nonce]. Other ids pass
+// through unchanged with `encoded` unset.
+struct ClientCall {
+    std::string id;
+    std::optional<std::string> signature;
+    bool encoded = false;
+};
+ClientCall client_call(std::string id);
+std::string signed_call_id(std::string_view id, const json::value &signature, std::string nonce);
 json::object openai_response(const json::object& gemini, std::string_view model, std::string_view id, Store* store = nullptr, std::string_view principal = {});
 json::object openai_delta(const json::object& gemini_delta, std::string_view model, std::string_view id, Store* store = nullptr, std::string_view principal = {});
 class WireStreamParser {

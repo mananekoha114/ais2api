@@ -15,7 +15,9 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -68,7 +70,57 @@ struct BackendState {
     std::atomic<unsigned> idle_checks{0};
     std::atomic<unsigned> idle_releases{0};
     std::atomic<unsigned> template_clears{0};
+    // synthetic-agent: the file its Read call names, and where to dump the
+    // lowered requests (both empty unless the [.agent-server] case sets them).
+    std::string agent_file;
+    fs::path agent_dump;
 };
+
+// A scripted two-step agent for checking real clients end to end: with a Read
+// tool declared and no tool result yet, it thinks and calls Read; otherwise it
+// answers with every thought signature the request carried back.
+void agent_reply(const Request &request, BackendState &state, const EventSink &emit) {
+    const auto &contents = request.gemini.at("contents").as_array();
+    std::vector<std::string> signatures;
+    std::string result;
+    for (const auto &turn : contents)
+        for (const auto &part : turn.at("parts").as_array()) {
+            auto &object = part.as_object();
+            if (auto *signature = object.if_contains("thoughtSignature"))
+                signatures.emplace_back(signature->as_string());
+            if (auto *response = object.if_contains("functionResponse"))
+                result = json::serialize(response->at("response")).substr(0, 60);
+        }
+    bool read = false;
+    if (auto *tools = request.gemini.if_contains("tools"))
+        for (const auto &tool : tools->as_array())
+            if (auto *declarations = tool.as_object().if_contains("functionDeclarations"))
+                for (const auto &declaration : declarations->as_array())
+                    read = read || declaration.at("name") == "Read";
+    const auto &last = contents.back().at("parts").as_array();
+    const bool answered = std::any_of(last.begin(), last.end(), [](const json::value &part) {
+        return part.as_object().contains("functionResponse");
+    });
+    const auto turn = std::to_string(contents.size());
+    auto event = [](json::array parts) {
+        json::array candidates;
+        candidates.push_back(json::object{
+            {"index", 0}, {"content", json::object{{"role", "model"}, {"parts", std::move(parts)}}}});
+        return json::object{{"candidates", std::move(candidates)}, {"responseId", "synthetic-agent"}};
+    };
+    emit(event({json::object{{"text", "Planning turn " + turn}, {"thought", true}}}));
+    if (read && !answered) {
+        emit(event({json::object{{"functionCall", {{"name", "Read"}, {"args", {{"file_path", state.agent_file}}}}},
+                                 {"thoughtSignature", "agent-call-" + turn}}}));
+    } else {
+        std::string seen;
+        for (const auto &signature : signatures) seen += (seen.empty() ? "" : ", ") + signature;
+        emit(event({json::object{{"text", "Signatures returned: [" + seen + "]."}}}));
+        if (!result.empty()) emit(event({json::object{{"text", " Tool result: " + result}}}));
+        emit(event({json::object{{"text", ""}, {"thoughtSignature", "agent-answer-" + turn}}}));
+    }
+    emit(finish_event());
+}
 
 class SyntheticBackend final : public GenerationBackend {
 public:
@@ -84,7 +136,11 @@ public:
             state_->wire = encode_request(request, {}, "!synthetic");
             state_->account_id = account.id;
             state_->attempted_accounts.push_back(account.id);
+            if (!state_->agent_dump.empty())
+                atomic_write(state_->agent_dump / ("request-" + std::to_string(attempt) + ".json"),
+                             json::serialize(request.gemini), false);
         }
+        if (request.model == "synthetic-agent") return agent_reply(request, *state_, emit);
         if ((request.model == "synthetic-route-retry" && attempt < 3) || request.model == "synthetic-route-always")
             throw Error(404, "transient_rpc_route", "Synthetic upstream routing failure");
         if ((request.model == "synthetic-empty-once" && attempt == 1) || request.model == "synthetic-empty-always")
@@ -334,7 +390,8 @@ struct GenerationServer {
 
     explicit GenerationServer(bool browser_file_present = false, unsigned browser_idle_seconds = 0,
                               unsigned queue_size = 8, unsigned queue_seconds = 5,
-                              unsigned generation_seconds = 5) {
+                              unsigned generation_seconds = 5,
+                              const std::function<void(Config &)> &customize = {}) {
         net::io_context io;
         tcp::acceptor available(io, {tcp::v4(), 0});
         config.port = available.local_endpoint().port();
@@ -353,6 +410,7 @@ struct GenerationServer {
         config.limits.stream_idle_seconds = generation_seconds;
         config.limits.max_attempts = 3;
         config.browser_idle_seconds = browser_idle_seconds;
+        if (customize) customize(config);
         fs::create_directories(directory);
         key = "generation-test-" + random_hex(24);
         config.api_key = key;
@@ -2015,7 +2073,9 @@ std::vector<KeepaliveCase> keepalive_cases(const std::string &model) {
     return {{"/v1/chat/completions",
              R"({"model":")" + model + R"(","messages":[{"role":"user","content":"hello"}]})"},
             {"/v1/responses", R"({"model":")" + model + R"(","input":"hello"})"},
-            {"/v1beta/models/" + model + ":generateContent", R"({"contents":[{"parts":[{"text":"hello"}]}]})"}};
+            {"/v1beta/models/" + model + ":generateContent", R"({"contents":[{"parts":[{"text":"hello"}]}]})"},
+            {"/v1/messages",
+             R"({"model":")" + model + R"(","max_tokens":64,"messages":[{"role":"user","content":"hello"}]})"}};
 }
 std::size_t leading_newlines(std::string_view body) {
     std::size_t count = 0;
@@ -2100,4 +2160,165 @@ TEST_CASE("Disconnecting during keepalive cancels the generation", "[generation]
     REQUIRE(server.state->cancelled);
     auto history = finished_history(server);
     REQUIRE(history[0].at("status") == "cancelled");
+}
+
+namespace {
+// Named SSE records as (event, data).
+std::vector<std::pair<std::string, json::object>> named_sse(std::string_view body) {
+    std::vector<std::pair<std::string, json::object>> records;
+    std::size_t offset = 0;
+    while (offset < body.size()) {
+        auto end = body.find("\n\n", offset);
+        if (end == std::string_view::npos) throw std::runtime_error("Truncated SSE record");
+        auto record = body.substr(offset, end - offset);
+        auto newline = record.find('\n');
+        if (!record.starts_with("event: ") || newline == std::string_view::npos ||
+            record.substr(newline + 1, 6) != "data: ")
+            throw std::runtime_error("Unexpected SSE record");
+        records.emplace_back(std::string(record.substr(7, newline - 7)),
+                             json::parse(record.substr(newline + 7)).as_object());
+        offset = end + 2;
+    }
+    return records;
+}
+http::response<http::string_body> get_models(GenerationServer &server, bool anthropic) {
+    net::io_context io;
+    tcp::socket socket(io);
+    socket.connect({net::ip::make_address("127.0.0.1"), server.config.port});
+    receive_timeout(socket);
+    http::request<http::string_body> request(http::verb::get, "/v1/models", 11);
+    request.set(http::field::host, "127.0.0.1");
+    request.set("x-api-key", server.key);
+    if (anthropic) request.set("anthropic-version", "2023-06-01");
+    http::write(socket, request);
+    boost::beast::flat_buffer input;
+    http::response<http::string_body> response;
+    http::read(socket, input, response);
+    return response;
+}
+}
+
+TEST_CASE("Anthropic Messages works over HTTP in unary and SSE", "[generation][http][anthropic]") {
+    GenerationServer server;
+    const std::string question =
+        R"({"model":"synthetic-native-parts","max_tokens":64,"thinking":{"type":"adaptive"},"messages":[{"role":"user","content":"question"}]})";
+    auto unary = server.call("/v1/messages", question, http::verb::post, "x-api-key");
+    REQUIRE(unary.result_int() == 200);
+    auto message = json::parse(unary.body()).as_object();
+    REQUIRE(message.at("type") == "message");
+    REQUIRE(message.at("stop_reason") == "end_turn");
+    const auto &content = message.at("content").as_array();
+    // The answer's late signature is dropped: the text stays the last block.
+    REQUIRE(content.size() == 2);
+    REQUIRE(content[0].at("thinking") == "thinking");
+    REQUIRE(content[1].at("text") == "answer");
+
+    auto streaming = question;
+    streaming.insert(1, R"("stream":true,)");
+    auto stream = server.call("/v1/messages", streaming, http::verb::post, "x-api-key");
+    REQUIRE(stream.result_int() == 200);
+    REQUIRE(stream[http::field::content_type] == "text/event-stream");
+    auto records = named_sse(stream.body());
+    REQUIRE(records.front().first == "message_start");
+    REQUIRE(records.back().first == "message_stop");
+    std::string thinking, text;
+    for (const auto &[name, data] : records) {
+        REQUIRE(data.at("type").as_string() == name);
+        if (name != "content_block_delta") continue;
+        auto &delta = data.at("delta").as_object();
+        REQUIRE(delta.at("type") != "signature_delta");
+        if (delta.at("type") == "thinking_delta") thinking += std::string(delta.at("thinking").as_string());
+        if (delta.at("type") == "text_delta") text += std::string(delta.at("text").as_string());
+    }
+    REQUIRE(thinking == "thinking");
+    REQUIRE(text == "answer");
+
+    // A tool call, then its result with the thought signature restored upstream.
+    const std::string find = R"({"model":"synthetic-responses-tools","max_tokens":64,
+        "tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}],
+        "messages":[{"role":"user","content":"find"}]})";
+    auto called = server.call("/v1/messages", find, http::verb::post, "x-api-key");
+    REQUIRE(called.result_int() == 200);
+    auto call = json::parse(called.body()).as_object();
+    REQUIRE(call.at("stop_reason") == "tool_use");
+    const auto &use = call.at("content").as_array()[0].as_object();
+    REQUIRE(use.at("type") == "tool_use");
+    REQUIRE(use.at("input") == json::object{{"q", "test"}});
+    auto next = json::parse(find).as_object();
+    next["model"] = "synthetic-unary";
+    next.at("messages").as_array().push_back(json::object{{"role", "assistant"}, {"content", call.at("content")}});
+    next.at("messages").as_array().push_back(json::object{
+        {"role", "user"},
+        {"content", json::array{json::object{{"type", "tool_result"}, {"tool_use_id", use.at("id")}, {"content", "found"}}}}});
+    REQUIRE(server.call("/v1/messages", json::serialize(next), http::verb::post, "x-api-key").result_int() == 200);
+    {
+        std::lock_guard lock(server.state->mutex);
+        auto &turns = server.state->request.at("contents").as_array();
+        REQUIRE(turns[1].at("parts").as_array()[0].at("thoughtSignature") == "synthetic-tool-signature");
+        REQUIRE(turns[2].at("parts").as_array()[0].at("functionResponse").at("name") == "lookup");
+    }
+    for (const auto &row : finished_history(server))
+        REQUIRE(row.at("endpoint") == "messages");
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("Anthropic errors, count_tokens and the model list use Anthropic shapes", "[generation][http][anthropic]") {
+    GenerationServer server;
+    auto missing = server.call("/v1/messages", R"({"model":"synthetic-unary","messages":[{"role":"user","content":"q"}]})");
+    REQUIRE(missing.result_int() == 400);
+    auto error = json::parse(missing.body()).as_object();
+    REQUIRE(error.at("type") == "error");
+    REQUIRE(error.at("error").at("type") == "invalid_request_error");
+    auto denied = server.call("/v1/messages", R"({"model":"synthetic-unary","max_tokens":8,"messages":[]})",
+                              http::verb::post, "");
+    REQUIRE(denied.result_int() == 401);
+    REQUIRE(json::parse(denied.body()).at("error").at("type") == "authentication_error");
+
+    // Counting runs locally: no generation and no request record.
+    const auto history = finished_history(server).size();
+    const auto calls = server.state->calls.load();
+    auto counted = server.call("/v1/messages/count_tokens",
+                               R"({"model":"synthetic-unary","messages":[{"role":"user","content":"Hello, world!"}]})",
+                               http::verb::post, "x-api-key");
+    REQUIRE(counted.result_int() == 200);
+    REQUIRE(json::parse(counted.body()) == json::object{{"input_tokens", 4}});
+    auto rejected = server.call("/v1/messages/count_tokens", R"({"model":"synthetic-unary","messages":[{"role":"user","content":[{"type":"bogus"}]}]})");
+    REQUIRE(rejected.result_int() == 400);
+    REQUIRE(json::parse(rejected.body()).at("error").at("type") == "invalid_request_error");
+    REQUIRE(server.state->calls == calls);
+    std::this_thread::sleep_for(100ms);
+    REQUIRE(finished_history(server).size() == history);
+
+    auto anthropic = json::parse(get_models(server, true).body()).as_object();
+    REQUIRE(anthropic.at("data").is_array());
+    REQUIRE(anthropic.at("has_more") == false);
+    for (const auto &model : anthropic.at("data").as_array())
+        REQUIRE(model.at("type") == "model");
+    auto openai = json::parse(get_models(server, false).body()).as_object();
+    REQUIRE(openai.at("object") == "list");
+    REQUIRE_FALSE(server.failed);
+}
+
+// Manual end-to-end check with a real client (for example Claude Code) and no
+// account: serves synthetic-agent until the stop file appears. Set
+// AIS2API_AGENT_SERVER to a directory; this case writes server.json there
+// (port and key), the file the agent reads, and every lowered request.
+TEST_CASE("Scripted agent server for manual client checks", "[.agent-server]") {
+    const char *root = std::getenv("AIS2API_AGENT_SERVER");
+    if (!root) SKIP("AIS2API_AGENT_SERVER is not set");
+    const fs::path directory(root);
+    GenerationServer server(false, 0, 64, 600, 120, [](Config &config) {
+        config.limits.request_bytes = 32 * 1024 * 1024;
+        config.limits.object_bytes = 64 * 1024 * 1024;
+        config.limits.relay_bytes = 1024 * 1024;
+    });
+    fs::create_directories(directory / "requests");
+    atomic_write(directory / "agent-file.txt", "The scripted agent read this file.\n", false);
+    server.state->agent_file = fs::absolute(directory / "agent-file.txt").generic_string();
+    server.state->agent_dump = directory / "requests";
+    atomic_write(directory / "server.json",
+                 json::serialize(json::object{{"port", server.config.port}, {"key", server.key}}), true);
+    for (const auto deadline = Clock::now() + 30min; !fs::exists(directory / "stop") && Clock::now() < deadline;)
+        std::this_thread::sleep_for(200ms);
+    REQUIRE_FALSE(server.failed);
 }

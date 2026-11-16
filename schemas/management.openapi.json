@@ -3949,6 +3949,7 @@
             "enum": [
               "chat_completions",
               "responses",
+              "messages",
               "gemini"
             ]
           },

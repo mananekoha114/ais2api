@@ -1811,11 +1811,8 @@ std::string finish_openai(std::string reason, bool calls) {
         return "content_filter";
     return calls ? "tool_calls" : "stop";
 }
-struct ClientCall {
-    std::string id;
-    std::optional<std::string> signature;
-    bool encoded = false;
-};
+} // namespace
+
 ClientCall client_call(std::string id) {
     constexpr std::string_view prefix = "call_gemini_";
     if (!id.starts_with(prefix))
@@ -1862,6 +1859,8 @@ std::string signed_call_id(std::string_view id, const json::value &signature, st
     while (encoded.ends_with('=')) encoded.pop_back();
     return "call_gemini_" + encoded;
 }
+
+namespace {
 json::object openai_message(const json::object &content, Store *store, std::string_view principal,
                             std::string_view response_id, bool delta,
                             json::object *native_output = nullptr) {

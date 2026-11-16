@@ -175,7 +175,7 @@ export interface RequestEstimate extends RequestCost {
 export type RequestStatus = 'queued' | 'running' | 'finishing' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
 export interface RequestRecord {
   id: string
-  endpoint: 'chat_completions' | 'responses' | 'gemini'
+  endpoint: 'chat_completions' | 'responses' | 'messages' | 'gemini'
   created_at: number
   ended_at: number | null
   model: string

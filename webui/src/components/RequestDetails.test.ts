@@ -19,7 +19,7 @@ it('formats recorded settings without losing zero, false or small numeric values
 it('shows a failed generation independently of its known cost and completed delivery', () => {
   const cost = { status: 'unpriced' as const, reason: 'incomplete_attempts', currency: 'USD' as const,
     amount_nano: null, known_amount_nano: 172080000, unpriced_attempts: 1 }
-  const record: RequestDetail = { id: 'synthetic', endpoint: 'chat_completions', model: 'example', requested_model: 'example', account: 'a', stream: true,
+  const record: RequestDetail = { id: 'synthetic', endpoint: 'messages', model: 'example', requested_model: 'example', account: 'a', stream: true,
     status: 'failed', http_status: 200, generation_completed: false, delivery_completed: true, error: 'content_filter', finish_reason: 'PROHIBITED_CONTENT',
     created_at: 1, ended_at: 2, queue_ms: 0, first_token_ms: 1, generation_ms: 1, duration_ms: 1, usage: {}, cost,
     settings: { maxOutputTokens: 65535, thinkingConfig: { includeThoughts: true } },
@@ -27,6 +27,7 @@ it('shows a failed generation independently of its known cost and completed deli
       { account: 'a', started_at: 2, ended_at: 3, completed: true, finish_reason: 'PROHIBITED_CONTENT', error: '', usage: {},
         cost: { status: 'priced', reason: '', currency: 'USD', amount_nano: 172080000 } }] }
   const view = mount(RequestDetails, { props: { record, open: true, error: '', loading: false, accountName: id => id }, global: { stubs: { Teleport: true } } })
+  expect(view.text()).toContain('Anthropic Messages · 流式')
   expect(view.text()).toContain('失败 · 上游内容拦截')
   expect(view.text()).toContain('已知 $0.17208')
   expect(view.text()).toContain('1 轮未完整计价')
