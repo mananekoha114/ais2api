@@ -79,6 +79,7 @@ std::string_view build_mode() {
     const std::string_view tag(build_tag);
     return tag.substr(tag.find('=') + 1);
 }
+std::string_view version() { return AIS2API_VERSION; }
 std::string random_hex(std::size_t bytes) {
     if (bytes > 1024)
         throw Error(500, "random", "Invalid random request");

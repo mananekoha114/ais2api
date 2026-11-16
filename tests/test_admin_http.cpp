@@ -479,3 +479,21 @@ TEST_CASE("management HTTP exposes and edits per-account browser fingerprints", 
     CHECK(server.get("/accounts/acc_missing/fingerprint").result_int() == 404);
     CHECK(server.send(http::verb::post, "/accounts/acc_missing/fingerprint/regenerate").result_int() == 404);
 }
+TEST_CASE("management HTTP reports the CMake project version", "[http][admin]") {
+    // AIS2API_EXPECTED_VERSION comes from project(VERSION) in CMakeLists.txt.
+    const std::string expected = AIS2API_EXPECTED_VERSION;
+    CHECK(version() == expected);
+    AdminServer server;
+    auto reported = server.get("/version");
+    REQUIRE(reported.result_int() == 200);
+    CHECK(string_or(object(reported), "version") == expected);
+    auto status = server.get("/status");
+    REQUIRE(status.result_int() == 200);
+    CHECK(string_or(object(status), "version") == expected);
+    auto diagnostics = server.get("/diagnostics");
+    REQUIRE(diagnostics.result_int() == 200);
+    CHECK(string_or(object(diagnostics), "version") == expected);
+    auto report = server.send(http::verb::post, "/diagnostics/export");
+    REQUIRE(report.result_int() == 200);
+    CHECK(string_or(object(report), "version") == expected);
+}

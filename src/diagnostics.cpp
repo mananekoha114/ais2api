@@ -223,7 +223,7 @@ json::object safe_report(const DiagnosticsSources &sources) {
     copy(build, sources.status, {"version", "build_mode"});
     copy(build, sources.runtime, {"build_mode"});
     return {{"report", "ais2api-diagnostics"}, {"format", 1}, {"generated_at", unix_seconds()},
-            {"version", build.if_contains("version") ? build.at("version") : json::value("0.1.0")},
+            {"version", build.if_contains("version") ? build.at("version") : json::value(version())},
             {"build_mode", build.if_contains("build_mode") ? build.at("build_mode") : json::value(build_mode())},
             {"platform", sources.platform.empty() ? "unsupported" : sources.platform},
             {"service", service_part(sources.status)},

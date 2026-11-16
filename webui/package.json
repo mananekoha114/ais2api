@@ -1,6 +1,6 @@
 {
   "name": "ais2api-webui",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Fluent Design management console for the ais2api gateway",
   "license": "MPL-2.0",
