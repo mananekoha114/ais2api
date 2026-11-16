@@ -57,7 +57,11 @@ jobs:
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/build/vcpkg-cache
       VCPKG_ROOT: ${{ github.workspace }}/build/deps/vcpkg
-      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:allow_user_segv_handler=1
+      # The prebuilt SpiderMonkey shim frees std::string buffers through
+      # mozalloc's inline operator delete, which calls free(), while the linker
+      # may keep our libstdc++ code that allocated them with operator new. Both
+      # reach the same allocator, and Firefox's ASan builds disable the check too.
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:allow_user_segv_handler=1:alloc_dealloc_mismatch=0
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
