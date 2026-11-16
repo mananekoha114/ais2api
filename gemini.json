@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "source": "https://ai.google.dev/gemini-api/docs/pricing",
-  "published_at": "2026-10-31T10:40:01Z",
+  "source": "https://aistudio.google.com/docs/pricing",
+  "published_at": "2026-11-16T03:23:18Z",
   "currency": "USD",
   "unit": "USD per 1M tokens",
   "service_tier": "standard",
@@ -33,6 +33,22 @@
               "input": 0.1,
               "output": 0.4,
               "cache_read": 0.01
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-2.5-flash-native-audio-preview-12-2025": {
+      "name": "Gemini 2.5 Flash Native Audio (Live API)",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 0.5,
+              "output": 2.0,
+              "cache_read": null
             }
           ]
         }
@@ -329,6 +345,49 @@
         }
       ]
     },
+    "gemini-4-carbon": {
+      "name": "Gemini 4 Carbon",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 2.0,
+              "output": 10.0,
+              "cache_read": 0.1
+            }
+          ]
+        },
+        {
+          "from": "2026-12-01",
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 4.0,
+              "output": 20.0,
+              "cache_read": 0.2
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-4-hydrogen": {
+      "name": "Gemini 4 Hydrogen",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 1.5,
+              "output": 7.5,
+              "cache_read": 0.075
+            }
+          ]
+        }
+      ]
+    },
     "gemini-nano-banana-2.1": {
       "name": "Gemini Nano Banana 2.1",
       "periods": [
@@ -346,7 +405,23 @@
       ]
     },
     "gemini-omni-1.1-flash": {
-      "name": "Gemini Omni Flash",
+      "name": "Gemini Omni 1.1 Flash",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 1.5,
+              "output": 9.0,
+              "cache_read": null
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-omni-1.2-flash": {
+      "name": "Gemini Omni 1.2 Flash",
       "periods": [
         {
           "from": null,
