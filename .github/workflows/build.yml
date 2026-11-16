@@ -255,7 +255,9 @@ jobs:
           retention-days: 28
   windows:
     name: Windows / MSVC x64
-    runs-on: windows-2022
+    # The prebuilt SpiderMonkey was compiled against the MSVC 14.51 STL, and
+    # MSVC links it only with that toolset or newer: Visual Studio 2026.
+    runs-on: windows-2025-vs2026
     timeout-minutes: 90
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\build\vcpkg-cache

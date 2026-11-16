@@ -6,9 +6,9 @@
 
 | 平台 | 工具链 |
 |---|---|
-| Windows 10/11 x64 | MSVC（Visual Studio C++ 工具与 Windows SDK） |
+| Windows 10/11 x64 | MSVC 14.51 或更新（Visual Studio 2026 C++ 工具与 Windows SDK，见下文） |
 | Ubuntu 24.04 / Debian 13 x86_64 | GCC 或 Clang |
-| Ubuntu 24.04 / Debian 13 ARM64（只能用 Camoufox 后端） | GCC 或 Clang |
+| Ubuntu 24.04 / Debian 13 ARM64 | GCC 或 Clang |
 | Android ARM64（Termux 宿主） | Termux Clang |
 
 通用要求：CMake 3.25 及以上、C++20、Ninja、Git。桌面依赖由 `vcpkg.json` 中固定的 baseline（`664933b8d385dfc01f4e0cdff4c7c74e71f6a740`）锁定，源码下载由 vcpkg 校验；首次构建可能较慢。桌面构建或 GitHub Actions 任务的成功不代表 Android 上的行为已经验证。
@@ -17,7 +17,11 @@
 
 ## Windows x64
 
-安装 Visual Studio C++ 构建工具（含 Windows SDK）、Git、CMake 与 Ninja，并确保 CMake、CTest、Ninja 在 PATH 中。在 PowerShell 中执行：
+安装 Visual Studio C++ 构建工具（含 Windows SDK）、Git、CMake 与 Ninja，并确保 CMake、CTest、Ninja 在 PATH 中。
+
+默认构建包含 SpiderMonkey 后端，需要 Visual Studio 2026（MSVC 工具集 14.51 或更新）。预编译的 SpiderMonkey 静态库是对照 MSVC 14.51 的 STL 编译的，MSVC 只能用同样新或更新的工具集链接它。工具集太旧时，CMake 会在配置阶段报错，并给出工具集版本。只装了 Visual Studio 2022 时，可以直接用 CMake 配置，加上 `-DAIS2API_SPIDERMONKEY=OFF -DAIS2API_CURL_IMPERSONATE=OFF`，这样构建出的程序只有 Camoufox 后端。
+
+在 PowerShell 中执行：
 
 ```powershell
 ./scripts/build.ps1 -Package          # 加 -WebUI 嵌入网页控制台
@@ -33,7 +37,6 @@
 | `-Configuration` | `Release`（默认）、`Debug`、`RelWithDebInfo` |
 | `-Jobs N` | 并行数，默认 2 |
 | `-WebUI` | 构建并嵌入 WebUI |
-| `-BrowserBundleDirectory PATH` | 打包本地浏览器，见下文 |
 | `-SkipTests` | 跳过测试 |
 
 `build.ps1` 和 `build.sh` 只做正式版构建：构建目录如果已经被配置为开发版（见 [构建开发版](#构建开发版)），脚本会报错退出。
@@ -277,7 +280,9 @@ Camoufox 位于运行包的 `bin/camoufox-runtime/<版本>-<平台>/`。`doctor`
 | Ubuntu 24.04 / gcc | Release 构建（含 WebUI）、CTest、CLI 与便携目录冒烟、一键脚本冒烟、运行包校验与上传 |
 | Ubuntu 24.04 / clang + sanitizer | ASan/UBSan 构建与测试、短时线路解析器模糊测试 |
 | Debian 13 / GCC | 容器内构建（含 WebUI）、测试、冒烟与运行包上传 |
-| Windows / MSVC x64 | `x64-windows-static-release` 构建（含 WebUI）、测试、冒烟与运行包上传 |
+| Ubuntu 24.04 / GCC ARM64 | ARM64 runner 上的 Release 构建（含 WebUI）、测试、冒烟与运行包上传 |
+| Windows / MSVC x64 | 在 Visual Studio 2026 镜像（`windows-2025-vs2026`）上做 `x64-windows-static-release` 构建（含 WebUI）、测试、冒烟与运行包上传 |
+| Windows / fallback without SpiderMonkey | 在 Visual Studio 2022 镜像上关闭 SpiderMonkey 与 curl-impersonate 后构建并运行 CTest |
 
 `.github/workflows/camoufox-runtime.yml` 只在 Camoufox 相关文件改动的 PR 中运行，也可以手动运行。每次运行要多次下载约 1.3 GB 的 Camoufox。它在 Ubuntu 24.04 x64 与 ARM64 上依次：
 

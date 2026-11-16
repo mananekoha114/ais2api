@@ -105,6 +105,25 @@ string(JSON spidermonkey_target GET "${spidermonkey_buildinfo}" target)
 if(NOT spidermonkey_target STREQUAL spidermonkey_platform)
   message(FATAL_ERROR "${spidermonkey_dir} targets ${spidermonkey_target}, expected ${spidermonkey_platform}")
 endif()
+# The Windows archive is compiled against the STL of the MSVC toolset its
+# BUILDINFO.json names, and MSVC links objects only with a toolset at least as
+# new as the newest that compiled any of them; an older one fails on
+# unresolved STL symbols such as __std_rotate.
+if(MSVC)
+  string(JSON spidermonkey_msvc ERROR_VARIABLE spidermonkey_msvc_error
+    GET "${spidermonkey_buildinfo}" toolchain msvc)
+  if(NOT spidermonkey_msvc_error AND spidermonkey_msvc MATCHES "^14\\.([0-9]+)")
+    set(spidermonkey_msvc_minor "${CMAKE_MATCH_1}")
+    math(EXPR spidermonkey_msvc_needed "1900 + ${spidermonkey_msvc_minor}")
+    if(MSVC_VERSION LESS spidermonkey_msvc_needed)
+      message(FATAL_ERROR
+        "The ${spidermonkey_platform} SpiderMonkey archive was built with MSVC ${spidermonkey_msvc} and "
+        "links only with MSVC toolset 14.${spidermonkey_msvc_minor} or newer; this "
+        "compiler is ${CMAKE_CXX_COMPILER_VERSION}. Use a newer toolset, or configure with "
+        "-DAIS2API_SPIDERMONKEY=OFF -DAIS2API_CURL_IMPERSONATE=OFF")
+    endif()
+  endif()
+endif()
 if(NOT EXISTS "${spidermonkey_dir}/include/mozjs.h")
   message(FATAL_ERROR "${spidermonkey_dir} holds no include/mozjs.h")
 endif()
