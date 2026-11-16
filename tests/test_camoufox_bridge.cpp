@@ -8,6 +8,7 @@
 #include "../browser/process.hpp"
 #include "ais2api/browser.hpp"
 #include "ais2api/camoufox.hpp"
+#include "ais2api/runtime.hpp"
 #include "ais2api/store.hpp"
 #ifdef AIS2API_HAS_SPIDERMONKEY
 #include "../waa/src/host.hpp"
@@ -325,34 +326,58 @@ TEST_CASE("Headless Camoufox keeps window own properties and Symbols identical w
 
     std::mutex port_mutex;
     unsigned short bidi_port = 0;
+    // The browser's last output, reported when it does not come up.
+    std::string launch_output;
     browser_detail::ProcessOptions options;
     options.environment = browser_detail::camoufox_environment(R"({"allowMainWorld":true})");
     options.unset_prefixes = {"CAMOU_CONFIG_", "CAMOU_PREFS_"};
     options.on_output = [&](std::string_view line) {
-        if (const auto parsed = browser_detail::bidi_endpoint_port(line)) {
-            std::lock_guard lock(port_mutex);
-            bidi_port = *parsed;
-        }
+        std::lock_guard lock(port_mutex);
+        if (const auto parsed = browser_detail::bidi_endpoint_port(line)) bidi_port = *parsed;
+        launch_output.append(line.substr(0, 512)).push_back('\n');
+        if (launch_output.size() > 8192) launch_output.erase(0, launch_output.size() - 8192);
     };
 
     std::vector<std::string> args{"--profile", path_utf8(profile), "--remote-debugging-port", "0", "--no-remote"};
     if (config.headless) args.push_back("--headless");
     browser_detail::OwnedProcess proc;
-    proc.start(exe_path, args, root, options);
-
-    const auto deadline = Clock::now() + 30s;
-    unsigned short port = 0;
-    while (Clock::now() < deadline && !port) {
-        {
-            std::lock_guard lock(port_mutex);
-            port = bidi_port;
-        }
-        if (!port) {
-            REQUIRE(proc.alive());
-            std::this_thread::sleep_for(50ms);
-        }
+    if (runtime_platform() == "termux-arm64") {
+        // Termux runs the glibc Camoufox build in setup's proot-distro
+        // container, as the gateway does: the temporary directory holding the
+        // profile and the browser's directory are bound at their own paths,
+        // and proot-distro, which builds the environment afresh, gets it as
+        // --env. HOME stays the container's own.
+        const char *prefix = std::getenv("PREFIX");
+        REQUIRE(prefix != nullptr);
+        const auto proot = fs::path(prefix) / "bin" / "proot-distro";
+        REQUIRE(fs::is_regular_file(proot));
+        REQUIRE_FALSE(termux_container_rootfs().empty());
+        auto environment = browser_detail::private_environment(root);
+        std::erase_if(environment, [](const auto &item) { return item.first == "HOME"; });
+        environment.insert(environment.end(), options.environment.begin(), options.environment.end());
+        options.environment.clear();
+        proc.start(proot,
+                   browser_detail::proot_arguments(exe_path, args, {fs::absolute(dir.path), fs::absolute(exe_path.parent_path())},
+                                                   environment),
+                   root, options);
+    } else {
+        proc.start(exe_path, args, root, options);
     }
-    REQUIRE(port != 0);
+
+    // The gateway's launch deadline: proot starts slower.
+    const auto deadline = Clock::now() + 45s;
+    unsigned short port = 0;
+    for (bool alive = true; !port; std::this_thread::sleep_for(50ms)) {
+        std::lock_guard lock(port_mutex);
+        port = bidi_port;
+        if (port) break;
+        if (!alive || Clock::now() >= deadline)
+            FAIL((alive ? "Camoufox announced no WebDriver BiDi endpoint" : "Camoufox exited before WebDriver BiDi became ready")
+                 << ":\n"
+                 << launch_output);
+        // Once more after it exits: its last lines may still be arriving.
+        alive = proc.alive();
+    }
 
     Bidi bidi;
     bidi.connect(port, "/session", {});
