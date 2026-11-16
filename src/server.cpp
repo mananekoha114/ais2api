@@ -237,7 +237,7 @@ class Service {
                                store_.choose("readiness").has_value() && browser_exists;
             std::lock_guard lock(queue_mutex_);
             return {{"running", true},
-                    {"version", "0.1.0"},
+                    {"version", version()},
                     {"build_mode", build_mode()},
                     {"logging_healthy", logging_healthy_.load()},
                     {"usage_healthy", usage_healthy_.load()},
@@ -1318,7 +1318,7 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
         command = {{"command", "admin.password"}, {"password", body.at("password")}};
     }
     else if (get && path == "/version")
-        result = {{"version", "0.1.0"}, {"build_mode", build_mode()}, {"management_api", "v1"},
+        result = {{"version", version()}, {"build_mode", build_mode()}, {"management_api", "v1"},
                   {"backends", json::object{{"spidermonkey", spidermonkey_available()}}}};
     else if (get && path == "/capabilities") result = {
         {"api_version", "v1"}, {"accounts", true}, {"rotation", true}, {"stats", true},
@@ -1441,7 +1441,7 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
     }
     else if (get && path == "/logs/sources") { state.audit = false; result = log_sources(cfg.data_dir); }
     else if (get && path == "/diagnostics") {
-        result = {{"version", "0.1.0"}, {"build_mode", build_mode()}, {"status", service.control({{"command", "status"}})},
+        result = {{"version", version()}, {"build_mode", build_mode()}, {"status", service.control({{"command", "status"}})},
             {"browser", service.control({{"command", "browser.diagnostics"}})},
             {"config", service.control({{"command", "config.show"}})},
             {"stats", service.control({{"command", "stats"}})},

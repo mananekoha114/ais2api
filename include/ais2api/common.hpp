@@ -79,4 +79,6 @@ json::object error_json(const Error &error, bool openai = false);
 // "dev" in a build with AIS2API_DEV_BUNDLE (scripts/build-dev.ps1), else
 // "release".
 std::string_view build_mode();
+// The project version from CMakeLists.txt, e.g. "0.2.0".
+std::string_view version();
 } // namespace ais2api
