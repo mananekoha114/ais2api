@@ -177,6 +177,11 @@ if(NOT MSVC)
 endif()
 add_executable(ais2api src/main.cpp)
 target_link_libraries(ais2api PRIVATE ais2api_core)
+if(NOT MSVC)
+  # The prebuilt SpiderMonkey archives carry DWARF several times the size of
+  # their code. Release executables keep their symbols but not that.
+  target_link_options(ais2api PRIVATE "$<$<CONFIG:Release,MinSizeRel>:LINKER:--strip-debug>")
+endif()
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/userscript")
 configure_file(userscript/ais2api-cookie.user.js userscript/ais2api-cookie.user.js COPYONLY)
 if(MSVC)
