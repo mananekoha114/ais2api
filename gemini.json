@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source": "https://aistudio.google.com/docs/pricing",
-  "published_at": "2026-11-16T03:23:18Z",
+  "published_at": "2026-11-19T07:22:19Z",
   "currency": "USD",
   "unit": "USD per 1M tokens",
   "service_tier": "standard",
@@ -383,6 +383,22 @@
               "input": 1.5,
               "output": 7.5,
               "cache_read": 0.075
+            }
+          ]
+        }
+      ]
+    },
+    "gemini-4-neon": {
+      "name": "Gemini 4 Neon",
+      "periods": [
+        {
+          "from": null,
+          "tiers": [
+            {
+              "above_tokens": 0,
+              "input": 3.0,
+              "output": 15.0,
+              "cache_read": 0.15
             }
           ]
         }
