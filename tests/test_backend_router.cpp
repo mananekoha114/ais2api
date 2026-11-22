@@ -10,6 +10,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <sqlite3.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <thread>
 
 using namespace ais2api;
 namespace {
@@ -293,4 +296,80 @@ TEST_CASE("doctor checks every backend the stored accounts need", "[router][setu
         CHECK(result.contains("spidermonkey"));
         CHECK_FALSE(result.contains("camoufox"));
     }
+}
+
+TEST_CASE("BackendRouter serializes concurrent switches and recovers when close throws", "[router]") {
+    if (!spidermonkey_available()) return;
+    Directory dir;
+    Store store(dir.path);
+    const auto sm = import_account(store, "sm"), cam = import_account(store, "cam");
+    store.set_backend(sm, "spidermonkey");
+    store.set_backend(cam, "camoufox");
+    Config config;
+    config.data_dir = dir.path;
+
+    struct Shared {
+        std::atomic<int> in_close{0};
+        std::atomic<int> concurrent_close{0};
+        std::atomic<int> cam_closes{0};
+        std::atomic<bool> throw_cam_close{false};
+    };
+    auto shared = std::make_shared<Shared>();
+    class SwitchGateway final : public GenerationBackend {
+      public:
+        SwitchGateway(std::string name, std::shared_ptr<Shared> state)
+            : name_(std::move(name)), state_(std::move(state)) {}
+        void generate(const Request &, const Account &, const EventSink &, std::stop_token) override {}
+        json::array models(const Account &, std::stop_token) override { return {}; }
+        json::object probe(const Account &, std::stop_token) override { return {}; }
+        json::object diagnostics() override { return {{"status", name_}}; }
+        void reconfigure(const Config &) override {}
+        void close() override {
+            if (state_->in_close.fetch_add(1) > 0) state_->concurrent_close.fetch_add(1);
+            struct Guard {
+                std::atomic<int> &count;
+                ~Guard() { count.fetch_sub(1); }
+            } guard{state_->in_close};
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+            if (name_ == "camoufox") {
+                state_->cam_closes.fetch_add(1);
+                if (state_->throw_cam_close.exchange(false))
+                    throw Error(500, "close_failed", "Simulated close error");
+            }
+        }
+        void reset_session() override {}
+        void clear_template() override {}
+        bool release_idle() override { return false; }
+
+      private:
+        std::string name_;
+        std::shared_ptr<Shared> state_;
+    };
+
+    BackendRouter router(
+        config, store,
+        [shared](std::string_view backend, const Config &, Store &) {
+            return std::make_unique<SwitchGateway>(std::string(backend), shared);
+        },
+        {}, "windows-x64");
+
+    std::vector<std::jthread> workers;
+    for (int t = 0; t < 4; ++t) {
+        workers.emplace_back([&, t] {
+            for (int i = 0; i < 6; ++i)
+                router.generate({}, account(((t + i) % 2 == 0) ? sm : cam), {}, {});
+        });
+    }
+    workers.clear();
+    CHECK(shared->concurrent_close.load() == 0);
+
+    router.generate({}, account(cam), {}, {});
+    const int closes_before = shared->cam_closes.load();
+    shared->throw_cam_close.store(true);
+    CHECK_THROWS_AS(router.generate({}, account(sm), {}, {}), Error);
+    CHECK(shared->cam_closes.load() == closes_before + 1);
+    // current_ was cleared before close() threw, so retrying does not close camoufox again.
+    REQUIRE_NOTHROW(router.generate({}, account(sm), {}, {}));
+    CHECK(shared->cam_closes.load() == closes_before + 1);
+    CHECK(string_or(router.diagnostics(), "backend") == "spidermonkey");
 }

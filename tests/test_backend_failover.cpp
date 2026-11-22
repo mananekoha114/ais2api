@@ -46,6 +46,26 @@ Account make_account(std::string id) {
     return result;
 }
 
+void stub_fpgen_model(const fs::path &data_dir) {
+    const std::string content = "stub-fpgen";
+    const auto digest = sha256(content);
+    const FpgenModelPin pin{"model-2/2026", "https://example.com/model.zip", digest, content.size(),
+                            {{"values.dat.zst", digest}}};
+    const auto dir = fpgen_model_directory(data_dir, pin);
+    fs::create_directories(dir);
+    atomic_write(dir / "values.dat.zst", content);
+    atomic_write(dir / ".ais2api-model.json",
+                 json::serialize(json::object{{"version", 1}, {"tag", pin.tag}, {"sha256", pin.sha256}}));
+    atomic_write(data_dir / "runtime-manifest.json",
+                 json::serialize(json::object{
+                     {"version", 1},
+                     {"fpgen_model", json::object{{"tag", pin.tag},
+                                                  {"url", pin.url},
+                                                  {"size", pin.size},
+                                                  {"sha256", pin.sha256},
+                                                  {"file_sha256", json::object{{"values.dat.zst", digest}}}}}}));
+}
+
 json::object text_event(std::string text) {
     json::array parts{json::object{{"text", std::move(text)}}};
     json::array candidates{
@@ -150,6 +170,7 @@ struct FailoverServer {
         const auto fake_camoufox = directory.path / "camoufox.exe";
         atomic_write(fake_camoufox, "stub");
         config.browser_executable = fake_camoufox;
+        stub_fpgen_model(config.data_dir);
         config.limits.max_attempts = max_attempts;
         config.limits.queue_seconds = 5;
         config.limits.generation_seconds = 5;
@@ -347,7 +368,23 @@ TEST_CASE("doctor, setup and safe diagnostics report SpiderMonkey and fpgen read
         }
     }
 
+#ifdef AIS2API_DEV_BUNDLE
     CHECK(firefox_backend_ready("spidermonkey", config, dir.path) == spidermonkey_available());
+#else
+    CHECK_FALSE(firefox_backend_ready("spidermonkey", config, dir.path));
+    Config damaged_sm = config;
+    damaged_sm.data_dir = dir.path / "damaged-sm";
+    const auto pin = fpgen_model_pin();
+    const auto model_dir = fpgen_model_directory(damaged_sm.data_dir, pin);
+    fs::create_directories(model_dir);
+    atomic_write(model_dir / ".ais2api-model.json",
+                 json::serialize(json::object{{"version", 1}, {"tag", pin.tag}, {"sha256", pin.sha256}}));
+    CHECK_FALSE(firefox_backend_ready("spidermonkey", damaged_sm, dir.path));
+    Config ready_sm = config;
+    ready_sm.data_dir = dir.path / "ready-sm";
+    stub_fpgen_model(ready_sm.data_dir);
+    CHECK(firefox_backend_ready("spidermonkey", ready_sm, dir.path) == spidermonkey_available());
+#endif
     CHECK_FALSE(firefox_backend_ready("camoufox", config, dir.path));
     const auto fake_camoufox = dir.path / "camoufox.exe";
     atomic_write(fake_camoufox, "stub");
@@ -368,6 +405,7 @@ TEST_CASE("Store persists 6-hour auto backend switches and clears them on manual
     const auto fake_camoufox = dir.path / "camoufox.exe";
     atomic_write(fake_camoufox, "stub");
     config.browser_executable = fake_camoufox;
+    stub_fpgen_model(config.data_dir);
 
     std::string auto_id, pinned_id;
     std::int64_t before = 0;

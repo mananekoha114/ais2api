@@ -6,6 +6,7 @@
 
 #include "ais2api/management.hpp"
 #include "ais2api/console.hpp"
+#include "ais2api/download.hpp"
 #include <array>
 #include <charconv>
 #include <iostream>
@@ -430,6 +431,7 @@ json::object execute(Arguments args) {
 
 int cli_main(int argc, char **argv) {
     try {
+        ais2api::ensure_curl_initialized();
         auto args = ais2api::parse_arguments(argc, argv);
         if (args.help || (!args.positional.empty() && args.positional[0] == "help")) {
             ais2api::help();

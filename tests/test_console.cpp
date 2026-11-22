@@ -82,3 +82,10 @@ TEST_CASE("Pretty command results keep every field", "[console]") {
     CHECK(text == "{\n  \"running\": true,\n  \"accounts\": [\n    {\n      \"id\": \"a\",\n      \"tags\": []\n    },\n    {\n      \"id\": \"b\"\n    }\n  ],\n  \"empty\": {},\n  \"name\": \"中文\"\n}");
     CHECK(json::parse(text) == value);
 }
+
+TEST_CASE("Console uncolored log lines omit ANSI escape sequences", "[console]") {
+    const auto plain = console::log_line(
+        {{"event", "generation"}, {"request_id", "chatcmpl-1"}, {"error", "upstream_error"}}, false);
+    CHECK(plain.find('\x1b') == std::string::npos);
+    CHECK(plain.find("错误") != std::string::npos);
+}

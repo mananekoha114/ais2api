@@ -10,6 +10,7 @@
 #include "ais2api/browser.hpp"
 #include "ais2api/camoufox.hpp"
 #include "ais2api/console.hpp"
+#include "ais2api/download.hpp"
 #include "ais2api/firefox_identity.hpp"
 #include <archive.h>
 #include <archive_entry.h>
@@ -32,16 +33,9 @@
 #endif
 namespace ais2api {
 namespace {
-struct CurlInit {
-    CurlInit() {
-        if (curl_global_init(CURL_GLOBAL_DEFAULT))
-            throw Error(500, "network_init", "Cannot initialize downloader");
-    }
-    ~CurlInit() { curl_global_cleanup(); }
-};
 using Curl = std::unique_ptr<CURL, decltype(&curl_easy_cleanup)>;
 Curl curl_handle() {
-    static CurlInit init;
+    ensure_curl_initialized();
     Curl c(curl_easy_init(), curl_easy_cleanup);
     if (!c)
         throw Error(500, "network_init", "Cannot allocate downloader");
@@ -153,7 +147,10 @@ curl_socket_t public_socket(void *, curlsocktype, struct curl_sockaddr *address)
 } // namespace
 void extract_archive(const fs::path &input, const fs::path &destination,
                      const std::function<bool(std::string_view)> &keep) {
-    if (fs::exists(destination) && (!fs::is_directory(destination) || !fs::is_empty(destination)))
+    const auto dest_status = fs::symlink_status(destination);
+    if (fs::is_symlink(dest_status))
+        throw Error(400, "unsafe_path", "Extraction destination cannot be a symbolic link");
+    if (fs::exists(dest_status) && (!fs::is_directory(dest_status) || !fs::is_empty(destination)))
         throw Error(409, "directory_not_empty",
                     "Extraction destination must be an empty owned staging directory");
     secure_directory(destination);
@@ -184,6 +181,8 @@ void extract_archive(const fs::path &input, const fs::path &destination,
         std::replace(name.begin(), name.end(), '\\', '/');
         auto relative = fs::u8path(name);
         if (relative.empty() || relative.is_absolute() || relative.has_root_name() ||
+            relative.has_root_directory() || relative.has_root_path() ||
+            (!name.empty() && name.front() == '/') ||
             name.find(':') != std::string::npos || archive_entry_symlink(entry) ||
             archive_entry_hardlink(entry))
             throw Error(400, "archive_path", "Unsafe archive entry");
@@ -194,7 +193,7 @@ void extract_archive(const fs::path &input, const fs::path &destination,
             if (const auto text = path_utf8(piece); !text.empty() && text != ".")
                 clean += (clean.empty() ? "" : "/") + text;
 #ifdef _WIN32
-            auto component = piece.string();
+            auto component = path_utf8(piece);
             if (component != "." && !component.empty()) {
                 auto base = component.substr(0, component.find('.'));
                 std::transform(base.begin(), base.end(), base.begin(),
@@ -203,7 +202,9 @@ void extract_archive(const fs::path &input, const fs::path &destination,
                     base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" ||
                     (base.size() == 4 && (base.starts_with("COM") || base.starts_with("LPT")) &&
                      base[3] >= '1' && base[3] <= '9');
-                if (device || component.back() == '.' || component.back() == ' ' ||
+                const bool has_control = std::any_of(
+                    component.begin(), component.end(), [](unsigned char c) { return c < 0x20; });
+                if (device || has_control || component.back() == '.' || component.back() == ' ' ||
                     component.find_first_of("<>\"|?*") != std::string::npos)
                     throw Error(400, "archive_path", "Ambiguous Windows archive path");
             }
@@ -212,13 +213,22 @@ void extract_archive(const fs::path &input, const fs::path &destination,
         const auto type = archive_entry_filetype(entry);
         if (type != AE_IFDIR && type != AE_IFREG)
             throw Error(400, "archive_path", "Special archive entries are not supported");
+        if (type == AE_IFREG && (clean.empty() || (!name.empty() && name.back() == '/')))
+            throw Error(400, "archive_path", "Unsafe archive entry");
         // Entries the caller leaves out pass the same checks but are not written.
         if (keep && !keep(clean))
             continue;
+        if (clean.empty())
+            continue;
         auto target = (root / relative).lexically_normal();
+        auto rel = target.lexically_relative(root);
+        if (rel.empty() || rel.has_root_path() || *rel.begin() == "..")
+            throw Error(400, "archive_path", "Archive entry escapes staging directory");
         if (!seen.insert(target).second && type != AE_IFDIR)
             throw Error(400, "archive_path", "Duplicate archive file");
         if (type == AE_IFDIR) {
+            if (fs::exists(target) && !fs::is_directory(target))
+                throw Error(400, "archive_path", "Archive directory conflicts with an existing file");
             fs::create_directories(target);
             continue;
         }
@@ -243,6 +253,8 @@ void extract_archive(const fs::path &input, const fs::path &destination,
         if (n < 0)
             throw Error(400, "invalid_archive", "Truncated runtime archive");
         out.close();
+        if (!out)
+            throw Error(500, "extract_write", "Cannot finalize extracted file");
 #ifndef _WIN32
         fs::permissions(target, static_cast<fs::perms>(archive_entry_perm(entry) & 0777));
 #endif
@@ -859,7 +871,19 @@ json::object setup_fpgen_model(const Config &config) {
 }
 bool firefox_backend_ready(std::string_view backend, const Config &config,
                            const fs::path &program_directory) {
-    if (backend == "spidermonkey") return spidermonkey_available();
+    if (backend == "spidermonkey") {
+        if (!spidermonkey_available()) return false;
+        try {
+            const auto custom_manifest = config.data_dir / "runtime-manifest.json";
+            const auto pin = fs::is_regular_file(custom_manifest)
+                                 ? fpgen_model_pin(json::parse(read_file(custom_manifest, 65536)).as_object())
+                                 : fpgen_model_pin();
+            return fpgen_model_embedded(pin) ||
+                   fpgen_model_state(fpgen_model_directory(config.data_dir, pin), pin) == "installed";
+        } catch (const std::exception &) {
+            return false;
+        }
+    }
     if (backend != "camoufox") return false;
     const auto executable = camoufox_executable(config, program_directory);
     std::error_code error;
@@ -1167,10 +1191,39 @@ std::string media_detail::fetch_with_resolver(std::string_view input, std::size_
         else {
             boost::asio::io_context io;
             boost::asio::ip::tcp::resolver resolver(io);
-            boost::system::error_code ec;
-            const auto results = resolver.resolve(resolution_host, "443", ec);
-            if (ec) throw Error(400, "media_url", "Cannot resolve image host");
-            for (const auto& result : results) addresses.push_back(result.endpoint().address());
+            boost::asio::steady_timer timer(io);
+            bool done = false;
+            bool timed_out = false;
+            boost::system::error_code resolve_ec;
+            boost::asio::ip::tcp::resolver::results_type resolved;
+            {
+                timer.expires_after(std::chrono::seconds(15));
+                timer.async_wait([&](const boost::system::error_code& ec) {
+                    if (ec || done) return;
+                    timed_out = true;
+                    resolver.cancel();
+                });
+                resolver.async_resolve(resolution_host, "443",
+                    [&](const boost::system::error_code& ec,
+                        boost::asio::ip::tcp::resolver::results_type results) {
+                        done = true;
+                        resolve_ec = ec;
+                        resolved = std::move(results);
+                        timer.cancel();
+                    });
+                std::stop_callback on_stop(cancel, [&] {
+                    boost::asio::post(io, [&] {
+                        if (done) return;
+                        timer.cancel();
+                        resolver.cancel();
+                    });
+                });
+                io.run();
+            }
+            check_cancel(cancel);
+            if (timed_out) throw Error(504, "media_timeout", "Timed out resolving image host");
+            if (resolve_ec) throw Error(400, "media_url", "Cannot resolve image host");
+            for (const auto& result : resolved) addresses.push_back(result.endpoint().address());
         }
         check_cancel(cancel);
         if (addresses.empty()) throw Error(400, "media_url", "Cannot resolve image host");

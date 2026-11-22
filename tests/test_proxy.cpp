@@ -264,3 +264,49 @@ TEST_CASE("the proxy relay switch is off by default and checked only when on", "
     CHECK(Config::load(cfg.config_file).browser_proxy_relay);
     CHECK_FALSE(Config::load(cfg.config_file, {{"browser_proxy_relay", false}}).browser_proxy_relay);
 }
+
+TEST_CASE("the relay rejects literal non-public IP targets without contacting upstream", "[proxy][relay]") {
+    FakeUpstream upstream([](tcp::socket&) {});
+    browser_detail::ProxyRelay relay;
+    const auto port = relay.start(endpoint("http://127.0.0.1:" + std::to_string(upstream.port)));
+    for (const auto* target : {"127.0.0.1:443", "10.0.0.1:443", "172.16.0.1:443", "192.168.1.1:443",
+                               "169.254.169.254:443", "0.0.0.0:443", "[::1]:443", "[::]:443", "[fc00::1]:443",
+                               "[fd12::1]:443", "[fe80::1]:443", "[::ffff:127.0.0.1]:443"}) {
+        CAPTURE(target);
+        CHECK(Browser(port).connect(target).starts_with("HTTP/1.1 403"));
+    }
+    CHECK_FALSE(upstream.contacted);
+    CHECK(relay.last_error().empty());
+}
+
+TEST_CASE("the relay closes half-closed tunnels after the half-close timeout", "[proxy][relay]") {
+    std::atomic<bool> done = false;
+    FakeUpstream upstream([&](tcp::socket& socket) {
+        read_head(socket);
+        asio::write(socket, asio::buffer(std::string_view("HTTP/1.1 200 Connection established\r\n\r\n")));
+        while (!done.load()) std::this_thread::sleep_for(10ms);
+    });
+    struct Finish {
+        std::atomic<bool>& done;
+        ~Finish() { done.store(true); }
+    } finish{done};
+    browser_detail::ProxyRelay relay(std::chrono::milliseconds(150));
+    const auto port = relay.start(endpoint("http://127.0.0.1:" + std::to_string(upstream.port)));
+    Browser browser(port);
+    REQUIRE(browser.connect("aistudio.google.com:443").starts_with("HTTP/1.1 200"));
+    CHECK(relay.tunnels() == 1);
+    browser.socket.shutdown(tcp::socket::shutdown_send);
+    for (int i = 0; i < 200 && relay.tunnels(); ++i) std::this_thread::sleep_for(25ms);
+    CHECK(relay.tunnels() == 0);
+}
+
+TEST_CASE("stopping the relay closes its listening acceptor", "[proxy][relay]") {
+    browser_detail::ProxyRelay relay;
+    const auto port = relay.start(endpoint("http://127.0.0.1:1"));
+    relay.stop();
+    asio::io_context io;
+    tcp::socket probe(io);
+    boost::system::error_code ec;
+    probe.connect({asio::ip::address_v4::loopback(), port}, ec);
+    CHECK(static_cast<bool>(ec));
+}

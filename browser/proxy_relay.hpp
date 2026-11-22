@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #pragma once
+#include "ais2api/media.hpp"
 #include "ais2api/proxy.hpp"
 #include <boost/asio.hpp>
 #include <array>
@@ -25,7 +26,8 @@ namespace ais2api::browser_detail {
 class ProxyRelay {
 public:
     static constexpr std::size_t max_tunnels = 128;
-    ProxyRelay() = default;
+    explicit ProxyRelay(std::chrono::milliseconds half_close_timeout = std::chrono::seconds(30))
+        : half_close_timeout_(half_close_timeout) {}
     ProxyRelay(const ProxyRelay&) = delete;
     ProxyRelay& operator=(const ProxyRelay&) = delete;
     ~ProxyRelay() { stop(); }
@@ -37,12 +39,22 @@ public:
         acceptor_.listen();
         const auto port = acceptor_.local_endpoint().port();
         boost::asio::co_spawn(io_, accept(), boost::asio::detached);
-        thread_ = std::thread([this] { io_.run(); });
+        thread_ = std::thread([this] {
+            try {
+                io_.run();
+            } catch (const std::exception& error) {
+                record(error.what());
+            } catch (...) {
+                record("Proxy relay stopped unexpectedly");
+            }
+        });
         return port;
     }
     void stop() noexcept {
         io_.stop();
         if (thread_.joinable()) thread_.join();
+        error_code ec;
+        acceptor_.close(ec);
     }
     // The most recent tunnel failure, for diagnostics; never contains credentials.
     std::string last_error() const {
@@ -60,14 +72,34 @@ private:
     };
     struct Tunnel {
         tcp::socket client, upstream;
+        tcp::resolver resolver;
         boost::asio::steady_timer deadline;
+        boost::asio::steady_timer half_close_deadline;
+        std::chrono::milliseconds half_close_timeout;
         bool established = false;
+        bool half_closed = false;
         std::atomic<std::size_t>& count;
-        Tunnel(tcp::socket socket, std::atomic<std::size_t>& counter)
-            : client(std::move(socket)), upstream(client.get_executor()), deadline(client.get_executor()), count(counter) { ++count; }
+        Tunnel(tcp::socket socket, std::atomic<std::size_t>& counter, std::chrono::milliseconds half_close)
+            : client(std::move(socket)),
+              upstream(client.get_executor()),
+              resolver(client.get_executor()),
+              deadline(client.get_executor()),
+              half_close_deadline(client.get_executor()),
+              half_close_timeout(half_close),
+              count(counter) { ++count; }
         ~Tunnel() { --count; }
-        void close() noexcept { error_code ec; client.close(ec); upstream.close(ec); }
+        void close() noexcept {
+            error_code ec;
+            try {
+                deadline.cancel();
+                half_close_deadline.cancel();
+                resolver.cancel();
+            } catch (...) {}
+            client.close(ec);
+            upstream.close(ec);
+        }
     };
+    std::chrono::milliseconds half_close_timeout_;
     // Destroyed after io_, whose pending coroutines still decrement it.
     std::atomic<std::size_t> tunnels_{0};
     mutable std::mutex mutex_;
@@ -101,11 +133,15 @@ private:
             if (ec) {
                 // Out of descriptors and similar: back off instead of spinning.
                 boost::asio::steady_timer pause(io_, std::chrono::milliseconds(100));
-                co_await pause.async_wait(boost::asio::use_awaitable);
+                error_code wait_ec;
+                co_await pause.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, wait_ec));
+                if (wait_ec == boost::asio::error::operation_aborted) co_return;
                 continue;
             }
             if (tunnels_.load() >= max_tunnels) { socket.close(ec); continue; }
-            boost::asio::co_spawn(io_, serve(std::make_shared<Tunnel>(std::move(socket), tunnels_)), boost::asio::detached);
+            boost::asio::co_spawn(
+                io_, serve(std::make_shared<Tunnel>(std::move(socket), tunnels_, half_close_timeout_)),
+                boost::asio::detached);
         }
     }
     // Reads one header block (through the blank line) into `head`; returns the
@@ -130,6 +166,10 @@ private:
         if (host.empty() || host.size() > 255 ||
             !std::all_of(host.begin(), host.end(), [](unsigned char c) { return std::isalnum(c) || c == '.' || c == '-' || c == '_' || c == ':'; }))
             throw Failure{"400 Bad Request", {}};
+        error_code literal_error;
+        const auto address = boost::asio::ip::make_address(host, literal_error);
+        if (!literal_error && !media_detail::public_address(address))
+            throw Failure{"403 Forbidden", {}};
         return host;
     }
     boost::asio::awaitable<void> serve(std::shared_ptr<Tunnel> tunnel) {
@@ -177,12 +217,14 @@ private:
     // Connects to the upstream proxy and asks it for a tunnel to host:443.
     // Returns tunnel bytes the upstream already sent.
     boost::asio::awaitable<std::string> open(Tunnel& tunnel, const std::string& host) {
-        tcp::resolver resolver(io_);
-        const auto endpoints = co_await resolver.async_resolve(upstream_.host, std::to_string(upstream_.port), boost::asio::use_awaitable);
+        const auto endpoints = co_await tunnel.resolver.async_resolve(
+            upstream_.host, std::to_string(upstream_.port), boost::asio::use_awaitable);
         co_await boost::asio::async_connect(tunnel.upstream, endpoints, boost::asio::use_awaitable);
         error_code ignored;
         tunnel.upstream.set_option(tcp::no_delay(true), ignored);
         tunnel.client.set_option(tcp::no_delay(true), ignored);
+        tunnel.upstream.set_option(tcp::socket::keep_alive(true), ignored);
+        tunnel.client.set_option(tcp::socket::keep_alive(true), ignored);
         if (upstream_.scheme == "http") co_return co_await http_connect(tunnel.upstream, host);
         co_await socks5_connect(tunnel.upstream, host);
         co_return std::string{};
@@ -261,8 +303,20 @@ private:
         } catch (const boost::system::system_error& error) {
             error_code ec;
             // Pass a clean end on; anything else ends both directions.
-            if (error.code() == boost::asio::error::eof) to.shutdown(tcp::socket::shutdown_send, ec);
-            else tunnel->close();
+            if (error.code() == boost::asio::error::eof) {
+                to.shutdown(tcp::socket::shutdown_send, ec);
+                if (!tunnel->half_closed) {
+                    tunnel->half_closed = true;
+                    tunnel->half_close_deadline.expires_after(tunnel->half_close_timeout);
+                    tunnel->half_close_deadline.async_wait([weak = std::weak_ptr<Tunnel>(tunnel)](error_code wait_ec) {
+                        if (auto t = weak.lock(); t && !wait_ec) t->close();
+                    });
+                } else {
+                    tunnel->close();
+                }
+            } else {
+                tunnel->close();
+            }
         }
     }
 };

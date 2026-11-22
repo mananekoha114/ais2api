@@ -10,7 +10,9 @@
 #include <chrono>
 #include <cstdint>
 #include <string_view>
-namespace ais2api::download_detail {
+namespace ais2api {
+void ensure_curl_initialized();
+namespace download_detail {
 struct Options {
     unsigned connections = 4;
     fs::path ca_file;
@@ -40,4 +42,5 @@ inline bool content_range(std::string_view value, std::uint64_t first, std::uint
     return first <= last && last < total && number('-', first) && number('/', last) &&
            number(0, total) && value.empty();
 }
-}
+} // namespace download_detail
+} // namespace ais2api

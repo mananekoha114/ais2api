@@ -228,13 +228,27 @@ void OwnedProcess::start(const fs::path& executable, const std::vector<std::stri
     }
     if (pid_ == 0) {
         if (setsid() < 0) _exit(126);
+        if (output_write >= 0 && output_write <= 2) {
+            const int moved = fcntl(output_write, F_DUPFD, 3);
+            if (moved < 0) _exit(126);
+            ::close(output_write);
+            output_write = moved;
+        }
         int nullfd = open("/dev/null", O_RDWR);
         if (nullfd >= 0) {
             dup2(nullfd, STDIN_FILENO);
             if (output_write < 0) { dup2(nullfd, STDOUT_FILENO); dup2(nullfd, STDERR_FILENO); }
             if (nullfd > 2) ::close(nullfd);
         }
-        if (output_write >= 0) { dup2(output_write, STDOUT_FILENO); dup2(output_write, STDERR_FILENO); }
+        if (output_write >= 0) {
+            dup2(output_write, STDOUT_FILENO);
+            dup2(output_write, STDERR_FILENO);
+            if (output_write > 2) ::close(output_write);
+            for (int fd : {STDOUT_FILENO, STDERR_FILENO}) {
+                const int flags = fcntl(fd, F_GETFD);
+                if (flags >= 0 && (flags & FD_CLOEXEC)) fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC);
+            }
+        }
         execve(argv[0], argv.data(), envp.data()); _exit(127);
     }
     if (output_write >= 0) {
@@ -264,6 +278,7 @@ void OwnedProcess::stop() noexcept {
         kill(pid_, SIGTERM);
         for (unsigned i = 0; i < 30; ++i) { siginfo_t info{}; if (waitid(P_PID, static_cast<id_t>(pid_), &info, WEXITED | WNOHANG | WNOWAIT) != 0 || info.si_pid) break; std::this_thread::sleep_for(20ms); }
         kill(-pid_, SIGKILL);
+        kill(pid_, SIGKILL);
         int status = 0; while (waitpid(pid_, &status, 0) < 0 && errno == EINTR) {}
         pid_ = -1;
     }
@@ -290,7 +305,15 @@ void OwnedProcess::read_output(std::function<void(std::string_view)> on_output) 
             pending.clear();
         }
     };
+    std::optional<Clock::time_point> stop_deadline;
+    std::size_t drained_after_stop = 0;
+    constexpr std::size_t max_drain_bytes = 64 * 1024;
+    constexpr auto max_drain_time = 200ms;
     for (;;) {
+        if (stopping_) {
+            if (!stop_deadline) stop_deadline = Clock::now() + max_drain_time;
+            if (Clock::now() >= *stop_deadline || drained_after_stop >= max_drain_bytes) break;
+        }
 #ifdef _WIN32
         DWORD available = 0;
         // Fails with a broken pipe once every writer has exited.
@@ -315,6 +338,7 @@ void OwnedProcess::read_output(std::function<void(std::string_view)> on_output) 
         if (count < 0 && errno == EINTR) continue;
         if (count <= 0) break;
 #endif
+        if (stopping_) drained_after_stop += static_cast<std::size_t>(count);
         pending.append(buffer, static_cast<std::size_t>(count));
         deliver(false);
     }
