@@ -10,10 +10,10 @@
 using namespace ais2api;
 namespace {
 FailureDecision decide(unsigned status, std::string code, unsigned attempt = 0, bool recovered = false,
-                       std::string quota_scope = "unknown") {
+                       std::string quota_scope = "unknown", bool template_refreshed = false) {
     Error error(status, std::move(code), "synthetic");
     error.quota_scope = std::move(quota_scope);
-    return classify_failure(error, attempt, recovered);
+    return classify_failure(error, attempt, recovered, template_refreshed);
 }
 }
 
@@ -31,9 +31,11 @@ TEST_CASE("Caller and environment failures never touch account state", "[upstrea
 TEST_CASE("Route glitches retry the same session and the first empty reply refreshes its template", "[upstream-policy][recovery]") {
     CHECK(decide(404, "transient_rpc_route", 2).action == FailureAction::retry_same);
     CHECK(decide(502, "upstream_no_content", 0).action == FailureAction::refresh_template);
-    CHECK(decide(502, "upstream_no_content", 1).action == FailureAction::fail);
+    CHECK(decide(502, "upstream_no_content", 1).action == FailureAction::refresh_template);
+    CHECK(decide(502, "upstream_no_content", 1, false, "unknown", true).action == FailureAction::fail);
     // A template refresh is not the request's session recovery.
     CHECK(decide(502, "upstream_no_content", 0, true).action == FailureAction::refresh_template);
+    CHECK(decide(502, "upstream_no_content", 2, true, "unknown", true).action == FailureAction::fail);
 }
 
 TEST_CASE("Quota errors cool the model by scope", "[upstream-policy][recovery]") {

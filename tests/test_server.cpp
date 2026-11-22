@@ -4,6 +4,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#include "ais2api/backend.hpp"
 #include "ais2api/runtime.hpp"
 #include "ais2api/store.hpp"
 #include "ais2api/webui.hpp"
@@ -11,7 +12,9 @@
 #include <boost/beast.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <array>
+#include <condition_variable>
 #include <future>
+#include <mutex>
 #include <thread>
 using namespace ais2api;
 namespace net=boost::asio;
@@ -114,7 +117,8 @@ TEST_CASE("Embedded console serves history routes without exposing API or filesy
     REQUIRE(root["X-Content-Type-Options"] == "nosniff");
     REQUIRE(root["Content-Security-Policy"].find("frame-ancestors 'none'") != std::string_view::npos);
     REQUIRE(root.body().find("<div id=\"app\">") != std::string::npos);
-    for (auto route : {"/login", "/accounts", "/models", "/keys", "/stats", "/logs", "/config", "/diagnostics", "/settings"}) {
+    for (auto route : {"/login", "/change-password", "/accounts", "/models", "/keys", "/stats",
+                       "/logs", "/config", "/diagnostics", "/settings"}) {
         const auto response = server.call(http::verb::get, std::string(route) + "?test=1");
         REQUIRE(response.result_int() == 200);
         REQUIRE(response.body() == root.body());
@@ -357,4 +361,137 @@ TEST_CASE("HTTP listener reports an occupied port with actionable diagnostics","
         REQUIRE(message.find("os_error=")!=std::string::npos);
         REQUIRE(message.find("different available port")!=std::string::npos);
     }
+}
+
+namespace {
+class SlowTailBackend final : public GenerationBackend {
+  public:
+    explicit SlowTailBackend(std::chrono::milliseconds pause) : pause_(pause) {}
+    void generate(const Request &, const Account &, const EventSink &emit,
+                  std::stop_token token) override {
+        emit(json::object{{"candidates", json::array{json::object{
+            {"index", 0},
+            {"content", json::object{{"role", "model"},
+                                     {"parts", json::array{json::object{{"text", "hello"}}}}}}}}}});
+        std::mutex mu;
+        std::condition_variable_any cv;
+        std::unique_lock lock(mu);
+        cv.wait_for(lock, token, pause_, [] { return false; });
+        check_cancel(token);
+        emit(json::object{{"candidates", json::array{json::object{
+            {"index", 0},
+            {"content", json::object{{"role", "model"},
+                                     {"parts", json::array{json::object{{"text", " world"}}}}}},
+            {"finishReason", "STOP"}}}}});
+    }
+    json::array models(const Account &, std::stop_token = {}) override { return {}; }
+    json::object probe(const Account &, std::stop_token = {}) override { return {{"ok", true}}; }
+    json::object diagnostics() override { return {}; }
+    void close() override {}
+  private:
+    std::chrono::milliseconds pause_;
+};
+} // namespace
+
+TEST_CASE("SSE streams survive gaps longer than the socket write timeout without false 504",
+          "[http][sse][timeout]") {
+    fs::path directory = fs::temp_directory_path() / ("ais2api-slow-sse-" + random_hex(8));
+    fs::create_directories(directory);
+    struct Cleanup {
+        fs::path dir;
+        ~Cleanup() { std::error_code ec; fs::remove_all(dir, ec); }
+    } cleanup{directory};
+
+    Config config;
+    {
+        net::io_context io;
+        tcp::acceptor port(io, {tcp::v4(), 0});
+        config.port = port.local_endpoint().port();
+        port.close();
+    }
+    config.data_dir = directory / "data";
+    config.config_file = directory / "config.json";
+    config.configured_models = {"slow-model"};
+    config.api_key = "slow-sse-" + random_hex(16);
+    config.limits.generation_seconds = 60;
+    config.limits.stream_idle_seconds = 60;
+    atomic_write(config.config_file, json::serialize(config.to_json()), true);
+    {
+        Store store(config.data_dir);
+        store.import_accounts(json::value("SAPISID=synthetic-slow-sse"), "Slow SSE");
+    }
+
+    std::exception_ptr failure;
+    std::jthread thread([&] {
+        try { serve_with_backend(config, std::make_unique<SlowTailBackend>(31s)); }
+        catch (...) { failure = std::current_exception(); }
+    });
+    struct StopGuard {
+        const Config& cfg;
+        std::jthread& th;
+        ~StopGuard() {
+            try { local_call(cfg, {{"command", "stop"}}); } catch (...) {}
+            if (th.joinable()) th.join();
+        }
+    } guard{config, thread};
+
+    bool ready = false;
+    for (const auto deadline = Clock::now() + 30s; Clock::now() < deadline;) {
+        try { ready = bool_or(local_call(config, {{"command", "status"}}), "running"); }
+        catch (const Error&) {}
+        if (ready) break;
+        std::this_thread::sleep_for(20ms);
+    }
+    REQUIRE(ready);
+
+    net::io_context io;
+    tcp::socket socket(io);
+    socket.connect({net::ip::make_address("127.0.0.1"), config.port});
+    http::request<http::string_body> request(http::verb::post, "/v1/chat/completions", 11);
+    request.set(http::field::host, "127.0.0.1");
+    request.set(http::field::content_type, "application/json");
+    request.set(http::field::authorization, "Bearer " + config.api_key);
+    request.body() = json::serialize(json::object{
+        {"model", "slow-model"},
+        {"stream", true},
+        {"messages", json::array{json::object{{"role", "user"}, {"content", "hi"}}}}});
+    request.prepare_payload();
+    http::write(socket, request);
+
+    boost::beast::flat_buffer input;
+    http::response<http::string_body> response;
+    http::read(socket, input, response);
+    CHECK(response.result_int() == 200);
+    CHECK(response.body().find("hello") != std::string::npos);
+    CHECK(response.body().find(" world") != std::string::npos);
+    CHECK(response.body().find("data: [DONE]") != std::string::npos);
+    CHECK(response.body().find("network_timeout") == std::string::npos);
+    REQUIRE_FALSE(failure);
+}
+
+TEST_CASE("Service shutdown waits for active count_tokens work before io_context destruction",
+          "[http][shutdown]") {
+    LiveServer server;
+    std::string words;
+    for (int i = 0; i < 400; ++i) words += "token ";
+    const std::string body = json::serialize(json::object{
+        {"model", "claude-sonnet-4-5"},
+        {"messages", json::array{json::object{{"role", "user"}, {"content", words}}}}});
+
+    std::atomic<bool> stop_flag{false};
+    std::vector<std::jthread> clients;
+    for (int i = 0; i < 4; ++i) {
+        clients.emplace_back([&] {
+            while (!stop_flag.load()) {
+                try { (void)server.call(http::verb::post, "/v1/messages/count_tokens", body, server.key); }
+                catch (...) { break; }
+            }
+        });
+    }
+    std::this_thread::sleep_for(50ms);
+    local_call(server.config, {{"command", "stop"}});
+    stop_flag.store(true);
+    clients.clear();
+    if (server.thread.joinable()) server.thread.join();
+    REQUIRE_FALSE(server.failure);
 }

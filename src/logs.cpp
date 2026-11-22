@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <thread>
 #ifdef _WIN32
 #include <windows.h>
 #include <aclapi.h>
@@ -19,13 +20,9 @@
 namespace ais2api::logs {
 namespace {
 void inspect(const fs::path &file) {
-    for (auto parent = file.parent_path(); !parent.empty();) {
-        if (fs::is_symlink(fs::symlink_status(parent)))
-            throw Error(500, "log_path", "Journal directory cannot be a symbolic link");
-        const auto next = parent.parent_path();
-        if (next == parent) break;
-        parent = next;
-    }
+    const auto parent = file.parent_path();
+    if (!parent.empty() && fs::is_symlink(fs::symlink_status(parent)))
+        throw Error(500, "log_path", "Journal directory cannot be a symbolic link");
     const auto status = fs::symlink_status(file);
     if (fs::is_symlink(status) || (fs::exists(status) && !fs::is_regular_file(status)))
         throw Error(500, "log_path", "Journal must be a regular file");
@@ -98,6 +95,35 @@ class Writer {
         return data;
     }
     bool complete() const { return !size_ || read(size_ - 1, 1) == "\n"; }
+    // Truncates any incomplete trailing line back to the last newline (or 0) so
+    // crashes or ENOSPC mid-write cannot wedge future logging.
+    void repair_incomplete() {
+        if (complete()) return;
+        std::uint64_t new_size = 0;
+        std::uint64_t pos = size_;
+        while (pos > 0) {
+            const auto chunk = static_cast<std::size_t>(std::min<std::uint64_t>(pos, 65536));
+            pos -= chunk;
+            const auto buf = read(pos, chunk);
+            if (buf.empty()) break;
+            const auto nl = buf.rfind('\n');
+            if (nl != std::string::npos) {
+                new_size = pos + nl + 1;
+                break;
+            }
+        }
+#ifdef _WIN32
+        LARGE_INTEGER offset{};
+        offset.QuadPart = static_cast<LONGLONG>(new_size);
+        if (!SetFilePointerEx(handle_, offset, nullptr, FILE_BEGIN) || !SetEndOfFile(handle_))
+            throw Error(500, "log_write", "Cannot truncate incomplete journal entry");
+#else
+        if (::ftruncate(fd_, static_cast<off_t>(new_size)) != 0)
+            throw Error(500, "log_write", "Cannot truncate incomplete journal entry");
+#endif
+        size_ = new_size;
+        flush();
+    }
     void write(std::string_view data) {
 #ifdef _WIN32
         LARGE_INTEGER end{};
@@ -258,7 +284,9 @@ Journal::Journal(fs::path data_dir, std::uint64_t rotate_bytes)
     : file_(fs::absolute(data_dir) / "management.log"), rotate_bytes_(rotate_bytes) {
     inspect(file_);
     secure_directory(file_.parent_path());
-    Writer{file_}.flush();
+    Writer writer{file_};
+    writer.repair_incomplete();
+    writer.flush();
     if (const auto service = file_.parent_path() / "service.log"; is_stderr(service)) mirror_ = service;
 }
 void Journal::append(json::object record) {
@@ -285,21 +313,42 @@ void Journal::append(std::vector<json::object> records) {
         // Emit once even when persistence fails; the caller still receives the error.
         console::emit_records(written, data);
         std::optional<Writer> writer(std::in_place, file_);
-        if (!writer->complete())
-            throw Error(500, "log_record", "Journal has an incomplete final entry");
+        writer->repair_incomplete();
         const auto size = writer->size();
         if (rotate_bytes_ && size && size + data.size() > rotate_bytes_ && size >= rotate_retry_) {
             auto head = writer->read(0, max_record_bytes);
             const auto base = base_of(std::string_view(head).substr(0, head.find('\n'))) + size;
+            const auto rotation = rotation_record(base);
+            fs::path staged = file_;
+            staged += ".rot-" + random_hex(8);
+            struct RemoveStaged {
+                fs::path path;
+                ~RemoveStaged() {
+                    if (!path.empty()) {
+                        std::error_code ignored;
+                        fs::remove(path, ignored);
+                    }
+                }
+            } staged_cleanup{staged};
+            atomic_write(staged, rotation, true);
             writer.reset();
             std::error_code error;
             fs::rename(file_, previous(file_), error);
-            writer.emplace(file_);
             // Retry later, e.g. after a Windows reader that held the file closes it.
-            if (error) rotate_retry_ = size + rotate_bytes_ / 8;
-            else {
+            if (error) {
+                rotate_retry_ = size + rotate_bytes_ / 8;
+                writer.emplace(file_);
+            } else {
                 rotate_retry_ = 0;
-                writer->write(rotation_record(base));
+                std::error_code stage_error;
+                fs::rename(staged, file_, stage_error);
+                if (!stage_error) {
+                    staged_cleanup.path.clear();
+                    writer.emplace(file_);
+                } else {
+                    writer.emplace(file_);
+                    writer->write(rotation);
+                }
             }
         }
         writer->write(data);
@@ -335,10 +384,20 @@ json::object Journal::read(std::string_view cursor, std::size_t limit) const {
         throw Error(400, "invalid_cursor", "Invalid journal cursor or limit");
     // Readers observe complete lines only and may retry an unfinished tail.
     // Do not wait on a writer doing fsync or a backpressured stderr write.
-    inspect(file_);
-    std::ifstream in(file_, std::ios::binary);
+    std::ifstream in;
+    std::uint64_t size = 0;
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        inspect(file_);
+        in = std::ifstream(file_, std::ios::binary);
+        if (in) {
+            size = file_size(in);
+            std::error_code prev_ec;
+            if (size > 0 || (offset == 0 && !fs::exists(previous(file_), prev_ec))) break;
+        }
+        if (attempt + 1 < 10)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
     if (!in) throw Error(500, "log_read", "Cannot read journal");
-    const auto size = file_size(in);
     const auto base = base_of(first_line(in));
     json::array entries;
     if (offset < base) {
@@ -346,7 +405,9 @@ json::object Journal::read(std::string_view cursor, std::size_t limit) const {
         // otherwise resume at the oldest retained record.
         const auto old_file = previous(file_);
         std::ifstream old;
-        if (fs::is_regular_file(fs::symlink_status(old_file))) old.open(old_file, std::ios::binary);
+        std::error_code old_ec;
+        if (!old_ec && fs::is_regular_file(fs::symlink_status(old_file, old_ec)) && !old_ec)
+            old.open(old_file, std::ios::binary);
         if (old) {
             const auto old_size = file_size(old);
             const auto old_base = base_of(first_line(old));

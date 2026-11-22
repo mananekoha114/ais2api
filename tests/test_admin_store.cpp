@@ -2,6 +2,12 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "ais2api/store.hpp"
 #include <catch2/catch_test_macros.hpp>
+#ifdef _WIN32
+#include <windows.h>
+#include <aclapi.h>
+#else
+#include <sys/stat.h>
+#endif
 using namespace ais2api;
 namespace {
 struct AdminDirectory {
@@ -120,4 +126,72 @@ TEST_CASE("account metadata updates preserve credential and authentication field
     CHECK_THROWS_AS(store.update_account_metadata(id, {{"email", "unexpected"}}), Error);
     CHECK_THROWS_AS(store.update_account_metadata(id, {{"disabled", "false"}}), Error);
     CHECK(store.account(id).name == "renamed");
+}
+TEST_CASE("merge_verified_accounts clears auth and terms_required cooldowns while keeping rate limits",
+          "[store][admin]") {
+    AdminDirectory d;
+    Store store(d.path);
+    auto id = add(store, "verified");
+    auto acct = store.account(id);
+    acct.email = "verified@example.com";
+    store.put_account(acct);
+
+    store.failure(id, "m", "auth");
+    CHECK_FALSE(store.choose("m", {}, false));
+    REQUIRE(store.merge_verified_accounts({acct}).size() == 1);
+    REQUIRE(store.choose("m", {}, false));
+
+    store.failure(id, "m", "terms_required");
+    CHECK_FALSE(store.choose("m", {}, false));
+    REQUIRE(store.merge_verified_accounts({acct}).size() == 1);
+    REQUIRE(store.choose("m", {}, false));
+
+    store.failure(id, "m", "rate_limit");
+    CHECK_FALSE(store.choose("m", {}, false));
+    REQUIRE(store.merge_verified_accounts({acct}).size() == 1);
+    CHECK_FALSE(store.choose("m", {}, false));
+}
+TEST_CASE("Store::backup preserves existing parent permissions and protects backup files",
+          "[store][backup]") {
+    AdminDirectory d;
+    Store store(d.path / "data");
+    add(store, "primary");
+    const auto parent = d.path / "existing-parent";
+    fs::create_directories(parent);
+    const auto target = parent / "snapshot.sqlite3";
+    const auto usage_target = usage_backup_path(target);
+#ifdef _WIN32
+    auto dacl_protected = [](const fs::path& p) {
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        REQUIRE(GetNamedSecurityInfoW(const_cast<LPWSTR>(p.c_str()), SE_FILE_OBJECT,
+                                      DACL_SECURITY_INFORMATION, nullptr, nullptr, nullptr, nullptr,
+                                      &sd) == ERROR_SUCCESS);
+        SECURITY_DESCRIPTOR_CONTROL control = 0;
+        DWORD revision = 0;
+        const bool ok = GetSecurityDescriptorControl(sd, &control, &revision) != 0;
+        LocalFree(sd);
+        REQUIRE(ok);
+        return (control & SE_DACL_PROTECTED) != 0;
+    };
+    const bool parent_protected_before = dacl_protected(parent);
+    store.backup(target);
+    CHECK(dacl_protected(parent) == parent_protected_before);
+    CHECK(dacl_protected(target));
+    CHECK(dacl_protected(usage_target));
+#else
+    REQUIRE(::chmod(parent.c_str(), 0755) == 0);
+    store.backup(target);
+    struct stat st{};
+    REQUIRE(::stat(parent.c_str(), &st) == 0);
+    CHECK((st.st_mode & 0777) == 0755);
+    REQUIRE(::stat(target.c_str(), &st) == 0);
+    CHECK((st.st_mode & 0777) == 0600);
+    REQUIRE(::stat(usage_target.c_str(), &st) == 0);
+    CHECK((st.st_mode & 0777) == 0600);
+#endif
+    // Also supports creating missing nested parent directories.
+    const auto nested = d.path / "missing" / "nested" / "snap.sqlite3";
+    store.backup(nested);
+    CHECK(fs::is_regular_file(nested));
+    CHECK(fs::is_regular_file(usage_backup_path(nested)));
 }

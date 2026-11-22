@@ -75,6 +75,7 @@ std::size_t json_size(json::string_view text);
 void atomic_write(const fs::path &path, std::string_view contents, bool secret = false);
 std::string read_file(const fs::path &path, std::size_t limit = 32 * 1024 * 1024);
 void secure_directory(const fs::path &path);
+void create_secret_file(const fs::path &path);
 json::object error_json(const Error &error, bool openai = false);
 // "dev" in a build with AIS2API_DEV_BUNDLE (scripts/build-dev.ps1), else
 // "release".

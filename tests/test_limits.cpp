@@ -10,6 +10,7 @@
 #include <boost/beast.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <future>
+#include <sstream>
 #include <thread>
 using namespace ais2api;
 namespace limit_net = boost::asio;
@@ -30,15 +31,15 @@ struct LimitsServer {
     Config config;
     std::string key;
     std::future<int> running;
-    LimitsServer() {
+    explicit LimitsServer(std::size_t request_bytes = 4096) {
         limit_net::io_context io;
         LimitTcp::acceptor reserve(io, {LimitTcp::v4(), 0});
         config.port = reserve.local_endpoint().port();
         reserve.close();
         config.data_dir = directory.path / "data";
         config.config_file = directory.path / "config.json";
-        config.limits.request_bytes = 4096;
-        config.limits.object_bytes = 8192;
+        config.limits.request_bytes = request_bytes;
+        config.limits.object_bytes = std::max<std::size_t>(8192, request_bytes);
         config.limits.relay_bytes = 1024;
         key = "limits-test-" + random_hex(24);
         config.api_key = key;
@@ -204,4 +205,67 @@ TEST_CASE("media cumulative budget is checked before fetching another image", "[
     auto response = server.request(body);
     CHECK(response.result_int() == 413);
     CHECK(response.body().find("media_limit") != std::string::npos);
+}
+TEST_CASE("concurrent small chunked requests succeed and unauthenticated large requests fail before admission",
+          "[limits][http]") {
+    LimitsServer server(32 * 1024 * 1024);
+    limit_net::io_context io;
+
+    // Previously each chunked request reserved 32 MiB * 4 = 128 MiB, causing 429 on 2+ concurrent streams.
+    constexpr std::size_t concurrent = 10;
+    std::vector<std::unique_ptr<LimitTcp::socket>> sockets;
+    for (std::size_t i = 0; i < concurrent; ++i) {
+        auto s = std::make_unique<LimitTcp::socket>(io);
+        s->connect({limit_net::ip::make_address("127.0.0.1"), server.config.port});
+        const std::string head =
+            "POST /v1/chat/completions HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Authorization: Bearer " + server.key + "\r\n"
+            "Content-Type: application/json\r\n"
+            "Transfer-Encoding: chunked\r\n\r\n"
+            "1\r\n{\r\n";
+        limit_net::write(*s, limit_net::buffer(head));
+        sockets.push_back(std::move(s));
+    }
+    const auto wait_deadline = Clock::now() + 3s;
+    while (server.connections() != concurrent && Clock::now() < wait_deadline)
+        std::this_thread::sleep_for(10ms);
+    REQUIRE(server.connections() == concurrent);
+
+    const std::string tail_json = R"("model":"m","messages":[{"role":"user","content":"hi"}]})";
+    std::ostringstream tail_stream;
+    tail_stream << std::hex << tail_json.size() << "\r\n" << tail_json << "\r\n0\r\n\r\n";
+    const std::string tail = tail_stream.str();
+    for (auto& s : sockets) {
+        limit_net::write(*s, limit_net::buffer(tail));
+        boost::beast::flat_buffer buffer;
+        limit_http::response<limit_http::string_body> response;
+        limit_http::read(*s, buffer, response);
+        CHECK(response.result_int() == 503);
+        CHECK(response.body().find("no_account") != std::string::npos);
+    }
+
+    auto read_header_only_rejection = [&](std::string raw_head) {
+        LimitTcp::socket s(io);
+        s.connect({limit_net::ip::make_address("127.0.0.1"), server.config.port});
+        limit_net::write(s, limit_net::buffer(raw_head));
+        boost::beast::flat_buffer buffer;
+        limit_http::response<limit_http::string_body> response;
+        limit_http::read(s, buffer, response);
+        return response;
+    };
+    const std::string large_unauth =
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        "Content-Type: application/json\r\nContent-Length: 33554432\r\n\r\n";
+    const auto unauth = read_header_only_rejection(large_unauth);
+    CHECK(unauth.result_int() == 401);
+    const std::string large_unknown =
+        "POST /v1/unknown HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " + server.key +
+        "\r\nContent-Type: application/json\r\nContent-Length: 33554432\r\n\r\n";
+    const auto unknown = read_header_only_rejection(large_unknown);
+    CHECK(unknown.result_int() == 404);
+    const std::string large_get =
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 33554432\r\n\r\n";
+    const auto get_res = read_header_only_rejection(large_get);
+    CHECK(get_res.result_int() == 413);
 }

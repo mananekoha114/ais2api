@@ -623,8 +623,8 @@ json::array Store::merge_verified_accounts(const std::vector<Account> &input) {
                 impl_->put(a);
                 Statement reset(impl_->db, "UPDATE accounts SET expired=0 WHERE id=?");
                 reset.text(1, a.id); reset.row();
-                // Credential replacement unlocks auth, preserving quota windows and counters.
-                Statement failures(impl_->db, "DELETE FROM failures WHERE account=? AND model<>'*'");
+                // Credential replacement unlocks auth and terms gates while preserving quota windows and counters.
+                Statement failures(impl_->db, "DELETE FROM failures WHERE account=? AND (model<>'*' OR kind IN ('auth','terms_required'))");
                 failures.text(1, a.id); failures.row();
                 Statement quota(impl_->db, "INSERT INTO failures(account,model,until,count) "
                                           "SELECT account,model,cooldown_until,0 FROM quota_counters "
@@ -2044,23 +2044,28 @@ fs::path usage_backup_path(const fs::path &target) {
 }
 namespace {
 void backup_database(sqlite3 *source, const fs::path &target) {
+    create_secret_file(target);
     sqlite3 *dest = nullptr;
     if (sqlite3_open(sqlite_path(target).c_str(), &dest) != SQLITE_OK) {
         if (dest)
             sqlite3_close(dest);
+        std::error_code ignored;
+        fs::remove(target, ignored);
         throw Error(500, "backup", "Cannot open backup target");
     }
     auto b = sqlite3_backup_init(dest, "main", source, "main");
     if (!b) {
         sqlite3_close(dest);
-        fs::remove(target);
+        std::error_code ignored;
+        fs::remove(target, ignored);
         throw Error(500, "backup", "Cannot initialize database backup");
     }
     auto rc = sqlite3_backup_step(b, -1);
     auto end = sqlite3_backup_finish(b);
     sqlite3_close(dest);
     if (rc != SQLITE_DONE || end != SQLITE_OK) {
-        fs::remove(target);
+        std::error_code ignored;
+        fs::remove(target, ignored);
         throw Error(500, "backup", "Database backup failed");
     }
 }
@@ -2070,8 +2075,8 @@ void Store::backup(const fs::path &target) {
     for (auto &path : {target, usage_target})
         if (fs::exists(path) || fs::is_symlink(fs::symlink_status(path)))
             throw Error(409, "backup_exists", "Backup target already exists");
-    if (!target.parent_path().empty())
-        secure_directory(target.parent_path());
+    if (const auto parent = target.parent_path(); !parent.empty() && !fs::exists(parent))
+        fs::create_directories(parent);
     impl_->run([&] { backup_database(impl_->db, target); });
     try {
         impl_->usage->run([&] { backup_database(impl_->usage->db, usage_target); });

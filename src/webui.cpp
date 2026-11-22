@@ -16,7 +16,7 @@ bool enabled() { return !std::empty(assets); }
 
 std::optional<Asset> find(std::string_view path) {
     // Keep API errors and arbitrary/missing files out of the SPA fallback.
-    constexpr std::array routes{"/", "/login", "/accounts", "/models", "/keys",
+    constexpr std::array routes{"/", "/login", "/change-password", "/accounts", "/models", "/keys",
                                 "/stats", "/logs", "/config", "/diagnostics", "/settings"};
     if (std::find(routes.begin(), routes.end(), path) != routes.end()) path = "/index.html";
     for (const auto& asset : assets)
