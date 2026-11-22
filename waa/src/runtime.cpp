@@ -159,7 +159,7 @@ struct Runtime::Impl {
     // Types `prompt` when there is one, clicks through `steps`, then takes the
     // proof for `digest`; the prompt box is empty again afterwards.
     std::string proof(std::string_view digest, std::optional<std::string_view> prompt, const std::vector<PointerStep> *steps,
-                      std::stop_token cancel);
+                      std::optional<int> rounds, std::stop_token cancel);
     void fill_prompt(std::string prompt, std::stop_token cancel);
     // The steps of a trusted click at their intervals, then the wait until the
     // page asks for the proof.
@@ -392,7 +392,7 @@ std::pair<Value, Value> Runtime::Impl::experiment_signals(Handle global) {
 }
 
 std::string Runtime::Impl::proof(std::string_view digest, std::optional<std::string_view> prompt, const std::vector<PointerStep> *steps,
-                                 std::stop_token cancel) {
+                                 std::optional<int> rounds, std::stop_token cancel) {
     std::lock_guard lock(operation);
     struct After {
         Impl &impl;
@@ -401,6 +401,7 @@ std::string Runtime::Impl::proof(std::string_view digest, std::optional<std::str
             impl.used();
         }
     } after{*this};
+    if (rounds) pointer->set_rounds(*rounds);
     if (prompt) fill_prompt(textarea_value(*prompt), cancel);
     if (steps) click(*steps, cancel);
     return snapshot_with(std::string(digest), cancel);
@@ -536,16 +537,15 @@ void Runtime::settle(std::stop_token cancel) {
 }
 
 std::string Runtime::proof(std::string_view digest, std::string_view prompt, std::stop_token cancel) {
-    return impl_->proof(digest, prompt, nullptr, std::move(cancel));
+    return impl_->proof(digest, prompt, nullptr, std::nullopt, std::move(cancel));
 }
 
 std::string Runtime::run_proof(std::string_view digest, std::string_view prompt, std::stop_token cancel) {
-    return impl_->proof(digest, prompt, &run_click(), std::move(cancel));
+    return impl_->proof(digest, prompt, &run_click(), std::nullopt, std::move(cancel));
 }
 
 std::string Runtime::rerun_proof(std::string_view digest, int rounds, std::stop_token cancel) {
-    impl_->pointer->set_rounds(rounds);
-    return impl_->proof(digest, std::nullopt, &rerun_click(), std::move(cancel));
+    return impl_->proof(digest, std::nullopt, &rerun_click(), rounds, std::move(cancel));
 }
 
 void Runtime::replaced() { impl_->pointer_input({std::chrono::milliseconds(0), PointerStep::Action::replace, {}}, nullptr); }

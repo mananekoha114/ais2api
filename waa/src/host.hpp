@@ -8,8 +8,10 @@
 #include "ais2api/waa/runtime.hpp"
 #include "js.hpp"
 #include "loop.hpp"
+#include <atomic>
 #include <initializer_list>
 #include <list>
+#include <memory>
 #include <thread>
 
 namespace ais2api::waa {
@@ -97,7 +99,11 @@ class Agent {
     js::Handle shared_ = 0, track_ = 0, notify_ = 0;
     std::list<RealmHost> realms_;
     // The threads of requests in flight, joined before the agent goes.
+    struct LoaderTask {
+        std::shared_ptr<std::atomic<bool>> done;
+        std::jthread thread;
+    };
     std::mutex loaders_mutex_;
-    std::vector<std::jthread> loaders_;
+    std::vector<LoaderTask> loaders_;
 };
 } // namespace ais2api::waa

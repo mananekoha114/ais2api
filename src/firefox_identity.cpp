@@ -856,7 +856,7 @@ std::vector<std::string> detail::cohere(json::object &config, Os os) {
              const auto *touch = c.if_contains("navigator.maxTouchPoints");
              if (!touch || touch->is_null()) return;
              const auto value = integer(touch);
-             if (!value || *value > 10) c["navigator.maxTouchPoints"] = 0;
+             if (!value || *value < 0 || *value > 10) c["navigator.maxTouchPoints"] = 0;
          }},
         {"device-pixel-ratio",
          [&](const json::object &c) -> std::optional<std::string> {

@@ -150,19 +150,33 @@ TEST_CASE("A request carries the cookies of its host, path and scheme", "[firefo
     fresh["expires"] = 3000.5;
     auto session = cookie("session", "x", ".google.com");
     session["expires"] = -1;
+    auto partitioned = cookie("partitioned", "p", ".google.com");
+    partitioned["partitionKey"] = "https://google.com";
+    auto opaque = cookie("opaque", "o", ".google.com");
+    opaque["partitionKeyOpaque"] = true;
+    auto non_opaque = cookie("non_opaque", "n", ".google.com");
+    non_opaque["partitionKeyOpaque"] = false;
     const json::array stored{cookie("root", "1", ".google.com"),
+                             cookie("parent_host", "h", "google.com"),
                              cookie("host", "2", "aistudio.google.com"),
                              cookie("deep", "3", ".google.com", "/prompts/new"),
                              cookie("section", "4", ".google.com", "/prompts"),
                              cookie("other", "5", ".example.com"),
+                             cookie("dot", "d", "."),
+                             cookie("ddot", "dd", "..google.com"),
+                             partitioned, opaque, non_opaque,
                              secure, expired, fresh, session, json::value("not a cookie")};
-    CHECK(cookie_header(stored, "https://aistudio.google.com/prompts/new_chat?x=1", 2000) == "section=4; root=1; host=2; secure=s; fresh=f; session=x");
+    CHECK(cookie_header(stored, "https://aistudio.google.com/prompts/new_chat?x=1", 2000) ==
+          "section=4; root=1; host=2; non_opaque=n; secure=s; fresh=f; session=x");
     CHECK(cookie_header(stored, "https://aistudio.google.com/prompts/new/chat#top", 2000) ==
-          "deep=3; section=4; root=1; host=2; secure=s; fresh=f; session=x");
+          "deep=3; section=4; root=1; host=2; non_opaque=n; secure=s; fresh=f; session=x");
+    // Host-only cookies never match subdomains.
+    CHECK(cookie_header(stored, "https://sub.aistudio.google.com/", 2000) ==
+          "root=1; non_opaque=n; secure=s; fresh=f; session=x");
     // Not a parent domain's host cookie, nor a secure cookie over HTTP.
-    CHECK(cookie_header(stored, "http://www.GOOGLE.com:8080", 2000) == "root=1; fresh=f; session=x");
+    CHECK(cookie_header(stored, "http://www.GOOGLE.com:8080", 2000) == "root=1; non_opaque=n; fresh=f; session=x");
     CHECK(cookie_header(stored, "https://notgoogle.com/", 2000).empty());
-    CHECK(cookie_header(stored, "https://user:pass@accounts.google.com/", 4000) == "root=1; secure=s; session=x");
+    CHECK(cookie_header(stored, "https://user:pass@accounts.google.com/", 4000) == "root=1; non_opaque=n; secure=s; session=x");
     CHECK(cookie_header(stored, "not a url", 2000).empty());
 }
 
@@ -207,6 +221,21 @@ TEST_CASE("Set-Cookie headers update the stored cookies", "[firefox-http]") {
         CHECK_FALSE(merge_set_cookie(stored, "=value", url, 1000));
         CHECK_FALSE(merge_set_cookie(stored, "a=b", "nonsense", 1000));
         CHECK(stored.size() == 2);
+    }
+    SECTION("host-only and domain cookies with the same name do not collide") {
+        json::array jar;
+        REQUIRE(merge_set_cookie(jar, "SID=host; Path=/", "https://aistudio.google.com/", 1000));
+        REQUIRE(merge_set_cookie(jar, "SID=dom; Domain=aistudio.google.com; Path=/", "https://aistudio.google.com/", 1000));
+        REQUIRE(jar.size() == 2);
+        CHECK(string_or(jar[0].as_object(), "domain") == "aistudio.google.com");
+        CHECK(string_or(jar[1].as_object(), "domain") == ".aistudio.google.com");
+        CHECK(merge_set_cookie(jar, "SID=host2; Path=/", "https://aistudio.google.com/", 1000));
+        REQUIRE(jar.size() == 2);
+        CHECK(string_or(jar[0].as_object(), "value") == "host2");
+        CHECK(string_or(jar[1].as_object(), "value") == "dom");
+        CHECK(merge_set_cookie(jar, "SID=; Domain=aistudio.google.com; Path=/; Max-Age=0", "https://aistudio.google.com/", 1000));
+        REQUIRE(jar.size() == 1);
+        CHECK(string_or(jar[0].as_object(), "domain") == "aistudio.google.com");
     }
 }
 
@@ -319,12 +348,14 @@ TEST_CASE("A streamed response is read as it arrives", "[firefox-http]") {
         const auto exchange = session.open(request);
         CHECK(exchange->status() == 200);
         CHECK(header_value(exchange->headers(), "content-type") == "text/plain");
+        CHECK_FALSE(exchange->read(0, 5s));
         CHECK(exchange->read(4, 5s) == std::string("firs"));
         CHECK(exchange->read(100, 5s) == std::string("t"));
         CHECK_FALSE(exchange->read(100, 50ms));
         second.set_value();
         CHECK(exchange->read(100, 5s) == std::string("second"));
         CHECK(exchange->read(100, 5s) == std::string());
+        CHECK(exchange->read(0, 5s) == std::string());
         CHECK(exchange->read(100, 5s) == std::string());
     }
     SECTION("with a reader slower than the server") {
@@ -444,6 +475,22 @@ TEST_CASE("Encoded responses are decoded", "[firefox-http]") {
     request.headers = {{"Accept-Encoding", codings}};
     CHECK(session.send(request).body == "hello");
     CHECK(server.request(0).lines().back() == "Accept-Encoding: " + codings);
+
+    SECTION("split across header-only write callbacks") {
+        Server split([](const Server::Request &, tcp::socket &socket) {
+            const std::string head = "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: " + std::to_string(sizeof gzip) + "\r\n\r\n";
+            asio::write(socket, asio::buffer(head));
+            // Writing just the 10-byte gzip header first can trigger a 0-byte decode callback.
+            asio::write(socket, asio::buffer(gzip, 10));
+            std::this_thread::sleep_for(30ms);
+            asio::write(socket, asio::buffer(gzip + 10, sizeof gzip - 10));
+        });
+        HttpSession split_session(options());
+        HttpRequest split_request;
+        split_request.url = split.url("/");
+        split_request.headers = {{"Accept-Encoding", codings}};
+        CHECK(split_session.send(split_request).body == "hello");
+    }
 }
 
 TEST_CASE("A response tells how its connection came about", "[firefox-http]") {

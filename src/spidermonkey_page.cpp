@@ -63,6 +63,32 @@ std::string lowercase(std::string_view text) {
         if (character >= 'A' && character <= 'Z') character = static_cast<char>(character - 'A' + 'a');
     return out;
 }
+bool cookie_matches_host(std::string_view host, std::string_view stored_domain) {
+    if (stored_domain.empty()) return false;
+    const auto target = lowercase(host);
+    if (stored_domain.front() == '.') {
+        const auto domain = lowercase(stored_domain.substr(1));
+        if (domain.empty() || domain.front() == '.') return false;
+        return target == domain || (target.size() > domain.size() && target.ends_with(domain) &&
+                                    target[target.size() - domain.size() - 1] == '.');
+    }
+    return target == lowercase(stored_domain);
+}
+std::string authority_host(std::string_view url) {
+    const auto scheme = url.find("://");
+    auto rest = scheme == std::string_view::npos ? url : url.substr(scheme + 3);
+    auto authority = rest.substr(0, rest.find_first_of("/?#"));
+    if (const auto at = authority.rfind('@'); at != std::string_view::npos) authority.remove_prefix(at + 1);
+    if (!authority.empty() && authority.front() == '[') {
+        const auto close = authority.find(']');
+        if (close == std::string_view::npos) return {};
+        if (close + 1 < authority.size() && authority[close + 1] != ':') return {};
+        authority = authority.substr(0, close + 1);
+    } else if (const auto port = authority.rfind(':'); port != std::string_view::npos) {
+        authority = authority.substr(0, port);
+    }
+    return lowercase(authority);
+}
 constexpr std::string_view origin = "https://aistudio.google.com";
 std::optional<double> number_of(const json::object &object, std::string_view name) {
     const auto value = object.if_contains(name);
@@ -198,12 +224,9 @@ std::string document_cookie(const json::array &stored, std::int64_t now) {
     for (const auto &value : stored) {
         if (!value.is_object()) continue;
         const auto &cookie = value.as_object();
+        if (cookie.contains("partitionKey") || bool_or(cookie, "partitionKeyOpaque")) continue;
         if (bool_or(cookie, "httpOnly")) continue;
-        auto domain = string_or(cookie, "domain");
-        if (!domain.empty() && domain.front() == '.') domain.erase(0, 1);
-        for (auto &character : domain)
-            if (character >= 'A' && character <= 'Z') character = static_cast<char>(character - 'A' + 'a');
-        if (domain.empty() || (host != domain && !host.ends_with("." + domain))) continue;
+        if (!cookie_matches_host(host, string_or(cookie, "domain"))) continue;
         if (const auto path = string_or(cookie, "path"); !path.empty() && path != "/") continue;
         if (const auto expires = number_of(cookie, "expires"); expires && *expires > 0 && *expires <= static_cast<double>(now)) continue;
         const auto name = string_or(cookie, "name");
@@ -256,9 +279,7 @@ json::array discovered_models(std::string_view body) {
 }
 
 std::string_view fetch_site(std::string_view url) {
-    const auto scheme = url.find("://");
-    auto host = scheme == std::string_view::npos ? url : url.substr(scheme + 3);
-    host = host.substr(0, host.find_first_of("/?#:"));
+    const auto host = authority_host(url);
     if (host == "aistudio.google.com") return "same-origin";
     return host == "google.com" || host.ends_with(".google.com") ? "same-site" : "cross-site";
 }

@@ -254,6 +254,10 @@ TEST_CASE("coherence rules repair what they can and report the rest", "[firefox-
     CHECK(repairable.at("navigator.maxTouchPoints") == 0);
     CHECK(repairable.at("window.devicePixelRatio") == 1.75);
 
+    auto negative_touch = json::parse(R"json({"navigator.maxTouchPoints":-1,"webGl:renderer":"ANGLE (Intel)"})json").as_object();
+    CHECK(detail::cohere(negative_touch, Os::windows).empty());
+    CHECK(negative_touch.at("navigator.maxTouchPoints") == 0);
+
     auto broken = json::parse(R"json({"screen.width":800,"screen.height":1200,"webGl:renderer":"Mesa Intel",
         "navigator.userAgent":"Mozilla/5.0 (X11; Linux x86_64)","navigator.platform":"Linux armv81"})json").as_object();
     const auto violations = detail::cohere(broken, Os::windows);
