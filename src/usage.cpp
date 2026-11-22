@@ -135,6 +135,7 @@ void summarize_request(json::object &record, bool complete) {
     json::object usage;
     std::int64_t amount = 0;
     std::int64_t unpriced = 0, priced_attempts = 0;
+    bool overflow = false;
     for (auto &a : record.at("attempts").as_array()) {
         auto &attempt = a.as_object();
         usage = add_usage(usage, attempt.at("usage").as_object());
@@ -143,24 +144,32 @@ void summarize_request(json::object &record, bool complete) {
             ++unpriced;
         else {
             ++priced_attempts;
-            auto n = cost.at("amount_nano").as_int64();
-            if (n > 9007199254740991LL - amount)
-                throw Error(500, "cost_overflow", "Estimated cost exceeds supported precision");
-            amount += n;
+            auto p = cost.if_contains("amount_nano");
+            const auto n = p && p->is_int64() ? p->as_int64()
+                           : p && p->is_uint64() && p->as_uint64() <= 9007199254740991ULL
+                               ? static_cast<std::int64_t>(p->as_uint64())
+                               : -1LL;
+            if (n < 0 || n > 9007199254740991LL - amount)
+                overflow = true;
+            else if (!overflow)
+                amount += n;
         }
     }
     record["usage"] = std::move(usage);
     const bool interrupted = string_or(record, "status") == "interrupted";
-    const bool priced = complete && !unpriced && !interrupted;
+    const bool priced = complete && !unpriced && !interrupted && !overflow;
     auto cost = priced ? json::object{{"status", "priced"},
                                       {"reason", ""},
                                       {"amount_nano", amount},
                                       {"currency", "USD"}}
-                       : unknown_cost(!complete     ? "pending"
+                       : unknown_cost(overflow      ? "cost_overflow"
+                                      : !complete   ? "pending"
                                       : interrupted ? "service_interrupted"
                                                     : "incomplete_attempts");
     cost["known_amount_nano"] =
-        priced_attempts || (complete && !interrupted && record.at("attempts").as_array().empty())
+        !overflow &&
+                (priced_attempts ||
+                 (complete && !interrupted && record.at("attempts").as_array().empty()))
             ? json::value(amount)
             : json::value(nullptr);
     cost["unpriced_attempts"] = unpriced;

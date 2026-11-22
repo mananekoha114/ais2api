@@ -74,6 +74,50 @@ const json::object *reference_target(const json::object &root, std::string_view 
         ref.remove_prefix(slash + 1);
     }
 }
+bool same_number(const json::value &a, const json::value &b) {
+    if (a.is_int64() && b.is_int64()) return a.as_int64() == b.as_int64();
+    if (a.is_uint64() && b.is_uint64()) return a.as_uint64() == b.as_uint64();
+    if (a.is_int64() && b.is_uint64())
+        return a.as_int64() >= 0 && static_cast<std::uint64_t>(a.as_int64()) == b.as_uint64();
+    if (a.is_uint64() && b.is_int64())
+        return b.as_int64() >= 0 && a.as_uint64() == static_cast<std::uint64_t>(b.as_int64());
+    auto double_eq_int64 = [](double d, std::int64_t i) {
+        return std::isfinite(d) && std::trunc(d) == d &&
+               d >= -9223372036854775808.0 && d < 9223372036854775808.0 &&
+               static_cast<std::int64_t>(d) == i;
+    };
+    auto double_eq_uint64 = [](double d, std::uint64_t u) {
+        return std::isfinite(d) && std::trunc(d) == d &&
+               d >= 0.0 && d < 18446744073709551616.0 &&
+               static_cast<std::uint64_t>(d) == u;
+    };
+    if (a.is_double() && b.is_double()) return a.as_double() == b.as_double();
+    if (a.is_double() && b.is_int64()) return double_eq_int64(a.as_double(), b.as_int64());
+    if (a.is_int64() && b.is_double()) return double_eq_int64(b.as_double(), a.as_int64());
+    if (a.is_double() && b.is_uint64()) return double_eq_uint64(a.as_double(), b.as_uint64());
+    if (a.is_uint64() && b.is_double()) return double_eq_uint64(b.as_double(), a.as_uint64());
+    return false;
+}
+bool values_equivalent(const json::value &a, const json::value &b) {
+    if (a.is_number() && b.is_number()) return same_number(a, b);
+    if (a.is_array() && b.is_array()) {
+        const auto &xa = a.as_array(), &xb = b.as_array();
+        if (xa.size() != xb.size()) return false;
+        for (std::size_t i = 0; i < xa.size(); ++i)
+            if (!values_equivalent(xa[i], xb[i])) return false;
+        return true;
+    }
+    if (a.is_object() && b.is_object()) {
+        const auto &oa = a.as_object(), &ob = b.as_object();
+        if (oa.size() != ob.size()) return false;
+        for (const auto &kv : oa) {
+            auto other = ob.if_contains(kv.key());
+            if (!other || !values_equivalent(kv.value(), *other)) return false;
+        }
+        return true;
+    }
+    return a == b;
+}
 void validate_reference(const json::object &root, const json::object &source) {
     auto ref = source.if_contains("$ref");
     if (!ref) return;
@@ -84,7 +128,7 @@ void validate_reference(const json::object &root, const json::object &source) {
         if (seen.size() > 4096) bad("schema reference chain exceeds node limit");
         for (const auto &kv : source) {
             if (kv.key() == "$ref" || kv.key() == "description" || kv.key() == "title" || kv.key() == "default") continue;
-            if (auto old = target->if_contains(kv.key()); old && *old != kv.value())
+            if (auto old = target->if_contains(kv.key()); old && !values_equivalent(*old, kv.value()))
                 bad("conflicting $ref siblings are not supported");
         }
         auto next = target->if_contains("$ref");
@@ -175,6 +219,17 @@ std::string number_text(const json::value &value) {
 // Whether `a` is a tighter lower (or, with `lower` false, upper) bound than `b`.
 bool tighter(const json::value &a, const json::value &b, bool lower) {
     if (a.is_int64() && b.is_int64()) return lower ? a.as_int64() > b.as_int64() : a.as_int64() < b.as_int64();
+    if (a.is_uint64() && b.is_uint64()) return lower ? a.as_uint64() > b.as_uint64() : a.as_uint64() < b.as_uint64();
+    if (a.is_int64() && b.is_uint64()) {
+        if (a.as_int64() < 0) return !lower;
+        const auto x = static_cast<std::uint64_t>(a.as_int64()), y = b.as_uint64();
+        return lower ? x > y : x < y;
+    }
+    if (a.is_uint64() && b.is_int64()) {
+        if (b.as_int64() < 0) return lower;
+        const auto x = a.as_uint64(), y = static_cast<std::uint64_t>(b.as_int64());
+        return lower ? x > y : x < y;
+    }
     const auto x = json::value_to<double>(a), y = json::value_to<double>(b);
     return lower ? x > y : x < y;
 }
@@ -247,20 +302,74 @@ class Lowerer {
             schema.erase(key);
             if (!bound) continue;
             const auto current = schema.if_contains(inclusive);
-            const bool draft4 = current && *current == *bound;
+            const bool equal_bound = current && same_number(*current, *bound);
             if (integer)
                 if (auto step = integer_beyond(*bound, lower_bound)) {
                     json::value value(*step);
-                    if (draft4 || !current || tighter(value, *current, lower_bound)) schema[inclusive] = value;
+                    if (equal_bound || !current || tighter(value, *current, lower_bound)) schema[inclusive] = value;
                     continue;
                 }
             if (!current || tighter(*bound, *current, lower_bound)) schema[inclusive] = *bound;
-            else if (!draft4) continue; // an inclusive bound already excludes it
+            else if (!equal_bound) continue; // an inclusive bound already excludes it
             hint(schema, std::string(lower_bound ? "Must be greater than " : "Must be less than ") +
                              number_text(*bound) + ".");
             ignored(key);
         }
     }
+    json::object resolve_ref_chain(const json::object &source, unsigned &depth,
+                                   std::vector<const json::object *> &pushed) {
+        std::vector<const json::object *> chain{&source};
+        const json::object *cur = &source;
+        while (auto ref = cur->if_contains("$ref")) {
+            if (depth >= 64 || ++nodes_ > 4096)
+                bad("schema expansion exceeds depth or node limit");
+            if (!ref->is_string())
+                bad("$ref must be a string");
+            const json::object *target = &resolve(std::string_view(ref->as_string()));
+            charge(json::serialize(*target).size());
+            if (!active_.insert(target).second)
+                throw UnsupportedSchema("recursive $ref is not supported by the upstream");
+            pushed.push_back(target);
+            chain.push_back(target);
+            ++depth;
+            cur = target;
+        }
+        // Merge raw sibling keywords onto an unlowered copy of the target from
+        // innermost to outermost so metadata/constraint lowering runs once.
+        json::object merged = *chain.back();
+        for (std::size_t i = chain.size() - 1; i-- > 0;) {
+            for (const auto &kv : *chain[i]) {
+                if (kv.key() == "$ref") continue;
+                if (kv.key() == "description") {
+                    if (!kv.value().is_string()) bad("description must be a string");
+                    if (auto old = merged.if_contains("description")) {
+                        if (!old->is_string()) bad("description must be a string");
+                        const auto target_desc = std::string_view(old->as_string());
+                        const auto sibling_desc = std::string_view(kv.value().as_string());
+                        if (target_desc.empty())
+                            merged["description"] = kv.value();
+                        else if (!sibling_desc.empty() && target_desc != sibling_desc) {
+                            charge(1);
+                            merged["description"] =
+                                std::string(target_desc) + "\n" + std::string(sibling_desc);
+                        }
+                    } else
+                        merged["description"] = kv.value();
+                    continue;
+                }
+                if (kv.key() == "title" || kv.key() == "default") {
+                    merged[kv.key()] = kv.value();
+                    continue;
+                }
+                if (auto old = merged.if_contains(kv.key());
+                    old && !values_equivalent(*old, kv.value()))
+                    bad("conflicting $ref siblings are not supported");
+                merged[kv.key()] = kv.value();
+            }
+        }
+        return merged;
+    }
+
 public:
     Lowerer(const json::object &root, json::array *ignored, std::string_view location, bool ignore_unsupported,
             json::array *json_text)
@@ -275,22 +384,15 @@ public:
         // This bounds live intermediate copies, not just the final result.
         charge(json::serialize(source).size());
         if (!active_.insert(&source).second) throw UnsupportedSchema("recursive $ref is not supported by the upstream");
-        auto schema = source;
-        if (auto ref = source.if_contains("$ref")) {
-            if (!ref->is_string()) bad("$ref must be a string");
-            auto target = lower(resolve(std::string_view(ref->as_string())), depth + 1, path, root);
-            schema.erase("$ref");
-            // Metadata siblings are common in Pydantic schemas. Conflicting
-            // validation siblings require intersection semantics; do not weaken them.
-            for (const auto &kv : schema) {
-                auto old = target.if_contains(kv.key());
-                if (old && *old != kv.value() && kv.key() != "description" &&
-                    kv.key() != "title" && kv.key() != "default")
-                    bad("conflicting $ref siblings are not supported");
-                target[kv.key()] = kv.value();
+        std::vector<const json::object *> pushed{&source};
+        struct ActiveGuard {
+            std::set<const json::object *> &active;
+            std::vector<const json::object *> &pushed;
+            ~ActiveGuard() {
+                for (const auto *p : pushed) active.erase(p);
             }
-            schema = std::move(target);
-        }
+        } guard{active_, pushed};
+        json::object schema = source.if_contains("$ref") ? resolve_ref_chain(source, depth, pushed) : source;
         exclusive_bounds(schema);
         // Validate known unsupported keyword values before dropping constraints.
         // Unknown fields remain errors even in compatibility mode.
@@ -446,12 +548,11 @@ public:
             const bool any = std::all_of(schema.begin(), schema.end(), [](const auto &kv) {
                 return kv.key() == "description" || kv.key() == "nullable" || kv.key() == "example";
             });
-            if (root || !any) throw UnsupportedSchema("schema requires a concrete type");
+            if (root || !any || !json_text_) throw UnsupportedSchema("schema requires a concrete type");
             schema["type"] = "string";
             hint(schema, "Any JSON value, written as JSON text.");
-            if (path && json_text_) json_text_->push_back(*path);
+            if (path) json_text_->push_back(*path);
         }
-        active_.erase(&source);
         return schema;
     }
 };

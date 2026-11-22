@@ -206,22 +206,22 @@ TEST_CASE("Responses native text and reasoning signatures replay in their respec
     auto native = read(
         R"({"candidates":[{"content":{"role":"model","parts":[{"text":"thinking","thought":true,"thoughtSignature":"reasoning-sig"},{"text":"answer"},{"text":"","thoughtSignature":"text-sig"},{"inlineData":{"mimeType":"image/png","data":"AQID"}}]}}]})");
     auto result = responses_response(native, "m", "resp_native", {});
+    const auto &items = result.at("output").as_array();
+    REQUIRE(items.size() == 2);
+    CHECK(items[0].as_object().at("type") == "reasoning");
+    CHECK(items[0].as_object().at("thought_signature") == "reasoning-sig");
+    CHECK(items[1].as_object().at("type") == "message");
+    CHECK(items[1].as_object().at("thought_signature") == "text-sig");
     auto request = normalize_openai(
         responses_to_chat({{"model", "m"}, {"input", result.at("output")}}), Config{});
     auto &turns = request.gemini.at("contents").as_array();
-    REQUIRE(turns.size() == 2);
-    REQUIRE(turns[0].as_object().at("parts").as_array()[0].as_object().at("thoughtSignature") ==
-            "reasoning-sig");
-    REQUIRE(turns[1].as_object().at("parts").as_array()[1].as_object().at("thoughtSignature") ==
-            "text-sig");
-    REQUIRE(turns[1]
-                .as_object()
-                .at("parts")
-                .as_array()[2]
-                .as_object()
-                .at("inlineData")
-                .as_object()
-                .at("data") == "AQID");
+    REQUIRE(turns.size() == 1);
+    const auto &parts = turns[0].as_object().at("parts").as_array();
+    REQUIRE(parts.size() == 4);
+    REQUIRE(parts[0].as_object().at("thoughtSignature") == "reasoning-sig");
+    REQUIRE(parts[1].as_object().at("text") == "answer");
+    REQUIRE(parts[2].as_object().at("thoughtSignature") == "text-sig");
+    REQUIRE(parts[3].as_object().at("inlineData").as_object().at("data") == "AQID");
 }
 
 TEST_CASE("Responses opt-in sanitizer discards known optional features", "[responses]") {
@@ -375,4 +375,129 @@ TEST_CASE("Incremental Responses text deltas match full recomputation event for 
                   normalize(failed ? full.fail(error) : full.finish()));
         }
     }
+}
+
+TEST_CASE("Responses coalesces assistant items, avoids phantom messages, persists tools on finish, accepts null, and rolls back first push",
+          "[responses][regression]") {
+    // 1. Coalescing reasoning + message + parallel function_calls into one model turn.
+    const auto multi = read(
+        R"({"candidates":[{"content":{"role":"model","parts":[{"text":"plan","thought":true,"thoughtSignature":"r-sig"},{"text":"call tools"},{"functionCall":{"name":"f","args":{"a":1}},"thoughtSignature":"c1-sig"},{"functionCall":{"name":"g","args":{"b":2}},"thoughtSignature":"c2-sig"}]}}]})");
+    const auto multi_resp = responses_response(multi, "m", "resp_multi", {});
+    const auto &multi_out = multi_resp.at("output").as_array();
+    REQUIRE(multi_out.size() == 4);
+    CHECK(multi_out[0].as_object().at("thought_signature") == "r-sig");
+    CHECK_FALSE(multi_out[1].as_object().contains("thought_signature"));
+    auto multi_input = multi_out;
+    multi_input.push_back(json::object{{"type", "function_call_output"},
+                                       {"call_id", multi_out[2].as_object().at("call_id")},
+                                       {"output", "r1"}});
+    multi_input.push_back(json::object{{"type", "function_call_output"},
+                                       {"call_id", multi_out[3].as_object().at("call_id")},
+                                       {"output", "r2"}});
+    const auto multi_req =
+        normalize_openai(responses_to_chat({{"model", "m"}, {"input", multi_input}}), Config{});
+    const auto &multi_turns = multi_req.gemini.at("contents").as_array();
+    REQUIRE(multi_turns.size() == 2);
+    CHECK(multi_turns[0].as_object().at("role") == "model");
+    CHECK(multi_turns[0].as_object().at("parts").as_array().size() == 4);
+    CHECK(multi_turns[1].as_object().at("role") == "user");
+    CHECK(multi_turns[1].as_object().at("parts").as_array().size() == 2);
+
+    // 2. Reasoning-only or reasoning + tool call omits phantom empty message and duplicate signature.
+    const auto reasoning_only = read(
+        R"({"candidates":[{"content":{"role":"model","parts":[{"text":"think","thought":true,"thoughtSignature":"r-sig"}]}}]})");
+    const auto ro_resp = responses_response(reasoning_only, "m", "resp_ro", {});
+    REQUIRE(ro_resp.at("output").as_array().size() == 1);
+    CHECK(ro_resp.at("output").as_array()[0].as_object().at("type") == "reasoning");
+    CHECK(ro_resp.at("output").as_array()[0].as_object().at("thought_signature") == "r-sig");
+
+    const auto reasoning_and_text = read(
+        R"({"candidates":[{"content":{"role":"model","parts":[{"text":"think","thought":true,"thoughtSignature":"r-sig"},{"text":"visible"}]}}]})");
+    const auto rt_resp = responses_response(reasoning_and_text, "m", "resp_rt", {});
+    REQUIRE(rt_resp.at("output").as_array().size() == 2);
+    CHECK(rt_resp.at("output").as_array()[0].as_object().at("thought_signature") == "r-sig");
+    CHECK_FALSE(rt_resp.at("output").as_array()[1].as_object().contains("thought_signature"));
+
+    // 3. ResponsesStream persists tool metadata in finish(), not intermediate push().
+    struct Directory {
+        fs::path path = fs::temp_directory_path() / ("ais2api-resp-store-" + random_hex(8));
+        Directory() { fs::create_directories(path); }
+        ~Directory() {
+            std::error_code ec;
+            fs::remove_all(path, ec);
+        }
+    } dir;
+    Store store(dir.path);
+    ResponsesStream stream("m", "resp_persist", {}, 32768, &store, "principal");
+    const auto unsigned_call = read(
+        R"({"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"q":1}}}]}}]})");
+    const auto pushed = stream.push(unsigned_call);
+    const auto call_id =
+        string_or(pushed[2].as_object().at("item").as_object(), "call_id");
+    CHECK_FALSE(store.get_tool("principal", call_id).has_value());
+    (void)stream.finish();
+    const auto stored = store.get_tool("principal", call_id);
+    REQUIRE(stored.has_value());
+    CHECK(stored->at("name") == "lookup");
+    const auto follow_up = normalize_openai(
+        responses_to_chat(
+            {{"model", "m"},
+             {"input", json::array{json::object{{"type", "function_call_output"},
+                                                {"call_id", call_id},
+                                                {"output", "ok"}}}}}),
+        Config{}, &store, "principal");
+    CHECK(follow_up.gemini.at("contents")
+              .as_array()[0]
+              .as_object()
+              .at("parts")
+              .as_array()[0]
+              .as_object()
+              .at("functionResponse")
+              .as_object()
+              .at("name") == "lookup");
+
+    // 4. Explicit JSON null on optional Responses parameters.
+    const auto nullable = read(R"({
+        "model":"m",
+        "input":"hi",
+        "instructions":null,
+        "stream":null,
+        "store":null,
+        "background":null,
+        "previous_response_id":null,
+        "conversation":null,
+        "include":null,
+        "truncation":null,
+        "service_tier":null,
+        "metadata":null,
+        "parallel_tool_calls":null,
+        "max_output_tokens":null,
+        "reasoning":{"effort":null,"summary":null},
+        "text":null,
+        "temperature":null,
+        "top_p":null,
+        "tools":null,
+        "tool_choice":null,
+        "user":null,
+        "ais2api":null
+    })");
+    const auto chat_nullable = responses_to_chat(nullable);
+    REQUIRE_NOTHROW(normalize_openai(chat_nullable, Config{}));
+    const auto opts = responses_options(nullable);
+    const auto defaulted = responses_response(chunk("ok"), "m", "resp_null", opts);
+    CHECK(defaulted.at("temperature") == 1.0);
+    CHECK(defaulted.at("tools").as_array().empty());
+    CHECK(defaulted.at("text").at("format").at("type") == "text");
+
+    // 5. ResponsesStream::push rollback on first delta restores started_, sequence_, and output_bound_.
+    ResponsesStream limited("m", "resp_rollback", {}, 128);
+    REQUIRE_THROWS_AS(limited.push(chunk(std::string(512, 'x'))), Error);
+    const auto failed_events = limited.fail(Error(413, "response_too_large", "too big"));
+    REQUIRE(failed_events.size() == 3);
+    CHECK(failed_events[0].as_object().at("type") == "response.created");
+    CHECK(failed_events[0].as_object().at("sequence_number") == 0);
+    CHECK(failed_events[1].as_object().at("type") == "response.in_progress");
+    CHECK(failed_events[1].as_object().at("sequence_number") == 1);
+    CHECK(failed_events[2].as_object().at("type") == "response.failed");
+    CHECK(failed_events[2].as_object().at("sequence_number") == 2);
 }

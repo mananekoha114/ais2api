@@ -764,8 +764,12 @@ TEST_CASE("Finish reasons use the public enum numbers", "[protocol]") {
     };
     for (auto [code, name] : {std::pair{5, "OTHER"}, {6, "LANGUAGE"}, {12, "UNEXPECTED_TOOL_CALL"},
                               {14, "IMAGE_PROHIBITED_CONTENT"}, {15, "IMAGE_OTHER"}, {16, "NO_IMAGE"},
-                              {17, "IMAGE_RECITATION"}, {18, "FINISH_REASON_UNSPECIFIED"}})
+                              {17, "IMAGE_RECITATION"}})
         REQUIRE(reason(code) == name);
+    for (int unspecified : {0, 18}) {
+        auto event = decode_chunk(json::parse("[[[null," + std::to_string(unspecified) + "]]]"));
+        REQUIRE_FALSE(event.at("candidates").as_array()[0].as_object().contains("finishReason"));
+    }
 }
 
 TEST_CASE("Executable code enums and function-response media survive request encoding",
@@ -868,11 +872,38 @@ TEST_CASE("Repeated idless stream functions allocate independent calls and signa
     REQUIRE(first_id.starts_with("call_gemini_"));
     REQUIRE(second_id.starts_with("call_gemini_"));
     REQUIRE(third_id.starts_with("call_gemini_"));
-    REQUIRE_FALSE(store.get_tool("owner", first_id));
-    REQUIRE_FALSE(store.get_tool("owner", second_id));
-    REQUIRE_FALSE(store.get_tool("owner", third_id));
+    REQUIRE(store.get_tool("owner", first_id).has_value());
+    REQUIRE(store.get_tool("owner", second_id).has_value());
+    REQUIRE(store.get_tool("owner", third_id).has_value());
+    REQUIRE_FALSE(store.get_tool("owner", first_id)->if_contains("thoughtSignature"));
     REQUIRE(json::serialize(*store.get_tool("owner", "stream:idless-stream")).find("signature-") == std::string::npos);
     REQUIRE_FALSE(store.get_tool("other-owner", first_id));
+    // normalize_openai resolves and validates call_gemini_* metadata in Store.
+    auto tampered = first;
+    tampered.erase("index");
+    tampered.at("function").as_object()["arguments"] = R"({"value":999})";
+    REQUIRE_THROWS_AS(
+        normalize_openai({{"model", "m"},
+                          {"messages", json::array{json::object{{"role", "assistant"},
+                                                                {"content", nullptr},
+                                                                {"tool_calls", json::array{tampered}}}}}},
+                         Config{}, &store, "owner"),
+        Error);
+    const auto tool_only = normalize_openai(
+        {{"model", "m"},
+         {"messages", json::array{json::object{{"role", "tool"},
+                                               {"tool_call_id", first_id},
+                                               {"content", "ok"}}}}},
+        Config{}, &store, "owner");
+    REQUIRE(tool_only.gemini.at("contents")
+                .as_array()[0]
+                .as_object()
+                .at("parts")
+                .as_array()[0]
+                .as_object()
+                .at("functionResponse")
+                .as_object()
+                .at("name") == "same_function");
     auto &native = a.at("choices")
                        .as_array()[0]
                        .as_object()
@@ -1036,4 +1067,117 @@ TEST_CASE("Upstream additions are skipped and reported instead of failing genera
     REQUIRE(take_upstream_ignored(event).empty());
     auto plain = decode_chunk(response_wire(one(json::array{nullptr, "plain"})));
     REQUIRE_FALSE(plain.contains(upstream_ignored_key));
+}
+
+TEST_CASE("joins_text never merges parts carrying non-text payloads", "[protocol][regression]") {
+    const auto call_part = obj(R"({"text":"a","functionCall":{"name":"f","args":{}}})");
+    const auto plain_part = obj(R"({"text":"b"})");
+    const auto media_part = obj(R"({"text":"b","inlineData":{"mimeType":"image/png","data":"AA=="}})");
+    const auto code_part = obj(R"({"text":"b","executableCode":{"language":"PYTHON","code":"1"}})");
+    const auto res_part = obj(R"({"text":"b","codeExecutionResult":{"outcome":"OUTCOME_OK","output":"1"}})");
+    CHECK_FALSE(joins_text(call_part, plain_part));
+    CHECK_FALSE(joins_text(plain_part, media_part));
+    CHECK_FALSE(joins_text(plain_part, code_part));
+    CHECK_FALSE(joins_text(plain_part, res_part));
+
+    json::object aggregate;
+    merge_event(aggregate, {{"candidates", json::array{json::object{{"content", {{"role", "model"}, {"parts", json::array{plain_part}}}}}}}}, 8192);
+    merge_event(aggregate, {{"candidates", json::array{json::object{{"content", {{"role", "model"}, {"parts", json::array{media_part}}}}}}}}, 8192);
+    const auto &parts = aggregate.at("candidates").as_array()[0].as_object().at("content").as_object().at("parts").as_array();
+    REQUIRE(parts.size() == 2);
+    CHECK(parts[1].as_object().contains("inlineData"));
+}
+
+TEST_CASE("FINISH_REASON_UNSPECIFIED is ignored across merge_event and openai_delta",
+          "[protocol][regression]") {
+    json::object aggregate;
+    merge_event(aggregate, obj(R"({"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"MAX_TOKENS"}]})"), 8192);
+    merge_event(aggregate, obj(R"({"candidates":[{"finishReason":"FINISH_REASON_UNSPECIFIED"}]})"), 8192);
+    merge_event(aggregate, obj(R"({"candidates":[{"finishReason":""}]})"), 8192);
+    CHECK(aggregate.at("candidates").as_array()[0].as_object().at("finishReason") == "MAX_TOKENS");
+
+    const auto delta = openai_delta(obj(R"({"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"FINISH_REASON_UNSPECIFIED"}]})"), "m", "id");
+    CHECK(delta.at("choices").as_array()[0].as_object().at("finish_reason").is_null());
+}
+
+TEST_CASE("Reasoning-only signature stays out of OpenAI text thought_signature", "[protocol][regression]") {
+    const auto event = obj(R"({"candidates":[{"content":{"role":"model","parts":[{"text":"ponder","thought":true,"thoughtSignature":"r-sig"}]}}]})");
+    const auto response = openai_response(event, "m", "id");
+    const auto &msg = response.at("choices").as_array()[0].as_object().at("message").as_object();
+    CHECK(msg.at("reasoning_content") == "ponder");
+    CHECK_FALSE(msg.contains("thought_signature"));
+}
+
+TEST_CASE("decode_chunk rejects negative and overflowing usage counts", "[protocol][regression]") {
+    for (const auto *bad_usage : {
+             R"([null,null,[-1,1,0]])",
+             R"([null,null,[1,-1,0]])",
+             R"([null,null,[1,1,-1]])",
+             R"([null,null,[1,1,2,-1]])",
+             R"([null,null,[1,1,2,0,null,null,null,null,null,-1]])",
+             R"([null,null,[18446744073709551615,1]])",
+             R"([null,null,[1,1,18446744073709551615]])",
+             R"([null,null,[1,1,2,18446744073709551615]])"}) {
+        CAPTURE(bad_usage);
+        REQUIRE_THROWS_AS(decode_chunk(json::parse(bad_usage)), Error);
+    }
+}
+
+TEST_CASE("OpenAI normalization treats explicit null optional parameters as omitted",
+          "[protocol][regression]") {
+    const auto raw = obj(R"({
+        "model":"m",
+        "stream":null,
+        "stream_options":null,
+        "temperature":null,
+        "top_p":null,
+        "max_tokens":null,
+        "max_completion_tokens":50,
+        "stop":null,
+        "presence_penalty":null,
+        "frequency_penalty":null,
+        "logprobs":null,
+        "top_logprobs":null,
+        "tools":[{"type":"function","function":{"name":"f","description":null,"parameters":null,"strict":null}}],
+        "tool_choice":null,
+        "parallel_tool_calls":null,
+        "response_format":null,
+        "reasoning_effort":null,
+        "n":null,
+        "store":null,
+        "seed":null,
+        "logit_bias":null,
+        "service_tier":null,
+        "web_search_options":null,
+        "ais2api":null,
+        "messages":[
+            {"role":"user","content":"hi","reasoning_content":null,"thought_signature":null,"signature":null,"tool_calls":null,"ais2api":null},
+            {"role":"assistant","content":"ok","reasoning_content":null,"thought_signature":null,"signature":null,"tool_calls":null,"ais2api":null}
+        ]
+    })");
+    const auto req = normalize_openai(raw, Config{});
+    CHECK(req.gemini.at("generationConfig").at("maxOutputTokens") == 50);
+    CHECK_FALSE(req.gemini.at("generationConfig").as_object().contains("temperature"));
+}
+
+TEST_CASE("Schema encoding handles nested unions and Gemini 4 edge cases",
+          "[protocol][schema][regression]") {
+    const auto nested_union = encode_schema(
+        obj(R"({"anyOf":[{"type":"Null"},{"anyOf":[{"type":["String","Null"]}]}]})"));
+    REQUIRE(nested_union.size() >= 4);
+    CHECK(nested_union[0] == 1);
+    CHECK(nested_union[3] == true);
+
+    const auto img4 = normalize_gemini(
+        "gemini-4-image", obj(R"({"contents":[{"parts":[{"text":"draw"}]}]})"), false, Config{});
+    CHECK(encode_request(img4, {}, "s")[3].as_array()[16] == json::array{1, nullptr, nullptr, 2});
+
+    const auto zero_budget = normalize_gemini(
+        "gemini-4-argon",
+        obj(R"({"contents":[{"parts":[{"text":"x"}]}],"generationConfig":{"maxOutputTokens":0}})"),
+        false, Config{});
+    CHECK_FALSE(zero_budget.output_budget.has_value());
+    const auto zero_wire = encode_request(zero_budget, {}, "s");
+    CHECK(zero_wire[10] == 1);
+    CHECK(zero_wire[3].as_array()[3] == 0);
 }

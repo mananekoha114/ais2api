@@ -7,6 +7,7 @@
 #include "ais2api/anthropic.hpp"
 #include "ais2api/tokenizer.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <cstdint>
 #include <map>
 
 using namespace ais2api;
@@ -377,4 +378,85 @@ TEST_CASE("count_tokens estimates text, tools and media locally", "[anthropic][t
     const auto tool = count(R"({"model":"m","tools":[{"name":"lookup","input_schema":{"type":"object"}}],
         "messages":[{"role":"user","content":"Hello, world!"}]})");
     CHECK(tool == count_tokens("Hello, world!") + count_tokens(R"({"name":"lookup","parameters":{"type":"object"}})"));
+}
+
+TEST_CASE("Anthropic accepts explicit null for optional nullable fields", "[anthropic][null]") {
+    const auto nullable_input = parse(R"({
+        "model":"gemini-test",
+        "max_tokens":64,
+        "stream":null,
+        "temperature":null,
+        "top_p":null,
+        "top_k":null,
+        "stop_sequences":null,
+        "thinking":null,
+        "output_config":{"effort":null,"format":null,"task_budget":null},
+        "output_format":null,
+        "context_management":{"edits":null},
+        "tools":[{"name":"lookup","description":null,"input_schema":{"type":"object"},"input_examples":null,"allowed_callers":null,"strict":null}],
+        "tool_choice":null,
+        "service_tier":null,
+        "system":null,
+        "messages":[{"role":"user","content":"Hello"}]
+    })");
+    const auto lowered = anthropic_to_gemini(nullable_input, false);
+    CHECK(lowered.ignored.empty());
+    CHECK_FALSE(lowered.stream);
+    CHECK_FALSE(lowered.thinking);
+    CHECK_FALSE(lowered.gemini.contains("systemInstruction"));
+    CHECK_FALSE(lowered.gemini.contains("toolConfig"));
+
+    const auto with_null_keep = parse(R"({
+        "model":"gemini-test",
+        "max_tokens":64,
+        "thinking":{"type":"enabled","budget_tokens":null,"display":null},
+        "context_management":{"edits":[{"type":"clear_thinking_20251015","keep":null}]},
+        "messages":[{"role":"user","content":"a"},
+            {"role":"assistant","content":[{"type":"thinking","thinking":"old","signature":"ais2api.gemini.s1"},{"type":"text","text":"a1"}]},
+            {"role":"user","content":"b"},
+            {"role":"assistant","content":[{"type":"thinking","thinking":"new","signature":"ais2api.gemini.s2"},{"type":"text","text":"b1"}]},
+            {"role":"user","content":"c"}]
+    })");
+    const auto kept = anthropic_to_gemini(with_null_keep, false);
+    CHECK(kept.ignored.empty());
+    CHECK(parts_of(kept.gemini, 1) == json::array{json::object{{"text", "a1"}}});
+    CHECK(parts_of(kept.gemini, 3).size() == 3);
+
+    auto counting_null_max = parse(R"({"model":"gemini-test","max_tokens":null,"messages":[{"role":"user","content":"hi"}]})");
+    CHECK(status_of(counting_null_max, false) == 400);
+    CHECK_NOTHROW(anthropic_to_gemini(counting_null_max, false, true));
+}
+
+TEST_CASE("AnthropicStream ignores unspecified finish, large usage, bad signatures, and dropped non-text parts",
+          "[anthropic][stream]") {
+    AnthropicStream stream("m", "msg", true);
+    (void)stream.push(chunk(json::array{json::object{{"text", "hi"}}}, "MAX_TOKENS"));
+    (void)stream.push(chunk(json::array{}, "FINISH_REASON_UNSPECIFIED"));
+    (void)stream.push(chunk(json::array{}, ""));
+    const auto done = stream.finish();
+    const auto &delta = done[done.size() - 2].as_object().at("delta").as_object();
+    CHECK(delta.at("stop_reason") == "max_tokens");
+
+    // uint64 > INT64_MAX in usageMetadata does not throw, and non-text parts with signatures count as dropped.
+    json::object overflow_usage{{"promptTokenCount", std::uint64_t(INT64_MAX) + 1ULL},
+                                {"candidatesTokenCount", std::uint64_t(INT64_MAX) + 5ULL},
+                                {"cachedContentTokenCount", 0}};
+    json::array signed_media{
+        parse(R"({"inlineData":{"mimeType":"image/png","data":"AA=="},"thoughtSignature":"img-sig"})"),
+        parse(R"({"executableCode":{"language":"PYTHON","code":"1"},"thoughtSignature":"code-sig"})"),
+        parse(R"({"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"1"},"thoughtSignature":"res-sig"})"),
+        parse(R"({"functionResponse":{"name":"f","response":{"ok":true}},"thoughtSignature":"fn-sig"})"),
+        parse(R"({"text":"ok","thoughtSignature":""})"),
+        parse(R"({"text":"!","thoughtSignature":123})")};
+    json::object combined = chunk(signed_media, "STOP");
+    combined["usageMetadata"] = overflow_usage;
+    std::size_t dropped = 0;
+    const auto msg = anthropic_response(combined, "m", "msg_safe", true, &dropped);
+    CHECK(dropped == 4);
+    const auto &blocks = msg.at("content").as_array();
+    REQUIRE(blocks.size() == 1);
+    CHECK(blocks[0].at("type") == "text");
+    CHECK(blocks[0].at("text") == "ok!");
+    CHECK(msg.at("usage").at("input_tokens") == 0);
+    CHECK(msg.at("usage").at("output_tokens") == 0);
 }

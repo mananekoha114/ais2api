@@ -49,7 +49,7 @@ json::value content(const json::value &v) {
             if (!url.starts_with("https://") && !url.starts_with("data:"))
                 bad("input_image requires an HTTPS or data URL");
             json::object image{{"url", url}};
-            if (auto d = p.if_contains("detail"))
+            if (auto d = p.if_contains("detail"); d && !d->is_null())
                 image["detail"] = *d;
             out.push_back(json::object{{"type", "image_url"}, {"image_url", image}});
         } else
@@ -65,6 +65,146 @@ std::string item_text(const json::object &i) {
     if (!p || !p->is_array() || p->as_array().empty())
         return {};
     return string_or(p->as_array()[0].as_object(), "text");
+}
+std::optional<std::string> plain_text_content(const json::object &m) {
+    auto c = m.if_contains("content");
+    if (!c || c->is_null())
+        return std::string{};
+    if (c->is_string())
+        return std::string(c->as_string());
+    if (!c->is_array())
+        return std::nullopt;
+    std::string out;
+    for (auto &part : c->as_array()) {
+        if (!part.is_object())
+            return std::nullopt;
+        auto &o = part.as_object();
+        if (string_or(o, "type") != "text")
+            return std::nullopt;
+        auto t = o.if_contains("text");
+        if (!t || !t->is_string())
+            return std::nullopt;
+        out.append(t->as_string());
+    }
+    return out;
+}
+json::array synthesize_assistant_parts(const json::object &m) {
+    json::array parts;
+    if (auto r = m.if_contains("reasoning_content"); r && r->is_string() && !r->as_string().empty())
+        parts.push_back(json::object{{"text", *r}, {"thought", true}});
+    if (auto text = plain_text_content(m)) {
+        if (!text->empty())
+            parts.push_back(json::object{{"text", *text}});
+    } else if (auto c = m.if_contains("content"); c && !c->is_null()) {
+        bad("Assistant message with native content must contain text only");
+    }
+    if (auto s = m.if_contains("thought_signature"); s && !s->is_null())
+        parts.push_back(json::object{{"text", ""}, {"thoughtSignature", *s}});
+    if (auto tc = m.if_contains("tool_calls"); tc && tc->is_array()) {
+        for (auto &v : tc->as_array()) {
+            auto &call = obj(v);
+            auto &fn = obj(call.at("function"));
+            auto args_str = required(fn, "arguments");
+            boost::system::error_code ec;
+            auto parsed = json::parse(args_str, ec);
+            if (ec || !parsed.is_object())
+                bad("Tool arguments must encode a JSON object");
+            parts.push_back(json::object{
+                {"functionCall", json::object{{"id", required(call, "id")},
+                                              {"name", required(fn, "name")},
+                                              {"args", std::move(parsed)}}}});
+        }
+    }
+    return parts;
+}
+void append_assistant_message(json::array &messages, json::object next) {
+    if (messages.empty() || string_or(messages.back().as_object(), "role") != "assistant") {
+        messages.push_back(std::move(next));
+        return;
+    }
+    auto &prev = messages.back().as_object();
+    const bool prev_native = prev.if_contains("ais2api") != nullptr;
+    const bool next_native = next.if_contains("ais2api") != nullptr;
+    const bool dual_sig =
+        prev.if_contains("thought_signature") && next.if_contains("thought_signature");
+    if (prev_native || next_native || dual_sig) {
+        if (!prev_native) {
+            auto prev_parts = synthesize_assistant_parts(prev);
+            if (auto text = plain_text_content(prev); text && prev.if_contains("content") &&
+                                                      !prev.at("content").is_null())
+                prev["content"] = *text;
+            prev["ais2api"] = json::object{
+                {"gemini_content",
+                 json::object{{"role", "model"}, {"parts", std::move(prev_parts)}}}};
+        }
+        auto &merged_parts =
+            prev.at("ais2api").as_object().at("gemini_content").as_object().at("parts").as_array();
+        if (next_native) {
+            auto &np = next.at("ais2api")
+                           .as_object()
+                           .at("gemini_content")
+                           .as_object()
+                           .at("parts")
+                           .as_array();
+            for (auto &part : np)
+                merged_parts.push_back(part);
+        } else {
+            for (auto &part : synthesize_assistant_parts(next))
+                merged_parts.push_back(std::move(part));
+        }
+    }
+    if (auto nc = next.if_contains("content"); nc && !nc->is_null()) {
+        if (auto pc = prev.if_contains("content"); !pc || pc->is_null()) {
+            if (prev.if_contains("ais2api")) {
+                if (auto text = plain_text_content(next))
+                    prev["content"] = *text;
+                else
+                    prev["content"] = *nc;
+            } else {
+                prev["content"] = *nc;
+            }
+        } else if (pc->is_string() && nc->is_string()) {
+            pc->as_string().append(nc->as_string());
+        } else if (!prev.if_contains("ais2api") && pc->is_array() && nc->is_array()) {
+            for (auto &part : nc->as_array())
+                pc->as_array().push_back(part);
+        } else {
+            auto pt = plain_text_content(prev);
+            auto nt = plain_text_content(next);
+            if (!pt || !nt)
+                bad("Assistant message with native content must contain text only");
+            prev["content"] = *pt + *nt;
+        }
+    }
+    if (auto nr = next.if_contains("reasoning_content");
+        nr && nr->is_string() && !nr->as_string().empty()) {
+        if (auto pr = prev.if_contains("reasoning_content"); pr && pr->is_string())
+            pr->as_string().append(nr->as_string());
+        else
+            prev["reasoning_content"] = *nr;
+    }
+    if (auto ns = next.if_contains("thought_signature"); ns && !ns->is_null())
+        prev["thought_signature"] = *ns;
+    else if (prev.if_contains("thought_signature") && next_native) {
+        auto &np = next.at("ais2api")
+                       .as_object()
+                       .at("gemini_content")
+                       .as_object()
+                       .at("parts")
+                       .as_array();
+        for (auto &part : np)
+            if (part.is_object() && !part.as_object().if_contains("functionCall"))
+                if (auto sig = part.as_object().if_contains("thoughtSignature"))
+                    prev["thought_signature"] = *sig;
+    }
+    if (auto ntc = next.if_contains("tool_calls"); ntc && ntc->is_array()) {
+        if (auto ptc = prev.if_contains("tool_calls"); ptc && ptc->is_array()) {
+            for (auto &call : ntc->as_array())
+                ptc->as_array().push_back(call);
+        } else {
+            prev["tool_calls"] = *ntc;
+        }
+    }
 }
 } // namespace
 void discard_unsupported_responses(json::object &in, json::array &ignored) {
@@ -279,18 +419,19 @@ json::object responses_to_chat(const json::object &in) {
               "truncation",
               "service_tier"});
     for (auto k : {"store", "background"})
-        if (auto p = in.if_contains(k); p && (!p->is_bool() || p->as_bool()))
+        if (auto p = in.if_contains(k); p && !p->is_null() && (!p->is_bool() || p->as_bool()))
             bad(std::string(k) + "=true is unsupported");
     for (auto k : {"previous_response_id", "conversation"})
         if (auto p = in.if_contains(k); p && !p->is_null())
             bad(std::string(k) + " is unsupported; provide full input history");
-    if (auto p = in.if_contains("include"); p && (!p->is_array() || !p->as_array().empty()))
+    if (auto p = in.if_contains("include");
+        p && !p->is_null() && (!p->is_array() || !p->as_array().empty()))
         bad("include is unsupported");
-    if (auto p = in.if_contains("truncation"); p && *p != "disabled")
+    if (auto p = in.if_contains("truncation"); p && !p->is_null() && *p != "disabled")
         bad("Only disabled truncation is supported");
-    if (auto p = in.if_contains("service_tier"); p && *p != "auto")
+    if (auto p = in.if_contains("service_tier"); p && !p->is_null() && *p != "auto")
         bad("Only auto service_tier is supported");
-    if (auto p = in.if_contains("metadata")) {
+    if (auto p = in.if_contains("metadata"); p && !p->is_null()) {
         if (!p->is_object())
             bad("metadata must be an object of strings");
         if (p->as_object().size() > 16)
@@ -300,7 +441,8 @@ json::object responses_to_chat(const json::object &in) {
                 kv.value().as_string().size() > 512)
                 bad("metadata keys and values must be strings within Responses limits");
     }
-    if (auto p = in.if_contains("parallel_tool_calls"); p && (!p->is_bool() || !p->as_bool()))
+    if (auto p = in.if_contains("parallel_tool_calls");
+        p && !p->is_null() && (!p->is_bool() || !p->as_bool()))
         bad("Only parallel_tool_calls=true is supported");
     json::object out{{"model", required(in, "model")}, {"store", false}};
     json::array messages;
@@ -330,7 +472,7 @@ json::object responses_to_chat(const json::object &in) {
                 if (!c)
                     bad("message content is required");
                 m["content"] = content(*c);
-                if (i.if_contains("ais2api")) {
+                if (auto ext = i.if_contains("ais2api"); ext && !ext->is_null()) {
                     std::string joined;
                     if (m.at("content").is_array())
                         for (auto &part : m.at("content").as_array())
@@ -340,16 +482,20 @@ json::object responses_to_chat(const json::object &in) {
                     m["content"] = joined;
                 }
                 for (auto k : {"ais2api", "thought_signature", "reasoning_content"})
-                    if (auto p = i.if_contains(k))
+                    if (auto p = i.if_contains(k); p && !p->is_null())
                         m[k] = *p;
-                messages.push_back(m);
+                if (role == "assistant")
+                    append_assistant_message(messages, std::move(m));
+                else
+                    messages.push_back(std::move(m));
             } else if (type == "function_call") {
                 keys(i, {"type", "id", "status", "call_id", "name", "arguments"});
                 json::object function{{"name", required(i, "name")},
                                       {"arguments", required(i, "arguments")}};
                 json::object call{
                     {"id", required(i, "call_id")}, {"type", "function"}, {"function", function}};
-                messages.push_back(
+                append_assistant_message(
+                    messages,
                     json::object{{"role", "assistant"}, {"tool_calls", json::array{call}}});
             } else if (type == "function_call_output") {
                 keys(i, {"type", "id", "status", "call_id", "output"});
@@ -359,7 +505,7 @@ json::object responses_to_chat(const json::object &in) {
             } else if (type == "reasoning") {
                 keys(i, {"type", "id", "status", "summary", "thought_signature", "ais2api"});
                 std::string text;
-                if (auto p = i.if_contains("summary")) {
+                if (auto p = i.if_contains("summary"); p && !p->is_null()) {
                     if (!p->is_array())
                         bad("reasoning summary must be an array");
                     for (auto &s : p->as_array()) {
@@ -370,12 +516,12 @@ json::object responses_to_chat(const json::object &in) {
                     }
                 }
                 json::object m{{"role", "assistant"}, {"reasoning_content", text}};
-                if (auto ext = i.if_contains("ais2api"))
+                if (auto ext = i.if_contains("ais2api"); ext && !ext->is_null())
                     m["ais2api"] = *ext;
-                if (auto p = i.if_contains("thought_signature"))
+                if (auto p = i.if_contains("thought_signature"); p && !p->is_null())
                     m["thought_signature"] = *p;
-                if (!text.empty() || m.if_contains("thought_signature"))
-                    messages.push_back(m);
+                if (!text.empty() || m.if_contains("thought_signature") || m.if_contains("ais2api"))
+                    append_assistant_message(messages, std::move(m));
             } else
                 bad("Unsupported Responses input item: " + type);
         }
@@ -383,22 +529,22 @@ json::object responses_to_chat(const json::object &in) {
     out["messages"] = messages;
     for (auto k :
          {"stream", "temperature", "top_p", "parallel_tool_calls", "metadata", "user", "ais2api"})
-        if (auto p = in.if_contains(k))
+        if (auto p = in.if_contains(k); p && !p->is_null())
             out[k] = *p;
-    if (auto p = in.if_contains("max_output_tokens"))
+    if (auto p = in.if_contains("max_output_tokens"); p && !p->is_null())
         out["max_completion_tokens"] = *p;
     if (auto p = in.if_contains("reasoning"); p && !p->is_null()) {
         auto &r = obj(*p);
         keys(r, {"effort", "summary"});
         if (auto s = r.if_contains("summary"); s && !s->is_null())
             bad("Requested reasoning summaries are unsupported");
-        if (auto e = r.if_contains("effort"))
+        if (auto e = r.if_contains("effort"); e && !e->is_null())
             out["reasoning_effort"] = *e;
     }
-    if (auto p = in.if_contains("text")) {
+    if (auto p = in.if_contains("text"); p && !p->is_null()) {
         auto &t = obj(*p);
         keys(t, {"format"});
-        if (auto f = t.if_contains("format")) {
+        if (auto f = t.if_contains("format"); f && !f->is_null()) {
             auto format = obj(*f);
             auto type = required(format, "type");
             if (type == "json_schema") {
@@ -410,7 +556,7 @@ json::object responses_to_chat(const json::object &in) {
             }
         }
     }
-    if (auto p = in.if_contains("tools")) {
+    if (auto p = in.if_contains("tools"); p && !p->is_null()) {
         if (!p->is_array())
             bad("tools must be an array");
         json::array tools;
@@ -421,29 +567,40 @@ json::object responses_to_chat(const json::object &in) {
                 if (out.if_contains("web_search_options"))
                     bad("Only one web_search tool is supported");
                 json::object options;
-                if (auto size = f.if_contains("search_context_size")) {
+                if (auto size = f.if_contains("search_context_size"); size && !size->is_null()) {
                     if (!(*size == "low" || *size == "medium" || *size == "high"))
                         bad("search_context_size must be low, medium or high");
                     options["search_context_size"] = *size;
                 }
                 // Chat Completions nests the approximate location fields.
-                if (auto p = f.if_contains("user_location")) {
-                    auto location = obj(*p);
+                if (auto loc = f.if_contains("user_location"); loc && !loc->is_null()) {
+                    auto location = obj(*loc);
                     keys(location, {"type", "city", "country", "region", "timezone"});
                     if (required(location, "type") != "approximate")
                         bad("user_location.type must be approximate");
                     location.erase("type");
-                    for (auto &kv : location)
-                        if (!kv.value().is_string()) bad("user_location fields must be strings");
-                    options["user_location"] = json::object{{"type", "approximate"}, {"approximate", location}};
+                    for (auto it = location.begin(); it != location.end();) {
+                        if (it->value().is_null())
+                            it = location.erase(it);
+                        else {
+                            if (!it->value().is_string())
+                                bad("user_location fields must be strings");
+                            ++it;
+                        }
+                    }
+                    options["user_location"] =
+                        json::object{{"type", "approximate"}, {"approximate", location}};
                 }
-                if (auto p = f.if_contains("filters")) {
-                    auto &filters = obj(*p);
+                if (auto flt = f.if_contains("filters"); flt && !flt->is_null()) {
+                    auto filters = obj(*flt);
                     keys(filters, {"allowed_domains"});
-                    if (auto domains = filters.if_contains("allowed_domains")) {
+                    if (auto domains = filters.if_contains("allowed_domains");
+                        domains && !domains->is_null()) {
                         if (!domains->is_array()) bad("allowed_domains must be an array");
                         for (auto &domain : domains->as_array())
                             if (!domain.is_string()) bad("allowed_domains must contain strings");
+                    } else {
+                        filters.erase("allowed_domains");
                     }
                     options["filters"] = filters;
                 }
@@ -454,12 +611,15 @@ json::object responses_to_chat(const json::object &in) {
                 bad("Only function and web_search tools are supported");
             keys(f, {"type", "name", "description", "parameters", "strict"});
             f.erase("type");
+            for (auto optional : {"description", "parameters", "strict"})
+                if (auto v = f.if_contains(optional); v && v->is_null())
+                    f.erase(optional);
             tools.push_back(json::object{{"type", "function"}, {"function", f}});
         }
         if (!tools.empty() || !out.if_contains("web_search_options"))
             out["tools"] = tools;
     }
-    if (auto p = in.if_contains("tool_choice")) {
+    if (auto p = in.if_contains("tool_choice"); p && !p->is_null()) {
         if (p->is_object()) {
             auto &t = p->as_object();
             keys(t, {"type", "name"});
@@ -476,8 +636,19 @@ json::object responses_options(const json::object &in) {
     json::object out;
     for (auto k : {"instructions", "user", "temperature", "top_p", "parallel_tool_calls",
                    "max_output_tokens", "reasoning", "text", "metadata", "tools", "tool_choice"})
-        if (auto p = in.if_contains(k))
-            out[k] = *p;
+        if (auto p = in.if_contains(k); p && !p->is_null()) {
+            if ((std::string_view(k) == "reasoning" || std::string_view(k) == "text") &&
+                p->is_object()) {
+                json::object filtered;
+                for (auto &kv : p->as_object())
+                    if (!kv.value().is_null())
+                        filtered[kv.key()] = kv.value();
+                if (!filtered.empty())
+                    out[k] = std::move(filtered);
+            } else {
+                out[k] = *p;
+            }
+        }
     return out;
 }
 json::object responses_response(const json::object &gemini, std::string_view model,
@@ -499,6 +670,10 @@ json::object responses_response(const json::object &gemini, std::string_view mod
                     native_text.push_back(part);
                 else if (bool_or(part.as_object(), "thought"))
                     native_reasoning.push_back(part);
+        std::optional<json::value> reasoning_signature;
+        for (auto &part : native_reasoning)
+            if (auto sig = part.as_object().if_contains("thoughtSignature"))
+                reasoning_signature = *sig;
         auto reason = string_or(choice, "finish_reason");
         if (reason == "length" || reason == "content_filter") {
             status = "incomplete";
@@ -506,12 +681,17 @@ json::object responses_response(const json::object &gemini, std::string_view mod
                 {"reason", reason == "length" ? "max_output_tokens" : "content_filter"}};
         }
         if (auto p = m.if_contains("reasoning_content");
-            p && p->is_string() && !p->as_string().empty()) {
+            (p && p->is_string() && !p->as_string().empty()) || reasoning_signature) {
             json::object item{
                 {"id", std::string(id) + "_reasoning"},
                 {"type", "reasoning"},
                 {"status", status},
-                {"summary", json::array{json::object{{"type", "summary_text"}, {"text", *p}}}}};
+                {"summary",
+                 json::array{json::object{
+                     {"type", "summary_text"},
+                     {"text", p && p->is_string() ? *p : json::value("")}}}}};
+            if (reasoning_signature)
+                item["thought_signature"] = *reasoning_signature;
             if (!native_reasoning.empty())
                 item["ais2api"] =
                     json::object{{"gemini_content",
@@ -627,8 +807,9 @@ json::object ResponsesStream::event(std::string_view type, json::object fields) 
     fields["sequence_number"] = sequence_++;
     return fields;
 }
-json::object ResponsesStream::response() {
-    auto r = responses_response(aggregate_, model_, id_, options_, nullptr, principal_);
+json::object ResponsesStream::response(bool persist) {
+    auto r =
+        responses_response(aggregate_, model_, id_, options_, persist ? store_ : nullptr, principal_);
     r["created_at"] = created_;
     return r;
 }
@@ -733,6 +914,9 @@ void ResponsesStream::apply_append(const Append &plan, json::array &events) {
 json::array ResponsesStream::push(const json::object &delta) {
     if (ended_)
         return {};
+    const bool prior_started = started_;
+    const auto prior_sequence = sequence_;
+    const auto prior_output_bound = output_bound_;
     auto events = start();
     if (incremental)
         if (auto plan = plan_append(delta)) {
@@ -746,7 +930,6 @@ json::array ResponsesStream::push(const json::object &delta) {
     const auto prior_bound = aggregate_bound_;
     const auto prior_size = output_.size();
     std::vector<std::pair<std::size_t, json::value>> replaced;
-    const auto prior_sequence = sequence_;
     try {
         merge_event(aggregate_, delta, limit_, &aggregate_bound_);
         auto r = response();
@@ -821,7 +1004,9 @@ json::array ResponsesStream::push(const json::object &delta) {
         aggregate_bound_ = prior_bound;
         for (auto &[index, item] : replaced) output_[index] = std::move(item);
         output_.resize(prior_size);
+        started_ = prior_started;
         sequence_ = prior_sequence;
+        output_bound_ = prior_output_bound;
         throw;
     }
 }
@@ -829,7 +1014,7 @@ json::array ResponsesStream::finish() {
     if (ended_)
         return {};
     auto events = start();
-    auto r = response();
+    auto r = response(true);
     for (std::size_t i = 0; i < output_.size(); ++i) {
         auto &item = output_[i].as_object();
         item["status"] = r.at("status");

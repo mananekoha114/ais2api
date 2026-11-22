@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <set>
@@ -150,7 +151,8 @@ struct Tools {
         if (name.empty()) invalid(std::string(what) + ".name cannot be empty");
         if (flag(tool, "strict", what)) policy.unsupported("tools.strict");
         for (auto key : {"input_examples", "allowed_callers"})
-            if (tool.if_contains(key)) policy.unsupported(std::string("tools.") + key);
+            if (auto p = tool.if_contains(key); p && !p->is_null())
+                policy.unsupported(std::string("tools.") + key);
         // defer_loading only delays when Anthropic shows a tool; Gemini sees
         // every declaration. eager_input_streaming changes nothing here.
         flag(tool, "defer_loading", what);
@@ -275,10 +277,11 @@ class Lowering {
             // Shown for one turn only.
             cleared = later_user;
         }
-        if (auto p = message.if_contains("output_config")) {
+        if (auto p = message.if_contains("output_config"); p && !p->is_null()) {
             auto &config = object_at(*p, "system message.output_config");
             allow(config, {"effort"}, "system message.output_config");
-            if (auto e = config.if_contains("effort")) effort = effort_level(*e, "system message.output_config.effort");
+            if (auto e = config.if_contains("effort"); e && !e->is_null())
+                effort = effort_level(*e, "system message.output_config.effort");
         }
         json::array parts;
         auto &content = required(message, "content", "system message");
@@ -527,7 +530,7 @@ AnthropicRequest anthropic_to_gemini(const json::object &input, bool ignore_unsu
     if (out.model.empty()) invalid("model cannot be empty");
     out.stream = flag(input, "stream", "request");
     json::object generation, thinking_config;
-    if (auto p = input.if_contains("max_tokens"); p || !count_only) {
+    if (auto p = input.if_contains("max_tokens"); (p && !p->is_null()) || !count_only) {
         if (!p || !(p->is_int64() || p->is_uint64()) || (p->is_int64() && p->as_int64() < 1))
             invalid("max_tokens must be a positive integer");
         generation["maxOutputTokens"] = *p;
@@ -555,7 +558,8 @@ AnthropicRequest anthropic_to_gemini(const json::object &input, bool ignore_unsu
             allow(thinking, {"type", "budget_tokens", "display"}, "thinking");
             out.thinking = true;
             // Like a Gemini thinkingBudget, a budget has no verified upstream field.
-            if (thinking.if_contains("budget_tokens")) policy.note("thinking.budget_tokens");
+            if (auto b = thinking.if_contains("budget_tokens"); b && !b->is_null())
+                policy.note("thinking.budget_tokens");
             auto display = thinking.if_contains("display");
             const auto shown = display && !display->is_null() ? string_at(*display, "thinking.display") : "summarized";
             if (shown != "summarized" && shown != "omitted" && shown != "updates")
@@ -575,7 +579,8 @@ AnthropicRequest anthropic_to_gemini(const json::object &input, bool ignore_unsu
         allow(config, {"effort", "format", "task_budget"}, "output_config");
         if (auto e = config.if_contains("effort"); e && !e->is_null()) effort = effort_level(*e, "output_config.effort");
         if (auto f = config.if_contains("format"); f && !f->is_null()) format = *f;
-        if (config.if_contains("task_budget")) policy.unsupported("output_config.task_budget");
+        if (auto tb = config.if_contains("task_budget"); tb && !tb->is_null())
+            policy.unsupported("output_config.task_budget");
     }
     if (auto p = input.if_contains("output_format"); p && !p->is_null()) {
         if (format) invalid("output_format cannot be combined with output_config.format");
@@ -592,7 +597,7 @@ AnthropicRequest anthropic_to_gemini(const json::object &input, bool ignore_unsu
     if (auto p = input.if_contains("context_management"); p && !p->is_null()) {
         auto &management = object_at(*p, "context_management");
         allow(management, {"edits"}, "context_management");
-        if (auto edits = management.if_contains("edits"))
+        if (auto edits = management.if_contains("edits"); edits && !edits->is_null())
             for (auto &item : array_at(*edits, "context_management.edits")) {
                 auto &edit = object_at(item, "context_management edit");
                 if (string_or(edit, "type") != "clear_thinking_20251015") {
@@ -604,7 +609,7 @@ AnthropicRequest anthropic_to_gemini(const json::object &input, bool ignore_unsu
                 if (keep && keep->is_string() && keep->as_string() == "all")
                     continue;
                 std::size_t turns = 1;
-                if (keep) {
+                if (keep && !keep->is_null()) {
                     auto &k = object_at(*keep, "clear_thinking_20251015.keep");
                     allow(k, {"type", "value"}, "clear_thinking_20251015.keep");
                     auto value = k.if_contains("value");
@@ -699,7 +704,11 @@ AnthropicStream::AnthropicStream(std::string model, std::string id, bool thinkin
 json::object AnthropicStream::usage() const {
     auto count = [&](std::string_view key) -> std::int64_t {
         auto p = usage_.if_contains(key);
-        return p && (p->is_int64() || p->is_uint64()) ? p->to_number<std::int64_t>() : 0;
+        if (!p) return 0;
+        if (p->is_int64() && p->as_int64() >= 0) return p->as_int64();
+        if (p->is_uint64() && p->as_uint64() <= static_cast<std::uint64_t>(INT64_MAX))
+            return static_cast<std::int64_t>(p->as_uint64());
+        return 0;
     };
     const auto cached = count("cachedContentTokenCount");
     return {{"input_tokens", std::max<std::int64_t>(0, count("promptTokenCount") - cached)},
@@ -724,7 +733,7 @@ void AnthropicStream::close(json::array &events) {
 }
 
 void AnthropicStream::signature(json::array &events, const json::value &value) {
-    if (!value.is_string()) return;
+    if (!value.is_string() || value.as_string().empty()) return;
     events.push_back(json::object{
         {"type", "content_block_delta"},
         {"index", index_},
@@ -756,7 +765,9 @@ json::array AnthropicStream::push(const json::object &delta) {
         auto &candidate = value.as_object();
         if (auto index = candidate.if_contains("index"); index && index->is_number() && json::value_to<double>(*index) != 0)
             continue;
-        if (auto reason = candidate.if_contains("finishReason"); reason && reason->is_string())
+        if (auto reason = candidate.if_contains("finishReason");
+            reason && reason->is_string() && !reason->as_string().empty() &&
+            reason->as_string() != "FINISH_REASON_UNSPECIFIED")
             finish_reason_ = std::string(reason->as_string());
         auto content = candidate.if_contains("content");
         auto parts = content && content->is_object() ? content->as_object().if_contains("parts") : nullptr;
@@ -786,24 +797,33 @@ json::array AnthropicStream::push(const json::object &delta) {
                 calls_ = true;
                 continue;
             }
+            const bool valid_sig = sig && sig->is_string() && !sig->as_string().empty();
+            const bool non_text = part.if_contains("inlineData") || part.if_contains("executableCode") ||
+                                  part.if_contains("codeExecutionResult") || part.if_contains("functionResponse");
+            if (non_text) {
+                ++dropped_;
+                continue;
+            }
             auto text = part.if_contains("text");
             const bool has_text = text && text->is_string();
-            if (!has_text && !sig) {
+            if (!has_text && !valid_sig) {
                 ++dropped_;
                 continue;
             }
             const std::string_view chunk = has_text ? std::string_view(text->as_string()) : std::string_view{};
             if (bool_or(part, "thought")) {
-                if (block_ != Block::thinking || signed_)
-                    open(events, Block::thinking, json::object{{"type", "thinking"}, {"thinking", ""}, {"signature", ""}});
-                if (!chunk.empty())
-                    events.push_back(json::object{{"type", "content_block_delta"},
-                                                  {"index", index_},
-                                                  {"delta", json::object{{"type", "thinking_delta"}, {"thinking", chunk}}}});
-                if (sig) signature(events, *sig);
+                if (!chunk.empty() || valid_sig) {
+                    if (block_ != Block::thinking || signed_)
+                        open(events, Block::thinking, json::object{{"type", "thinking"}, {"thinking", ""}, {"signature", ""}});
+                    if (!chunk.empty())
+                        events.push_back(json::object{{"type", "content_block_delta"},
+                                                      {"index", index_},
+                                                      {"delta", json::object{{"type", "thinking_delta"}, {"thinking", chunk}}}});
+                    if (valid_sig) signature(events, *sig);
+                }
                 continue;
             }
-            if (sig) {
+            if (valid_sig) {
                 // The signature belongs to the turn's thinking: the open thinking
                 // block, else an empty one that exists only to carry it. Gemini
                 // sends a text answer's signature after the text, and a thinking
