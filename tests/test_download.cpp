@@ -182,3 +182,56 @@ TEST_CASE("four HTTPS connections improve per-connection throttled throughput", 
     // Synthetic per-connection bandwidth limit; this does not predict Internet/CDN speed.
     REQUIRE(parallel<single*0.85);
 }
+
+TEST_CASE("ensure_curl_initialized is safe under concurrent calls", "[setup][download]") {
+    std::vector<std::jthread> threads;
+    for (int i = 0; i < 8; ++i) threads.emplace_back([] { ensure_curl_initialized(); });
+    for (auto &t : threads) t.join();
+    SUCCEED();
+}
+
+TEST_CASE("downloader rejects non-regular cache or destination paths and cleans ranges on unsupported fallback",
+          "[setup][download]") {
+    auto root = fs::temp_directory_path() / ("ais2api-download-safe-" + random_hex(8));
+    fs::create_directories(root);
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{root};
+
+    const std::string digest(64, 'a');
+    const auto dir_dest = root / "dir-dest";
+    fs::create_directories(dir_dest);
+    try {
+        download_detail::download_with_options("https://example.invalid/a", dir_dest, digest, "", 16,
+                                               {1, {}, std::chrono::milliseconds(1)});
+        FAIL("Expected unsafe_path for directory destination");
+    } catch (const Error &error) {
+        CHECK(error.status == 400);
+        CHECK(error.code == "unsafe_path");
+    }
+
+    const auto dir_part_target = root / "file-target";
+    fs::create_directories(fs::path(dir_part_target.string() + ".part"));
+    try {
+        download_detail::download_with_options("https://example.invalid/a", dir_part_target, digest, "", 16,
+                                               {1, {}, std::chrono::milliseconds(1)});
+        FAIL("Expected unsafe_path for directory part cache");
+    } catch (const Error &error) {
+        CHECK(error.status == 400);
+        CHECK(error.code == "unsafe_path");
+    }
+
+    // Falling back via Segments::unsupported cleans up stale range files even if single stream fails.
+    DownloadFixture server;
+    const auto fallback_target = server.root / "fallback.bin";
+    const auto stale_marker = fs::path(fallback_target.string() + ".part.ranges.json");
+    const auto stale_range = fs::path(fallback_target.string() + ".part.range0");
+    atomic_write(stale_marker, "{}");
+    atomic_write(stale_range, "stale");
+    CHECK_THROWS_AS(download_detail::download_with_options(server.url(), fallback_target, server.digest(), "",
+                                                           server.body.size(), {1, {}, std::chrono::milliseconds(1)}),
+                    Error);
+    CHECK_FALSE(fs::exists(stale_marker));
+    CHECK_FALSE(fs::exists(stale_range));
+}

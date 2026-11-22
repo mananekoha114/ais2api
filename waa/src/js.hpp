@@ -10,6 +10,7 @@
 // C++ and never includes a SpiderMonkey header.
 #pragma once
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -142,7 +143,7 @@ class Context {
     friend bool dispatch_native(std::uintptr_t, std::int32_t, mz_call *);
     [[noreturn]] void fail();
     mz_context *context_ = nullptr;
-    std::vector<Native> natives_;
+    std::deque<Native> natives_;
     // Keeps interrupt() from another thread apart from destruction.
     std::mutex mutex_;
     bool closed_ = false;

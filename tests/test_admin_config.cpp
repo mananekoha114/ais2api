@@ -324,3 +324,22 @@ TEST_CASE("non-streaming keepalive is off by default and updates without restart
     direct.nonstream_keepalive_seconds = 121;
     CHECK_THROWS_AS(direct.validate(), Error);
 }
+TEST_CASE("config patches enforce admin_key length policy and request_bytes upper bound", "[config][admin]") {
+    AdminDirectory dir;
+    auto cfg = Config::load(dir.path / "config.json");
+    for (const auto* rejected : {"short", "1234567", "admin", "bad key 1"}) {
+        try {
+            (void)cfg.patched({{"admin_key", rejected}});
+            FAIL("Weak admin_key accepted in patch");
+        } catch (const Error& error) {
+            CHECK(error.status == 400);
+            CHECK(error.code == "admin_password_invalid");
+        }
+    }
+    CHECK(cfg.patched({{"admin_key", ""}}).admin_key.empty());
+    CHECK(cfg.patched({{"admin_key", "eightchr"}}).admin_key == "eightchr");
+
+    auto at_limit = cfg.patched({{"limits", json::object{{"request_bytes", 64ull * 1024 * 1024}}}});
+    CHECK(at_limit.limits.request_bytes == 64ull * 1024 * 1024);
+    CHECK_THROWS_AS(cfg.patched({{"limits", json::object{{"request_bytes", 64ull * 1024 * 1024 + 1}}}}), Error);
+}

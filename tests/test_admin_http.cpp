@@ -65,14 +65,16 @@ struct AdminServer {
         std::error_code ec; fs::remove_all(directory, ec);
     }
     http::response<http::string_body> call(http::verb method, std::string path,
-        std::string body = {}, std::string token = {}, std::string origin = {}) {
+        std::string body = {}, std::string token = {}, std::string origin = {},
+        std::string host = {}, std::initializer_list<std::pair<std::string, std::string>> extra = {}) {
         net::io_context io; tcp::socket socket(io);
         socket.connect({net::ip::make_address("127.0.0.1"), config.port});
         http::request<http::string_body> request(method, path, 11);
-        request.set(http::field::host, "127.0.0.1:" + std::to_string(config.port));
+        request.set(http::field::host, host.empty() ? "127.0.0.1:" + std::to_string(config.port) : host);
         request.set(http::field::content_type, "application/json");
         if (!token.empty()) request.set(http::field::authorization, "Bearer " + token);
         if (!origin.empty()) request.set(http::field::origin, origin);
+        for (const auto& [name, value] : extra) request.set(name, value);
         request.body() = std::move(body); request.prepare_payload(); http::write(socket, request);
         boost::beast::flat_buffer input; http::response<http::string_body> response;
         http::read(socket, input, response); return response;
@@ -496,4 +498,52 @@ TEST_CASE("management HTTP reports the CMake project version", "[http][admin]") 
     auto report = server.send(http::verb::post, "/diagnostics/export");
     REQUIRE(report.result_int() == 200);
     CHECK(string_or(object(report), "version") == expected);
+}
+TEST_CASE("management origin blocks DNS rebinding and default password rejects forwarding headers",
+          "[http][admin][security]") {
+    AdminServer server;
+    const auto port_str = std::to_string(server.config.port);
+    for (const auto& bad_host : {std::string("evil.example:") + port_str,
+                                 std::string("evil.example"),
+                                 std::string("localhost:99999"),
+                                 std::string("[127.0.0.1]:") + port_str,
+                                 std::string("[::1]junk")}) {
+        auto res = server.call(http::verb::get, "/api/admin/v1/status", {}, server.admin,
+                               "http://" + bad_host, bad_host);
+        INFO(bad_host);
+        CHECK(res.result_int() == 403);
+        CHECK(res.body().find("admin_origin") != std::string::npos);
+    }
+    for (const auto& ok_host : {std::string("127.0.0.1:") + port_str,
+                                std::string("LOCALHOST:") + port_str,
+                                std::string("[::1]:") + port_str}) {
+        auto res = server.call(http::verb::get, "/api/admin/v1/status", {}, server.admin,
+                               "http://" + ok_host, ok_host);
+        INFO(ok_host);
+        CHECK(res.result_int() == 200);
+    }
+    CHECK(server.call(http::verb::get, "/api/admin/v1/status", {}, server.admin,
+                      "https://allowed.example", "evil.example").result_int() == 200);
+
+    const std::string short_patch = R"({"admin_key":"short"})";
+    auto short_res = server.call(http::verb::patch, "/api/admin/v1/config", short_patch, server.admin);
+    CHECK(short_res.result_int() == 400);
+    CHECK(short_res.body().find("admin_password_invalid") != std::string::npos);
+
+    server.config.admin_key = std::string(default_admin_key);
+    atomic_write(server.config.config_file, json::serialize(server.config.to_json(true)), true);
+    local_call(server.config, {{"command", "config.reload"}});
+    const std::string initial(default_admin_key);
+    for (const auto* header : {"X-Forwarded-For", "Forwarded", "X-Real-IP"}) {
+        auto forwarded = server.call(http::verb::get, "/api/admin/v1/auth/check", {}, initial,
+                                     {}, {}, {{header, "1.2.3.4"}});
+        INFO(header);
+        CHECK(forwarded.result_int() == 403);
+        CHECK(forwarded.body().find("admin_default_password_remote") != std::string::npos);
+    }
+    const std::string pw_body = R"({"password":"new-strong-password"})";
+    auto forwarded_pw = server.call(http::verb::post, "/api/admin/v1/auth/password", pw_body, initial,
+                                    {}, {}, {{"X-Forwarded-For", "127.0.0.1"}});
+    CHECK(forwarded_pw.result_int() == 403);
+    CHECK(forwarded_pw.body().find("admin_default_password_remote") != std::string::npos);
 }

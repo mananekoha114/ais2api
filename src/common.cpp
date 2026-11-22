@@ -8,6 +8,7 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <array>
+#include <cerrno>
 #include <charconv>
 #include <fstream>
 #include <memory>
@@ -31,36 +32,47 @@ std::string hex(const unsigned char *data, std::size_t size) {
     }
     return out;
 }
+#ifdef _WIN32
+struct UserAcl {
+    PACL acl = nullptr;
+    UserAcl(const UserAcl &) = delete;
+    UserAcl &operator=(const UserAcl &) = delete;
+    explicit UserAcl(bool directory) {
+        HANDLE token{};
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+            throw Error(500, "permissions", "Cannot inspect current user");
+        DWORD length = 0;
+        GetTokenInformation(token, TokenUser, nullptr, 0, &length);
+        std::vector<unsigned char> buffer(length);
+        if (!GetTokenInformation(token, TokenUser, buffer.data(), length, &length)) {
+            CloseHandle(token);
+            throw Error(500, "permissions", "Cannot inspect current user");
+        }
+        CloseHandle(token);
+        EXPLICIT_ACCESSW access{};
+        access.grfAccessPermissions = GENERIC_ALL;
+        access.grfAccessMode = SET_ACCESS;
+        access.grfInheritance = directory ? SUB_CONTAINERS_AND_OBJECTS_INHERIT : NO_INHERITANCE;
+        access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        access.Trustee.TrusteeType = TRUSTEE_IS_USER;
+        access.Trustee.ptstrName =
+            reinterpret_cast<LPWSTR>(reinterpret_cast<TOKEN_USER *>(buffer.data())->User.Sid);
+        if (SetEntriesInAclW(1, &access, nullptr, &acl) != ERROR_SUCCESS)
+            throw Error(500, "permissions", "Cannot protect data path");
+    }
+    ~UserAcl() {
+        if (acl)
+            LocalFree(acl);
+    }
+};
+#endif
 void restrict_access(const fs::path &path, bool directory) {
 #ifdef _WIN32
-    HANDLE token{};
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
-        throw Error(500, "permissions", "Cannot inspect current user");
-    DWORD length = 0;
-    GetTokenInformation(token, TokenUser, nullptr, 0, &length);
-    std::vector<unsigned char> buffer(length);
-    if (!GetTokenInformation(token, TokenUser, buffer.data(), length, &length)) {
-        CloseHandle(token);
-        throw Error(500, "permissions", "Cannot inspect current user");
-    }
-    CloseHandle(token);
-    EXPLICIT_ACCESSW access{};
-    access.grfAccessPermissions = GENERIC_ALL;
-    access.grfAccessMode = SET_ACCESS;
-    access.grfInheritance = directory ? SUB_CONTAINERS_AND_OBJECTS_INHERIT : NO_INHERITANCE;
-    access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
-    access.Trustee.TrusteeType = TRUSTEE_IS_USER;
-    access.Trustee.ptstrName =
-        reinterpret_cast<LPWSTR>(reinterpret_cast<TOKEN_USER *>(buffer.data())->User.Sid);
-    PACL acl{};
-    auto error = SetEntriesInAclW(1, &access, nullptr, &acl);
-    if (error == ERROR_SUCCESS)
-        error =
-            SetNamedSecurityInfoW(const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
-                                  DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                                  nullptr, nullptr, acl, nullptr);
-    if (acl)
-        LocalFree(acl);
+    UserAcl user_acl(directory);
+    const auto error =
+        SetNamedSecurityInfoW(const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+                              DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                              nullptr, nullptr, user_acl.acl, nullptr);
     if (error != ERROR_SUCCESS)
         throw Error(500, "permissions", "Cannot protect data path");
 #else
@@ -155,6 +167,44 @@ void secure_directory(const fs::path &path) {
         throw Error(400, "unsafe_path", "Data directory cannot be a symbolic link");
     fs::create_directories(path);
     restrict_access(path, true);
+}
+void create_secret_file(const fs::path &path) {
+    if (fs::is_symlink(fs::symlink_status(path)))
+        throw Error(400, "unsafe_path", "Refusing to replace symbolic link");
+#ifdef _WIN32
+    UserAcl user_acl(false);
+    SECURITY_DESCRIPTOR sd{};
+    if (!InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION) ||
+        !SetSecurityDescriptorDacl(&sd, TRUE, user_acl.acl, FALSE) ||
+        !SetSecurityDescriptorControl(&sd, SE_DACL_PROTECTED, SE_DACL_PROTECTED))
+        throw Error(500, "permissions", "Cannot protect data path");
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = &sd;
+    sa.bInheritHandle = FALSE;
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE | WRITE_DAC, 0, &sa, CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        if (GetLastError() == ERROR_FILE_EXISTS || GetLastError() == ERROR_ALREADY_EXISTS)
+            throw Error(409, "backup_exists", "Backup target already exists");
+        throw Error(500, "permissions", "Cannot create private file");
+    }
+    CloseHandle(h);
+#else
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        if (errno == EEXIST)
+            throw Error(409, "backup_exists", "Backup target already exists");
+        throw Error(500, "permissions", "Cannot create private file");
+    }
+    const int rc = ::fchmod(fd, 0600);
+    ::close(fd);
+    if (rc != 0) {
+        std::error_code ec;
+        fs::remove(path, ec);
+        throw Error(500, "permissions", "Cannot protect private file");
+    }
+#endif
 }
 void atomic_write(const fs::path &path, std::string_view contents, bool secret) {
     fs::create_directories(path.parent_path());

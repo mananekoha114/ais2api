@@ -34,7 +34,7 @@ class ResponsesStream {
     static const json::array *first_parts(const json::object &aggregate);
     std::optional<Append> plan_append(const json::object &delta) const;
     void apply_append(const Append &plan, json::array &events);
-    json::object response();
+    json::object response(bool persist = false);
     std::string model_, id_, principal_;
     json::object options_, aggregate_;
     json::array output_;

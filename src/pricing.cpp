@@ -72,15 +72,17 @@ bool nontext(const json::object &usage) {
     }
     return false;
 }
-std::int64_t line_amount(std::int64_t tokens, std::int64_t price) {
+std::optional<std::int64_t> line_amount(std::int64_t tokens, std::int64_t price) {
+    if (tokens < 0 || price < 0)
+        return std::nullopt;
     // Split before multiplying to avoid overflowing even with large usage.
     auto whole = price / 1000;
     if (whole && tokens > exact_limit / whole)
-        throw Error(500, "cost_overflow", "Estimated cost exceeds supported precision");
+        return std::nullopt;
     auto amount = tokens * whole;
     auto fraction = (tokens * (price % 1000) + 500) / 1000;
     if (fraction > exact_limit - amount)
-        throw Error(500, "cost_overflow", "Estimated cost exceeds supported precision");
+        return std::nullopt;
     return amount + fraction;
 }
 } // namespace
@@ -237,26 +239,30 @@ json::object estimate_tokens(const json::object &usage, const json::object &quot
     }
     result["above_tokens"] = selected->at("above_tokens");
     std::int64_t amount = 0;
+    bool overflow = false;
     auto add = [&](std::string_view name, std::int64_t tokens, std::string_view key) {
         auto p = selected->if_contains(key);
-        if (tokens > 0 && (!p || !p->is_int64()))
+        if (tokens > 0 && (!p || !p->is_int64() || p->as_int64() < 0))
             return false;
-        auto price = p && p->is_int64() ? p->as_int64() : 0;
+        auto price = p && p->is_int64() && p->as_int64() >= 0 ? p->as_int64() : 0;
         auto cost = line_amount(tokens, price);
-        if (cost > exact_limit - amount)
-            throw Error(500, "cost_overflow", "Estimated cost exceeds supported precision");
-        amount += cost;
+        if (!cost || *cost > exact_limit - amount) {
+            overflow = true;
+            return false;
+        }
+        amount += *cost;
         result.at("lines").as_array().emplace_back(
             json::object{{"kind", name},
                          {"tokens", tokens},
                          {"rate_pico", p ? *p : json::value(nullptr)},
-                         {"amount_nano", cost}});
+                         {"amount_nano", *cost}});
         return true;
     };
     if (!add("input", *prompt - *cached, "input_pico") ||
         !add("cache_read", *cached, "cache_pico") || !add("output", visible, "output_pico") ||
         !add("reasoning", *thoughts, "output_pico")) {
-        result["reason"] = "missing_price";
+        result.at("lines").as_array().clear();
+        result["reason"] = overflow ? "cost_overflow" : "missing_price";
         return result;
     }
     result["amount_nano"] = amount;

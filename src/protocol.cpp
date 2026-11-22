@@ -82,6 +82,11 @@ std::string upper(std::string value) {
         c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     return value;
 }
+std::string lower(std::string value) {
+    for (auto &c : value)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return value;
+}
 // Proto JSON accepts both the field name and its lowerCamelCase spelling.
 // Only visit protocol objects: tool arguments, responses and schema property
 // names belong to the caller and must never be rewritten.
@@ -383,12 +388,60 @@ json::array content_wire(const json::object &c, bool system = false) {
     return {encoded, system ? "user" : role};
 }
 json::array encode_native_schema(const json::object &s);
+std::string infer_schema_type(const json::object &s, bool &nullable, unsigned depth = 0) {
+    if (depth > 64)
+        invalid("schema exceeds depth limit");
+    std::string type;
+    if (auto p = s.if_contains("type")) {
+        if (p->is_string()) {
+            auto t = lower(std::string(p->as_string()));
+            if (t == "null")
+                nullable = true;
+            else
+                type = std::move(t);
+        } else if (p->is_array()) {
+            for (auto &v : p->as_array()) {
+                auto t = lower(str(v));
+                if (t == "null")
+                    nullable = true;
+                else if (type.empty())
+                    type = std::move(t);
+                else
+                    throw UnsupportedSchema("Only nullable single-type arrays are supported");
+            }
+        } else {
+            invalid("schema.type must be a string or array");
+        }
+    }
+    for (auto k : {"oneOf", "anyOf", "allOf"}) {
+        if (auto p = s.if_contains(k)) {
+            const bool is_union = std::string_view(k) != "allOf";
+            for (auto &v : array(*p, "schema union")) {
+                auto &branch = object(v, "schema branch");
+                bool branch_nullable = false;
+                auto candidate = infer_schema_type(branch, branch_nullable, depth + 1);
+                if (is_union && branch_nullable)
+                    nullable = true;
+                if (type.empty() && !candidate.empty())
+                    type = std::move(candidate);
+            }
+        }
+    }
+    if (type.empty()) {
+        if (s.if_contains("properties"))
+            type = "object";
+        else if (s.if_contains("items"))
+            type = "array";
+    }
+    return type;
+}
 json::array schemas(const json::value &v, bool allow_null) {
     json::array out;
     for (auto &item : array(v, "schema union")) {
         auto &branch = object(item, "schema branch");
-        auto type = string_or(branch, "type");
-        if ((type == "null" || type == "NULL") && allow_null)
+        bool branch_nullable = false;
+        auto branch_type = infer_schema_type(branch, branch_nullable);
+        if (allow_null && branch_type.empty() && branch_nullable)
             continue;
         out.push_back(encode_native_schema(branch));
     }
@@ -847,55 +900,8 @@ json::array encode_native_schema(const json::object &s) {
             for (auto &v : array(*p, k))
                 if (!v.is_string())
                     invalid(std::string("schema.") + k + " must contain strings");
-    std::string type = string_or(s, "type");
     bool nullable = false;
-    for (auto k : {"oneOf", "anyOf"})
-        if (auto p = s.if_contains(k))
-            for (auto &branch : array(*p, "schema union")) {
-                auto t = string_or(object(branch, "schema branch"), "type");
-                if (t == "null" || t == "NULL")
-                    nullable = true;
-            }
-    if (auto p = s.if_contains("type"); p && p->is_array()) {
-        for (auto &v : p->as_array()) {
-            auto t = str(v);
-            if (t == "null" || t == "NULL")
-                nullable = true;
-            else if (type.empty())
-                type = t;
-            else
-                throw UnsupportedSchema("Only nullable single-type arrays are supported");
-        }
-    }
-    std::transform(type.begin(), type.end(), type.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (type.empty()) {
-        if (s.if_contains("properties"))
-            type = "object";
-        else if (s.if_contains("items"))
-            type = "array";
-        else
-            for (auto k : {"oneOf", "anyOf", "allOf"})
-                if (auto p = s.if_contains(k); p && p->is_array())
-                    for (auto &v : p->as_array()) {
-                        auto &branch = object(v, "schema branch");
-                        auto candidate = string_or(branch, "type");
-                        if (candidate == "null" || candidate == "NULL") {
-                            nullable = true;
-                            continue;
-                        }
-                        if (type.empty()) {
-                            if (!candidate.empty())
-                                type = candidate;
-                            else if (branch.if_contains("properties"))
-                                type = "object";
-                            else if (branch.if_contains("items"))
-                                type = "array";
-                        }
-                    }
-    }
-    std::transform(type.begin(), type.end(), type.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::string type = infer_schema_type(s, nullable);
     auto it = types.find(type);
     if (it == types.end() && (type.empty() || type == "null"))
         throw UnsupportedSchema("Schema requires a supported concrete type");
@@ -1117,7 +1123,8 @@ void prepare_optional_schema(json::object &owner, std::string_view key, Request 
     }
     try {
         json::array paths;
-        auto schema = prepare_schema(object(*value, "schema"), &request.ignored_parameters, name, discard, &paths);
+        auto schema = prepare_schema(object(*value, "schema"), &request.ignored_parameters, name,
+                                     discard, json_text ? &paths : nullptr);
         // Concrete types and unions are checked here too, so a capability
         // failure can drop this optional schema before transport validation.
         encode_native_schema(schema);
@@ -1147,9 +1154,11 @@ const json::object *thinking_config(const json::object &request) {
 // The level a model uses without thinkingConfig, per the published Gemini
 // thinking guide. Unlisted text models keep HIGH like the reference client.
 std::string default_thinking_level(std::string_view family, bool image) {
+    if (family.starts_with("gemini-4"))
+        return "MEDIUM";
     if (image || family.starts_with("gemini-3.1-flash-lite") || family.starts_with("gemini-3.5-flash-lite"))
         return "MINIMAL";
-    if (family.starts_with("gemini-4") || family.starts_with("gemini-3.6-flash") ||
+    if (family.starts_with("gemini-3.6-flash") ||
         family.starts_with("gemini-3.8-flash"))
         return "MEDIUM";
     return "HIGH";
@@ -1220,10 +1229,13 @@ Request normalize_native(std::string model, const json::object &input, bool stre
     }
     merge_request_defaults(r.gemini, family_defaults);
     if (auto g = r.gemini.if_contains("generationConfig"); gemini4 && g && g->is_object())
-        if (auto max = g->as_object().if_contains("maxOutputTokens"); max && (max->is_int64() || max->is_uint64())) {
-            if (number(*max, INT64_MAX) > 1048576)
+        if (auto max = g->as_object().if_contains("maxOutputTokens");
+            max && (max->is_int64() || max->is_uint64())) {
+            const auto budget = number(*max, INT64_MAX);
+            if (budget > 1048576)
                 invalid("Gemini 4 maxOutputTokens exceeds the 1048576-token context ceiling");
-            r.output_budget = number(*max, 0);
+            if (budget > 0)
+                r.output_budget = budget;
         }
     if (config.ignore_unsupported_parameters)
         discard_gemini_controls(r.gemini, r.model, r.ignored_parameters);
@@ -1501,7 +1513,8 @@ json::object decode_chunk(const json::value &wire) {
                     {"parts", parts}};
             }
             if (at(c, 1).is_number())
-                candidate["finishReason"] = finish_name(number(c[1]));
+                if (auto finish = finish_name(number(c[1])); finish != "FINISH_REASON_UNSPECIFIED")
+                    candidate["finishReason"] = std::move(finish);
             if (at(c, 3).is_string())
                 candidate["finishMessage"] = c[3];
             // Only a string is a checkpoint. Other values stay ignored for every
@@ -1517,15 +1530,27 @@ json::object decode_chunk(const json::value &wire) {
     }
     if (at(a, 2).is_array()) {
         auto &u = a[2].as_array();
-        auto prompt = number(at(u, 0)), visible = number(at(u, 1)), thoughts = number(at(u, 9));
-        if (prompt < 0 || visible < 0 || thoughts < 0 || visible > INT64_MAX - thoughts ||
-            prompt > INT64_MAX - visible - thoughts)
+        auto usage_count = [](const json::value &v, std::int64_t fallback) -> std::int64_t {
+            if (v.is_null())
+                return fallback;
+            if (v.is_int64() && v.as_int64() >= 0)
+                return v.as_int64();
+            if (v.is_uint64() && v.as_uint64() <= static_cast<std::uint64_t>(INT64_MAX))
+                return static_cast<std::int64_t>(v.as_uint64());
             throw Error(502, "invalid_upstream", "Invalid token usage counts");
+        };
+        const auto prompt = usage_count(at(u, 0), 0);
+        const auto visible = usage_count(at(u, 1), 0);
+        const auto thoughts = usage_count(at(u, 9), 0);
+        if (visible > INT64_MAX - thoughts || prompt > INT64_MAX - visible - thoughts)
+            throw Error(502, "invalid_upstream", "Invalid token usage counts");
+        const auto total = usage_count(at(u, 2), prompt + visible + thoughts);
+        const auto cached = usage_count(at(u, 3), 0);
         out["usageMetadata"] =
             json::object{{"promptTokenCount", prompt},
                          {"candidatesTokenCount", visible + thoughts},
-                         {"totalTokenCount", number(at(u, 2), prompt + visible + thoughts)},
-                         {"cachedContentTokenCount", number(at(u, 3))},
+                         {"totalTokenCount", total},
+                         {"cachedContentTokenCount", cached},
                          {"thoughtsTokenCount", thoughts}};
     }
     if (at(a, 7).is_string())
@@ -1605,9 +1630,12 @@ bool has_content(const json::object &event) {
 }
 
 bool joins_text(const json::object &a, const json::object &b) {
-    return a.if_contains("text") && b.if_contains("text") && !a.if_contains("thoughtSignature") &&
-           !b.if_contains("thoughtSignature") && bool_or(a, "thought") == bool_or(b, "thought") &&
-           a.size() <= 2 && b.size() <= 2 && a.at("text").is_string() && b.at("text").is_string();
+    auto plain = [](const json::object &p) {
+        auto t = p.if_contains("text");
+        auto th = p.if_contains("thought");
+        return t && t->is_string() && (!th || th->is_bool()) && p.size() == (th ? 2u : 1u);
+    };
+    return plain(a) && plain(b) && bool_or(a, "thought") == bool_or(b, "thought");
 }
 std::size_t merge_growth_bound(const json::object &event, std::size_t candidates, std::size_t parts) {
     return json_size(event) + 1 + parts + 96 * candidates;
@@ -1639,9 +1667,15 @@ void apply_event(json::object &next, const json::object &event) {
                 dest.push_back(json::object{{"index", idx}});
                 target = &dest.back().as_object();
             }
-            for (auto &ck : c)
-                if (ck.key() != "content")
-                    (*target)[ck.key()] = ck.value();
+            for (auto &ck : c) {
+                if (ck.key() == "content")
+                    continue;
+                if (ck.key() == "finishReason" &&
+                    (!ck.value().is_string() || ck.value().as_string().empty() ||
+                     ck.value().as_string() == "FINISH_REASON_UNSPECIFIED"))
+                    continue;
+                (*target)[ck.key()] = ck.value();
+            }
             if (auto content = c.if_contains("content"); content && content->is_object()) {
                 if (!target->if_contains("content"))
                     (*target)["content"] =
@@ -1882,7 +1916,7 @@ json::object openai_message(const json::object &content, Store *store, std::stri
                 text += str(*t);
             if (auto t = part.if_contains("text"); t && t->is_string() && bool_or(part, "thought"))
                 reasoning += str(*t);
-            if (!part.if_contains("functionCall"))
+            if (!part.if_contains("functionCall") && !bool_or(part, "thought"))
                 if (auto sig = part.if_contains("thoughtSignature"))
                     text_signature = *sig;
             if (part.if_contains("thoughtSignature") || bool_or(part, "thought") ||
@@ -1891,14 +1925,34 @@ json::object openai_message(const json::object &content, Store *store, std::stri
                 rich = true;
             if (auto f = part.if_contains("functionCall")) {
                 auto fn = object(*f, "functionCall");
-                auto id = string_or(fn, "id");
-                const auto upstream_id = id;
+                auto upstream_id = string_or(fn, "id");
+                const std::string registry_key =
+                    upstream_id.empty()
+                        ? "call_" + sha256(std::string(response_id) + ":" + json::serialize(fn) +
+                                           ":" + std::to_string(store ? indices.size() : calls.size()))
+                                        .substr(0, 24)
+                        : upstream_id;
                 std::size_t index = calls.size();
-                if (id.empty()) {
-                    const auto ordinal = store ? indices.size() : calls.size();
-                    id = "call_" + sha256(std::string(response_id) + ":" + json::serialize(fn) +
-                                          ":" + std::to_string(ordinal))
-                                       .substr(0, 24);
+                if (store) {
+                    if (auto found = indices.if_contains(registry_key))
+                        index = static_cast<std::size_t>(number(*found));
+                    else {
+                        if (indices.size() >= 4096)
+                            throw Error(413, "tool_registry_limit",
+                                        "Response contains too many distinct tool calls");
+                        index = indices.size();
+                        indices[registry_key] = index;
+                        store->put_tool(principal, registry, indices);
+                    }
+                }
+                const auto sig = part.if_contains("thoughtSignature");
+                const std::string id =
+                    (sig || upstream_id.empty())
+                        ? signed_call_id(upstream_id, sig ? *sig : json::value(nullptr),
+                                         sha256(std::string(response_id) + ":" + registry_key)
+                                             .substr(0, 16))
+                        : upstream_id;
+                if (sig || upstream_id.empty()) {
                     native_content.at("parts")
                         .as_array()[part_index]
                         .as_object()
@@ -1906,16 +1960,6 @@ json::object openai_message(const json::object &content, Store *store, std::stri
                         .as_object()["id"] = id;
                 }
                 if (store) {
-                    if (auto found = indices.if_contains(id))
-                        index = static_cast<std::size_t>(number(*found));
-                    else {
-                        if (indices.size() >= 4096)
-                            throw Error(413, "tool_registry_limit",
-                                        "Response contains too many distinct tool calls");
-                        index = indices.size();
-                        indices[id] = index;
-                        store->put_tool(principal, registry, indices);
-                    }
                     json::object metadata = store->get_tool(principal, id).value_or(json::object{});
                     metadata.erase("thoughtSignature");
                     metadata["name"] = string_or(fn, "name");
@@ -1923,12 +1967,8 @@ json::object openai_message(const json::object &content, Store *store, std::stri
                     if (auto args = fn.if_contains("args"))
                         metadata["args"] = *args;
                     store->put_tool(principal, id, metadata);
-                }
-                if (auto sig = part.if_contains("thoughtSignature"); sig || upstream_id.empty()) {
-                    id = signed_call_id(upstream_id, sig ? *sig : json::value(nullptr),
-                                        sha256(std::string(response_id) + ":" + id).substr(0, 16));
-                    native_content.at("parts").as_array()[part_index].as_object()
-                        .at("functionCall").as_object()["id"] = id;
+                    if (!upstream_id.empty() && upstream_id != id)
+                        store->put_tool(principal, upstream_id, metadata);
                 }
                 json::object call{
                     {"id", id},
@@ -1972,6 +2012,10 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
     // still validated normally; never retry a blanket 400 with a weaker body.
     for (auto key : {"seed", "logit_bias", "service_tier"})
         if (auto value = input.if_contains(key)) {
+            if (value->is_null()) {
+                input.erase(key);
+                continue;
+            }
             if (!config.ignore_unsupported_parameters)
                 invalid(std::string("OpenAI request: unsupported field ") + key);
             if (std::string_view(key) == "seed" && !(value->is_int64() || value->is_uint64()))
@@ -1985,13 +2029,13 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
             discard_parameter(input, key, discarded, key);
         }
     if (config.ignore_unsupported_parameters) {
-        if (auto n = input.if_contains("n"); n && (n->is_int64() || n->is_uint64()) && number(*n) > 1)
+        if (auto n = input.if_contains("n"); n && !n->is_null() && (n->is_int64() || n->is_uint64()) && number(*n) > 1)
             discard_parameter(input, "n", discarded, "n");
-        if (auto persistence = input.if_contains("store"); persistence && persistence->is_bool() && persistence->as_bool())
+        if (auto persistence = input.if_contains("store"); persistence && !persistence->is_null() && persistence->is_bool() && persistence->as_bool())
             discard_parameter(input, "store", discarded, "store");
-        if (auto parallel = input.if_contains("parallel_tool_calls"); parallel && parallel->is_bool() && !parallel->as_bool())
+        if (auto parallel = input.if_contains("parallel_tool_calls"); parallel && !parallel->is_null() && parallel->is_bool() && !parallel->as_bool())
             discard_parameter(input, "parallel_tool_calls", discarded, "parallel_tool_calls");
-        if (auto effort = input.if_contains("reasoning_effort"); effort && (*effort == "none" || *effort == "xhigh"))
+        if (auto effort = input.if_contains("reasoning_effort"); effort && !effort->is_null() && (*effort == "none" || *effort == "xhigh"))
             discard_parameter(input, "reasoning_effort", discarded, "reasoning_effort");
     }
     keys(input,
@@ -2024,19 +2068,23 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
     auto m = input.if_contains("messages");
     if (!m)
         invalid("messages is required");
-    if (auto n = input.if_contains("n"); n && number(*n) != 1)
+    if (auto n = input.if_contains("n"); n && !n->is_null() && number(*n) != 1)
         invalid("Only n=1 is supported");
-    if (auto v = input.if_contains("store"); v && (!v->is_bool() || v->as_bool()))
+    if (auto v = input.if_contains("store"); v && !v->is_null() && (!v->is_bool() || v->as_bool()))
         invalid("OpenAI store is not supported");
-    if (auto v = input.if_contains("stream"); v && !v->is_bool())
+    if (auto v = input.if_contains("stream"); v && !v->is_null() && !v->is_bool())
         invalid("stream must be boolean");
-    if (auto v = input.if_contains("parallel_tool_calls"); v && !v->is_bool())
+    if (auto v = input.if_contains("parallel_tool_calls"); v && !v->is_null() && !v->is_bool())
         invalid("parallel_tool_calls must be boolean");
-    if (auto v = input.if_contains("parallel_tool_calls"); v && !v->as_bool())
+    if (auto v = input.if_contains("parallel_tool_calls"); v && !v->is_null() && !v->as_bool())
         invalid("parallel_tool_calls=false is not supported by this upstream");
     json::array contents, system;
     bool conversation_started = false, previous_tool = false;
     std::map<std::string, std::string> call_names;
+    auto non_null = [](const json::object &o, std::string_view key) -> const json::value * {
+        auto p = o.if_contains(key);
+        return p && !p->is_null() ? p : nullptr;
+    };
     for (auto &message : array(*m, "messages")) {
         auto &msg = object(message, "message");
         keys(msg, {"role", "content", "name", "tool_calls", "tool_call_id", "refusal", "ais2api",
@@ -2048,9 +2096,9 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
             invalid("Unsupported message role");
         auto c = msg.if_contains("content");
         auto parts = c ? message_parts(*c) : json::array{};
-        const auto reasoning = msg.if_contains("reasoning_content");
-        const auto signature = msg.if_contains("thought_signature");
-        const auto alias_signature = msg.if_contains("signature");
+        const auto reasoning = non_null(msg, "reasoning_content");
+        const auto signature = non_null(msg, "thought_signature");
+        const auto alias_signature = non_null(msg, "signature");
         if ((reasoning || signature || alias_signature) && role != "assistant")
             invalid("Reasoning and signature fields require assistant role");
         for (auto field : {reasoning, signature, alias_signature})
@@ -2060,7 +2108,7 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
             invalid("thought_signature conflicts with signature");
         auto supplied_signature = signature ? signature : alias_signature;
         bool native = false;
-        if (auto ext = msg.if_contains("ais2api")) {
+        if (auto ext = non_null(msg, "ais2api")) {
             auto &e = object(*ext, "message.ais2api");
             keys(e, {"gemini_content"}, "message.ais2api");
             auto p = e.if_contains("gemini_content");
@@ -2075,7 +2123,7 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
             parts = array(gc.at("parts"), "gemini_content.parts");
             native = true;
         }
-        if (auto tc = msg.if_contains("tool_calls")) {
+        if (auto tc = non_null(msg, "tool_calls")) {
             if (role != "assistant")
                 invalid("tool_calls requires assistant role");
             for (auto &value : array(*tc, "tool_calls")) {
@@ -2097,7 +2145,7 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
                 if (!decoded.id.empty()) function["id"] = decoded.id;
                 json::object part{{"functionCall", function}};
                 if (decoded.signature) part["thoughtSignature"] = *decoded.signature;
-                if (store && !decoded.signature)
+                if (store)
                     if (auto metadata = store->get_tool(principal, id)) {
                         if (auto old_name = metadata->if_contains("name");
                             old_name && str(*old_name) != name)
@@ -2207,27 +2255,29 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
                                   {"frequency_penalty", "frequencyPenalty"},
                                   {"logprobs", "responseLogprobs"},
                                   {"top_logprobs", "logprobs"}})
-        if (auto p = input.if_contains(source))
+        if (auto p = non_null(input, source))
             gen[target] = *p;
-    if (input.if_contains("max_tokens") && input.if_contains("max_completion_tokens"))
+    const auto max_tokens = non_null(input, "max_tokens");
+    const auto max_completion_tokens = non_null(input, "max_completion_tokens");
+    if (max_tokens && max_completion_tokens)
         invalid("max_tokens conflicts with max_completion_tokens");
-    if (auto p = input.if_contains("max_tokens"))
-        gen["maxOutputTokens"] = *p;
-    if (auto p = input.if_contains("max_completion_tokens"))
-        gen["maxOutputTokens"] = *p;
-    if (auto p = input.if_contains("stop")) {
+    if (max_tokens)
+        gen["maxOutputTokens"] = *max_tokens;
+    if (max_completion_tokens)
+        gen["maxOutputTokens"] = *max_completion_tokens;
+    if (auto p = non_null(input, "stop")) {
         if (p->is_string())
             gen["stopSequences"] = json::array{*p};
         else
             gen["stopSequences"] = array(*p, "stop");
     }
-    if (auto p = input.if_contains("reasoning_effort")) {
+    if (auto p = non_null(input, "reasoning_effort")) {
         auto level = str(*p);
         std::transform(level.begin(), level.end(), level.begin(),
                        [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
         gen["thinkingConfig"] = json::object{{"thinkingLevel", level}};
     }
-    if (auto p = input.if_contains("response_format")) {
+    if (auto p = non_null(input, "response_format")) {
         auto &f = object(*p, "response_format");
         keys(f, {"type", "json_schema"}, "response_format");
         auto type = required_string(f, "type");
@@ -2239,7 +2289,7 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
                 invalid("json_schema is required");
             auto &schema = object(*q, "json_schema");
             keys(schema, {"name", "description", "strict", "schema"}, "json_schema");
-            if (auto strict = schema.if_contains("strict"); strict && !strict->is_bool())
+            if (auto strict = non_null(schema, "strict"); strict && !strict->is_bool())
                 invalid("json_schema.strict must be boolean");
             if (bool_or(schema, "strict")) {
                 if (!config.ignore_unsupported_parameters)
@@ -2256,7 +2306,7 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
     }
     if (!gen.empty())
         body["generationConfig"] = gen;
-    if (auto p = input.if_contains("tools")) {
+    if (auto p = non_null(input, "tools")) {
         json::array functions;
         for (auto &v : array(*p, "tools")) {
             auto &t = object(v, "tool");
@@ -2264,17 +2314,20 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
             if (string_or(t, "type") != "function")
                 invalid("Only function tools are supported in standard OpenAI tools");
             auto f = object(required_value(t, "function"), "function");
-            if (auto strict = f.if_contains("strict")) {
+            if (auto strict = non_null(f, "strict")) {
                 if (!strict->is_bool() || (strict->as_bool() && !config.ignore_unsupported_parameters))
                     invalid("strict function schema is not supported");
                 if (strict->as_bool()) ignored_parameter(discarded, "tools.function.strict");
-                f.erase("strict");
             }
+            for (auto optional : {"strict", "description", "parameters"})
+                if (optional == std::string_view("strict") ||
+                    (f.if_contains(optional) && f.at(optional).is_null()))
+                    f.erase(optional);
             functions.push_back(f);
         }
         body["tools"] = json::array{json::object{{"functionDeclarations", functions}}};
     }
-    if (auto p = input.if_contains("tool_choice")) {
+    if (auto p = non_null(input, "tool_choice")) {
         json::object choice;
         tool_choice(choice, *p);
         auto &calling = choice.at("toolConfig").as_object().at("functionCallingConfig").as_object();
@@ -2282,10 +2335,10 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
             ignored_parameter(discarded, "tool_choice");
         else body["toolConfig"] = choice.at("toolConfig");
     }
-    if (auto p = input.if_contains("ais2api")) {
+    if (auto p = non_null(input, "ais2api")) {
         auto &ext = object(*p, "ais2api");
         keys(ext, {"gemini"}, "ais2api");
-        if (auto g = ext.if_contains("gemini")) {
+        if (auto g = non_null(ext, "gemini")) {
             auto extension = object(*g, "ais2api.gemini");
             canonical_gemini(extension);
             apply_extension(body, extension);
@@ -2293,45 +2346,47 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
     }
     // Search runs as on a `*-search` model; its options have no verified
     // private wire mapping and only select the tool.
-    const bool search = input.if_contains("web_search_options") != nullptr;
-    if (auto p = input.if_contains("web_search_options")) {
+    const bool search = non_null(input, "web_search_options") != nullptr;
+    if (auto p = non_null(input, "web_search_options")) {
         auto &options = object(*p, "web_search_options");
         keys(options, {"search_context_size", "user_location", "filters"}, "web_search_options");
-        if (auto size = options.if_contains("search_context_size");
+        if (auto size = non_null(options, "search_context_size");
             size && !(size->is_string() && (*size == "low" || *size == "medium" || *size == "high")))
             invalid("search_context_size must be low, medium or high");
-        if (auto value = options.if_contains("user_location")) {
+        if (auto value = non_null(options, "user_location")) {
             auto &location = object(*value, "user_location");
             keys(location, {"type", "approximate"}, "user_location");
             if (string_or(location, "type") != "approximate")
                 invalid("user_location.type must be approximate");
-            if (auto approximate = location.if_contains("approximate")) {
+            if (auto approximate = non_null(location, "approximate")) {
                 auto &fields = object(*approximate, "user_location.approximate");
                 keys(fields, {"city", "country", "region", "timezone"}, "user_location.approximate");
                 for (auto &kv : fields)
-                    if (!kv.value().is_string()) invalid("user_location fields must be strings");
+                    if (!kv.value().is_null() && !kv.value().is_string())
+                        invalid("user_location fields must be strings");
             }
         }
         // Responses web_search domain filters arrive here through the bridge.
-        if (auto value = options.if_contains("filters")) {
+        if (auto value = non_null(options, "filters")) {
             auto &filters = object(*value, "filters");
             keys(filters, {"allowed_domains"}, "filters");
-            if (auto domains = filters.if_contains("allowed_domains"))
+            if (auto domains = non_null(filters, "allowed_domains"))
                 for (auto &domain : array(*domains, "allowed_domains"))
                     if (!domain.is_string()) invalid("allowed_domains must contain strings");
         }
         for (auto &kv : options)
-            ignored_parameter(discarded, "web_search_options." + std::string(kv.key()));
+            if (!kv.value().is_null())
+                ignored_parameter(discarded, "web_search_options." + std::string(kv.key()));
     }
     auto request = normalize_native(model, body, bool_or(input, "stream"), config, search, true);
     for (const auto &parameter : discarded)
         ignored_parameter(request.ignored_parameters, str(parameter));
     request.protocol = Protocol::openai;
     request.principal = std::move(principal);
-    if (auto p = input.if_contains("stream_options")) {
+    if (auto p = non_null(input, "stream_options")) {
         auto &options = object(*p, "stream_options");
         keys(options, {"include_usage"}, "stream_options");
-        if (auto include = options.if_contains("include_usage"); include && !include->is_bool())
+        if (auto include = non_null(options, "include_usage"); include && !include->is_bool())
             invalid("include_usage must be boolean");
         request.include_usage = bool_or(options, "include_usage");
     }
@@ -2382,11 +2437,14 @@ json::object openai_delta(const json::object &gemini, std::string_view model, st
                 c["content"] = std::move(native_content);
             json::value reason;
             if (auto f = c.if_contains("finishReason")) {
-                bool called = delta.if_contains("tool_calls") != nullptr;
-                if (!called && store)
-                    if (auto state = store->get_tool(principal, "stream:" + std::string(id)))
-                        called = !state->empty();
-                reason = finish_openai(str(*f), called);
+                auto finish = str(*f);
+                if (!finish.empty() && finish != "FINISH_REASON_UNSPECIFIED") {
+                    bool called = delta.if_contains("tool_calls") != nullptr;
+                    if (!called && store)
+                        if (auto state = store->get_tool(principal, "stream:" + std::string(id)))
+                            called = !state->empty();
+                    reason = finish_openai(std::move(finish), called);
+                }
             }
             choices.push_back(
                 json::object{{"index", c.if_contains("index") ? c.at("index") : json::value(0)},

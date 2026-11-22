@@ -20,6 +20,7 @@
 #include "ais2api/runtime.hpp"
 #include "ais2api/store.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <condition_variable>
 #include <map>
@@ -78,8 +79,20 @@ std::string query_escape(std::string_view text) {
 }
 std::string host_of(std::string_view url) {
     const auto scheme = url.find("://");
-    auto host = scheme == std::string_view::npos ? url : url.substr(scheme + 3);
-    return std::string(host.substr(0, host.find_first_of("/?#:")));
+    auto rest = scheme == std::string_view::npos ? url : url.substr(scheme + 3);
+    auto authority = rest.substr(0, rest.find_first_of("/?#"));
+    if (const auto at = authority.rfind('@'); at != std::string_view::npos) authority.remove_prefix(at + 1);
+    if (!authority.empty() && authority.front() == '[') {
+        const auto close = authority.find(']');
+        if (close == std::string_view::npos) return {};
+        if (close + 1 < authority.size() && authority[close + 1] != ':') return {};
+        authority = authority.substr(0, close + 1);
+    } else if (const auto port = authority.rfind(':'); port != std::string_view::npos) {
+        authority = authority.substr(0, port);
+    }
+    std::string host(authority);
+    for (auto &c : host) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return host;
 }
 std::vector<std::string> header_values(const browser_detail::HttpHeaders &headers, std::string_view name) {
     std::vector<std::string> values;
@@ -116,6 +129,56 @@ bool cacheable_hash(std::string_view hash) {
     return !hash.empty() && hash.size() <= 128 &&
            std::all_of(hash.begin(), hash.end(), [](unsigned char c) { return std::isalnum(c) || c == '-' || c == '_'; });
 }
+// Combines a caller cancellation token with an operation timeout so WAA calls
+// distinguish caller cancellation (499 cancelled) from timeout (504 waa_timeout).
+class DeadlineToken {
+  public:
+    DeadlineToken(std::stop_token parent, std::chrono::milliseconds timeout)
+        : deadline_(Clock::now() + timeout), callback_(parent, ForwardStop{source_}) {
+        if (parent.stop_requested()) source_.request_stop();
+        if (!source_.stop_requested()) {
+            watcher_ = std::jthread([this](std::stop_token done) {
+                std::unique_lock lock(mutex_);
+                const bool expired = !cv_.wait_until(lock, done, deadline_, [&] { return finished_; }) && !done.stop_requested();
+                lock.unlock();
+                if (expired) {
+                    timed_out_.store(true, std::memory_order_release);
+                    source_.request_stop();
+                }
+            });
+        }
+    }
+    ~DeadlineToken() {
+        {
+            std::lock_guard lock(mutex_);
+            finished_ = true;
+        }
+        cv_.notify_all();
+        if (watcher_.joinable()) {
+            watcher_.request_stop();
+            watcher_.join();
+        }
+    }
+    DeadlineToken(const DeadlineToken &) = delete;
+    DeadlineToken &operator=(const DeadlineToken &) = delete;
+
+    std::stop_token token() const noexcept { return source_.get_token(); }
+    bool timed_out() const noexcept { return timed_out_.load(std::memory_order_acquire); }
+
+  private:
+    struct ForwardStop {
+        std::stop_source &target;
+        void operator()() const noexcept { target.request_stop(); }
+    };
+    Clock::time_point deadline_;
+    std::mutex mutex_;
+    std::condition_variable_any cv_;
+    bool finished_ = false;
+    std::atomic<bool> timed_out_{false};
+    std::stop_source source_;
+    std::stop_callback<ForwardStop> callback_;
+    std::jthread watcher_;
+};
 } // namespace
 
 struct SpiderMonkeyGateway::Impl {
@@ -152,6 +215,7 @@ struct SpiderMonkeyGateway::Impl {
     std::string platform;
     browser_detail::GoogleAuthorizationCache authorization_cache;
     Clock::time_point cookies_saved_at{};
+    bool cookies_dirty = false;
 
     // What loading the page gave.
     struct Page {
@@ -212,6 +276,7 @@ struct SpiderMonkeyGateway::Impl {
         }
         drop_page();
         http.reset();
+        cookies_dirty = false;
         active_identity.reset();
         account_id.clear();
         account_fingerprint.clear();
@@ -384,7 +449,8 @@ struct SpiderMonkeyGateway::Impl {
     }
 
     std::string authorization() {
-        auto value = authorization_cache.authorization([&] { return http->cookies(); });
+        auto value = authorization_cache.authorization(
+            [&] { return http ? browser_detail::cookies_for_host(http->cookies(), "aistudio.google.com") : json::array{}; });
         if (value.empty()) throw Error(401, "missing_cookies", "The account's cookies cannot sign requests");
         return value;
     }
@@ -623,9 +689,19 @@ struct SpiderMonkeyGateway::Impl {
             phase = "waa_start";
         }
         const auto started = Clock::now();
-        auto runtime = std::make_unique<waa::Runtime>(std::move(options), token);
-        phase = "waa_settle";
-        runtime->settle(token);
+        DeadlineToken deadline(token, 45s);
+        std::unique_ptr<waa::Runtime> runtime;
+        try {
+            runtime = std::make_unique<waa::Runtime>(std::move(options), deadline.token());
+            phase = "waa_settle";
+            runtime->settle(deadline.token());
+        } catch (const Error &error) {
+            if (error.code == "cancelled") {
+                check_cancel(token);
+                if (deadline.timed_out()) throw Error(504, "waa_timeout", "WAA runtime startup timed out");
+            }
+            throw;
+        }
         ++vms_started;
         if (interpreter_hash != challenge.interpreter_hash)
             console::emit_record({{"event", "spidermonkey_interpreter"}, {"hash", challenge.interpreter_hash.substr(0, 12)}});
@@ -644,10 +720,16 @@ struct SpiderMonkeyGateway::Impl {
         if (vm) {
             phase = "waa_refresh";
             std::string snapshot;
+            DeadlineToken deadline(token, 15s);
             try {
-                snapshot = vm->refresh_snapshot(token);
+                snapshot = vm->refresh_snapshot(deadline.token());
             } catch (const Error &error) {
-                if (error.code == "cancelled") throw;
+                if (error.code == "cancelled") {
+                    vm.reset();
+                    check_cancel(token);
+                    if (deadline.timed_out()) throw Error(504, "waa_timeout", "WAA snapshot refresh timed out");
+                    throw;
+                }
                 snapshot = "E:UCE";
             }
             refresh = {interpreter_hash, snapshot};
@@ -667,7 +749,8 @@ struct SpiderMonkeyGateway::Impl {
         if (!http || session_state.empty()) return;
         try {
             cookies_saved_at = Clock::now();
-            if (!http->take_cookie_change()) {
+            if (http->take_cookie_change()) cookies_dirty = true;
+            if (!cookies_dirty) {
                 cookie_refresh = "unchanged";
                 return;
             }
@@ -677,16 +760,20 @@ struct SpiderMonkeyGateway::Impl {
                 cookie_refresh = "failed";
                 return;
             }
-            if (!store.refresh_cookies(account.id, session_state, merged)) {
+            auto refreshed = store.refresh_cookies(account.id, session_state, merged);
+            if (!refreshed) {
+                cookies_dirty = false;
                 cookie_refresh = "unchanged";
                 return;
             }
-            const auto saved = store.account(account.id);
-            session_state = saved.storage_state;
-            account_fingerprint = fingerprint_of(saved);
+            cookies_dirty = false;
+            session_state = std::move(*refreshed);
+            account_fingerprint = sha256(json::serialize(session_state) + "\n" + account.auth_user + "\n" + account.email);
             cookie_refresh = "saved";
         } catch (const Error &error) {
             if (error.code == "cancelled") throw;
+            cookie_refresh = "failed";
+        } catch (...) {
             cookie_refresh = "failed";
         }
     }
@@ -800,18 +887,27 @@ std::string SpiderMonkeyGateway::Impl::prove(const Content &content, std::stop_t
     const bool run = !content.prompt.empty(), rerun = !run && content.rerun && page->pointer->clicked();
     running = nullptr;
     std::string proof;
+    DeadlineToken deadline(token, 30s);
     try {
+        const auto call_token = deadline.token();
         if (run) {
-            proof = vm->run_proof(content.digest, content.prompt, token);
+            proof = vm->run_proof(content.digest, content.prompt, call_token);
         } else if (rerun) {
-            proof = vm->rerun_proof(content.digest, *content.rerun, token);
+            proof = vm->rerun_proof(content.digest, *content.rerun, call_token);
         } else {
-            vm->activate(token);
-            proof = vm->proof(content.digest, content.prompt, token);
+            vm->activate(call_token);
+            proof = vm->proof(content.digest, content.prompt, call_token);
         }
     } catch (const Error &error) {
-        // A program that failed is not used again.
-        if (error.code != "cancelled") vm.reset();
+        // A program that failed, timed out, or was cancelled is not used again.
+        vm.reset();
+        if (error.code == "cancelled") {
+            check_cancel(token);
+            if (deadline.timed_out()) throw Error(504, "waa_timeout", "WAA proof timed out");
+        }
+        throw;
+    } catch (...) {
+        vm.reset();
         throw;
     }
     if (!proof.starts_with('!')) {

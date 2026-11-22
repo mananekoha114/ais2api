@@ -82,7 +82,7 @@ const groups: { title: string; icon: IconName; fields: FieldDef[] }[] = [
     title: '传输限额',
     icon: 'database',
     fields: [
-      { key: 'limits.request_bytes', label: '请求体上限', desc: '单个 HTTP 请求体的最大字节数。', type: 'number', min: 1, max: U32, unit: 'bytes' },
+      { key: 'limits.request_bytes', label: '请求体上限', desc: '单个 HTTP 请求体的最大字节数（最大 64 MiB）。', type: 'number', min: 1, max: 64 * 1024 * 1024, unit: 'bytes' },
       { key: 'limits.object_bytes', label: '对象上限', desc: '内联媒体与非流式响应的单对象上限。', type: 'number', min: 1, max: U32, unit: 'bytes', restart: true },
       { key: 'limits.relay_bytes', label: '中继块上限', desc: '浏览器桥接每次转发的数据块大小。', type: 'number', min: 1, max: U32, unit: 'bytes', restart: true },
     ],
@@ -174,6 +174,14 @@ function fieldError(field: FieldDef): string {
 const ORIGIN = /^https?:\/\/(?:\[[0-9A-Fa-f:]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9.])?)(?::[0-9]{1,5})?$/
 const originErrors = computed(() => origins.value.map((o) => (o && !ORIGIN.test(o) ? '格式应为 http(s)://主机[:端口]，不含路径' : '')))
 const secretPattern = /^[!-~]*$/
+const adminKeyError = computed(() => {
+  const key = secrets.admin_key
+  if (!key) return ''
+  if (!secretPattern.test(key)) return '仅支持可见 ASCII 字符，不含空格'
+  if (key.length < 8 || key.length > 4096) return '管理密钥需为 8–4096 个字符'
+  if (key === 'admin') return '不能使用默认密钥 admin'
+  return ''
+})
 
 const hasErrors = computed(
   () =>
@@ -181,7 +189,7 @@ const hasErrors = computed(
     Object.keys(jsonErrors.value).length > 0 ||
     originErrors.value.some(Boolean) ||
     aliases.value.some((a) => (a.from.trim() && !a.to.trim()) || (!a.from.trim() && a.to.trim())) ||
-    !secretPattern.test(secrets.admin_key) ||
+    !!adminKeyError.value ||
     !secretPattern.test(secrets.cookie_import_key),
 )
 
@@ -366,10 +374,11 @@ const bytesHint = (field: FieldDef) => (field.unit === 'bytes' && typeof form[fi
             <FIcon name="shield" :size="20" class="t-secondary" />
             <div class="setting-text">
               <label for="f-admin-key" class="label-row">管理密钥 admin_key</label>
-              <div class="desc">留空表示保持不变。更换后当前会话会自动改用新密钥。</div>
+              <div class="desc">留空表示保持不变；修改时需 8–4096 个可见 ASCII 字符且不能为 admin。更换后当前会话会自动改用新密钥。</div>
             </div>
-            <div class="setting-control">
-              <SecretInput id="f-admin-key" v-model="secrets.admin_key" placeholder="已隐藏（保持不变）" :invalid="!secretPattern.test(secrets.admin_key)" />
+            <div class="setting-control column">
+              <SecretInput id="f-admin-key" v-model="secrets.admin_key" placeholder="已隐藏（保持不变）" :invalid="!!adminKeyError" />
+              <span v-if="adminKeyError" class="error-text t-caption">{{ adminKeyError }}</span>
             </div>
           </div>
           <div class="setting stacked">

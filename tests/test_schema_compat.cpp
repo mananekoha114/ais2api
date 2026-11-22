@@ -211,3 +211,68 @@ TEST_CASE("JSON text arguments decode back into values", "[schema][protocol]") {
         {"functionCall":{"name":"other","args":{"args":"[3]"}}}]}}]})");
     CHECK(event == expected);
 }
+
+TEST_CASE("Schema refs merge raw siblings before lowering and preserve descriptions",
+          "[schema][compat][ref]") {
+    const auto with_bounds = schema_object(
+        R"({"$defs":{"Positive":{"type":"number","exclusiveMinimum":0,"description":"Target bound."}},"type":"object","properties":{"rate":{"$ref":"#/$defs/Positive","description":"Sibling rate."}}})");
+    json::array ignored;
+    auto lowered = prepare_schema(with_bounds, &ignored, "schema", false);
+    const auto &rate = lowered.at("properties").as_object().at("rate").as_object();
+    CHECK(rate.at("minimum") == 0);
+    CHECK(rate.at("description") == "Target bound.\nSibling rate.\nMust be greater than 0.");
+    CHECK(ignored == json::array{"schema.exclusiveMinimum"});
+
+    const auto with_title = schema_object(
+        R"({"$defs":{"Shared":{"type":"string","title":"SharedTitle","default":"abc"}},"type":"object","properties":{"label":{"$ref":"#/$defs/Shared","description":"Field label."}}})");
+    const auto lowered_title = prepare_schema(with_title, nullptr, "schema", true);
+    CHECK(lowered_title.at("properties").as_object().at("label").as_object().at("description") ==
+          "Field label.\nTitle: SharedTitle\nDefault: \"abc\"");
+
+    const auto chained_any = schema_object(
+        R"({"$defs":{"Inner":{},"Outer":{"$ref":"#/$defs/Inner","description":"Outer desc."}},"type":"object","properties":{"payload":{"$ref":"#/$defs/Outer","description":"Caller desc."}}})");
+    json::array paths;
+    const auto lowered_any = prepare_schema(chained_any, nullptr, "schema", false, &paths);
+    const auto &payload = lowered_any.at("properties").as_object().at("payload").as_object();
+    CHECK(payload.at("type") == "string");
+    CHECK(payload.at("description") ==
+          "Outer desc.\nCaller desc.\nAny JSON value, written as JSON text.");
+    CHECK(paths == json::array{json::value(json::array{"payload"})});
+
+    const auto conflicting_chain = schema_object(
+        R"({"$defs":{"A":{"$ref":"#/$defs/B"},"B":{"type":"number","minimum":1}},"$ref":"#/$defs/A","minimum":2})");
+    require_invalid_schema(conflicting_chain);
+}
+
+TEST_CASE("Exclusive bounds handle cross-kind numeric equality and responseSchema stays strict",
+          "[schema][compat]") {
+    json::array ignored;
+    const auto lower_mixed = prepare_schema(
+        schema_object(R"({"type":"number","minimum":5,"exclusiveMinimum":5.0})"), &ignored);
+    CHECK(lower_mixed.at("minimum") == 5);
+    CHECK(lower_mixed.at("description") == "Must be greater than 5.");
+    CHECK(ignored == json::array{"schema.exclusiveMinimum"});
+
+    ignored.clear();
+    const auto upper_mixed = prepare_schema(
+        schema_object(R"({"type":"number","maximum":5.0,"exclusiveMaximum":5})"), &ignored);
+    CHECK(upper_mixed.at("maximum") == 5.0);
+    CHECK(upper_mixed.at("description") == "Must be less than 5.");
+    CHECK(ignored == json::array{"schema.exclusiveMaximum"});
+
+    const auto untyped_nested =
+        schema_object(R"({"type":"object","properties":{"payload":{}}})");
+    REQUIRE_THROWS_AS(prepare_schema(untyped_nested, nullptr, "schema", false, nullptr),
+                      UnsupportedSchema);
+
+    const auto response_body = schema_object(
+        R"({"contents":[{"parts":[{"text":"hi"}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":{"type":"object","properties":{"payload":{}}}}})");
+    REQUIRE_THROWS_AS(normalize_gemini("gemini-test", response_body, false, Config{}),
+                      UnsupportedSchema);
+
+    Config lenient;
+    lenient.ignore_unsupported_parameters = true;
+    const auto dropped = normalize_gemini("gemini-test", response_body, false, lenient);
+    CHECK_FALSE(dropped.gemini.at("generationConfig").as_object().contains("responseSchema"));
+    CHECK(dropped.ignored_parameters == json::array{"generationConfig.responseSchema"});
+}

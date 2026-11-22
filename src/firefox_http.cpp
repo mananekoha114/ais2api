@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "../browser/firefox_http.hpp"
+#include "ais2api/download.hpp"
 #include <algorithm>
 #include <charconv>
 #include <condition_variable>
@@ -75,6 +76,15 @@ bool domain_matches(std::string_view host, std::string_view domain) {
     return !domain.empty() && (host == domain || (host.size() > domain.size() && host.ends_with(domain) &&
                                                   host[host.size() - domain.size() - 1] == '.'));
 }
+bool cookie_matches_host(std::string_view host, std::string_view stored_domain) {
+    if (stored_domain.empty()) return false;
+    const auto target = lower(host);
+    if (stored_domain.front() == '.') {
+        const auto domain = lower(stored_domain.substr(1));
+        return !domain.empty() && domain.front() != '.' && domain_matches(target, domain);
+    }
+    return target == lower(stored_domain);
+}
 bool path_matches(std::string_view request, std::string_view cookie) {
     if (cookie.empty() || cookie == "/" || request == cookie) return true;
     return request.starts_with(cookie) && (cookie.back() == '/' || request[cookie.size()] == '/');
@@ -87,12 +97,6 @@ std::optional<double> expiry_of(const json::object &cookie) {
     // session cookie.
     return expires > 0 ? std::optional(expires) : std::nullopt;
 }
-struct CurlInit {
-    CurlInit() {
-        if (curl_global_init(CURL_GLOBAL_DEFAULT)) throw Error(500, "network_init", "Cannot initialize the HTTP client");
-    }
-};
-void initialise_curl() { static CurlInit init; }
 
 bool pre_tunnel_error(CURLcode code) {
     return code == CURLE_COULDNT_CONNECT || code == CURLE_RECV_ERROR || code == CURLE_SEND_ERROR || code == CURLE_GOT_NOTHING;
@@ -196,7 +200,8 @@ std::vector<std::string> cookie_pairs(const json::array &stored, std::string_vie
     for (const auto &value : stored) {
         if (!value.is_object()) continue;
         const auto &cookie = value.as_object();
-        if (string_or(cookie, "name").empty() || !domain_matches(address->host, bare_domain(string_or(cookie, "domain")))) continue;
+        if (cookie.contains("partitionKey") || bool_or(cookie, "partitionKeyOpaque")) continue;
+        if (string_or(cookie, "name").empty() || !cookie_matches_host(address->host, string_or(cookie, "domain"))) continue;
         if (!path_matches(address->path, string_or(cookie, "path"))) continue;
         if (bool_or(cookie, "secure") && address->scheme != "https") continue;
         if (const auto expires = expiry_of(cookie); expires && *expires <= static_cast<double>(now)) continue;
@@ -270,8 +275,9 @@ bool merge_set_cookie(json::array &stored, std::string_view header, std::string_
     const auto found = std::find_if(stored.begin(), stored.end(), [&](const json::value &item) {
         if (!item.is_object()) return false;
         const auto &cookie = item.as_object();
+        if (cookie.contains("partitionKey") || bool_or(cookie, "partitionKeyOpaque")) return false;
         const auto cookie_path = string_or(cookie, "path");
-        return string_or(cookie, "name") == name && bare_domain(string_or(cookie, "domain")) == bare_domain(stored_domain) &&
+        return string_or(cookie, "name") == name && lower(string_or(cookie, "domain")) == stored_domain &&
                (cookie_path.empty() ? "/" : cookie_path) == path;
     });
     if (expired) {
@@ -391,6 +397,7 @@ struct Transfer {
         if (cookie && set_cookie) set_cookie(value);
     }
     std::size_t body(std::string_view bytes) {
+        if (bytes.empty()) return 0;
         {
             std::lock_guard lock(mutex);
             if (buffered >= pause_bytes) {
@@ -418,7 +425,7 @@ struct Transfer {
 
 struct HttpSession::Impl : std::enable_shared_from_this<HttpSession::Impl> {
     explicit Impl(Options given) : options(std::move(given)), jar(std::move(options.cookies)) {
-        initialise_curl();
+        ais2api::ensure_curl_initialized();
         multi = curl_multi_init();
         if (!multi) throw Error(500, "network_init", "Cannot allocate the HTTP client");
         // One connection per origin carries concurrent requests when the
@@ -632,6 +639,15 @@ class Exchange final : public HttpExchange {
         response.timing = transfer_->timing;
     }
     std::optional<std::string> read(std::size_t limit, std::chrono::milliseconds wait, std::stop_token cancel) override {
+        if (limit == 0) {
+            check_cancel(cancel);
+            std::lock_guard lock(transfer_->mutex);
+            if (transfer_->chunks.empty() && transfer_->finished) {
+                if (transfer_->result != CURLE_OK) throw transfer_->failure();
+                return std::string();
+            }
+            return std::nullopt;
+        }
         auto &transfer = *transfer_;
         std::unique_lock lock(transfer.mutex);
         transfer.changed.wait_for(lock, cancel, wait, [&] { return !transfer.chunks.empty() || transfer.finished; });
@@ -714,7 +730,7 @@ bool HttpSession::take_cookie_change() {
 }
 
 std::string HttpSession::accept_encoding() {
-    initialise_curl();
+    ais2api::ensure_curl_initialized();
     const auto features = curl_version_info(CURLVERSION_NOW)->features;
     std::string codings;
     if (features & CURL_VERSION_LIBZ) codings = "gzip, deflate";
@@ -732,7 +748,7 @@ bool HttpSession::firefox_fingerprint() {
 }
 
 std::string HttpSession::network_stack() {
-    initialise_curl();
+    ais2api::ensure_curl_initialized();
     const auto *info = curl_version_info(CURLVERSION_NOW);
     std::string stack = "libcurl/" + std::string(info->version);
     if (info->ssl_version) stack += " " + std::string(info->ssl_version);

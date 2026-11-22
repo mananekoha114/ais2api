@@ -9,9 +9,34 @@
 #include "ais2api/runtime.hpp"
 #include "ais2api/spidermonkey.hpp"
 #include <algorithm>
+#include <memory>
+#include <unordered_map>
 
 namespace ais2api {
 namespace {
+struct TransitionRegistry {
+    std::mutex guard;
+    std::unordered_map<const BackendRouter *, std::shared_ptr<std::mutex>> by_router;
+    bool alive = true;
+    ~TransitionRegistry() { alive = false; }
+};
+TransitionRegistry &transition_registry() {
+    static TransitionRegistry registry;
+    return registry;
+}
+std::shared_ptr<std::mutex> transition_mutex_for(const BackendRouter *router) {
+    auto &registry = transition_registry();
+    std::lock_guard lock(registry.guard);
+    auto &slot = registry.by_router[router];
+    if (!slot) slot = std::make_shared<std::mutex>();
+    return slot;
+}
+void erase_transition_mutex(const BackendRouter *router) noexcept {
+    auto &registry = transition_registry();
+    if (!registry.alive) return;
+    std::lock_guard lock(registry.guard);
+    registry.by_router.erase(router);
+}
 // "auto" runs on Camoufox on desktops and servers, as the Stage 4 experiment
 // settled (docs/reports/spidermonkey-experiment-2026-11-15.md).
 constexpr std::string_view default_desktop_firefox_backend = "camoufox";
@@ -88,8 +113,10 @@ BackendRouter::BackendRouter(const Config &config, Store &store, Factory factory
       factory_(factory ? std::move(factory) : Factory(browser_gateway)),
       readiness_(readiness ? std::move(readiness) : Readiness(default_readiness)),
       platform_(platform.empty() ? runtime_platform() : std::move(platform)),
-      config_(config) {}
-BackendRouter::~BackendRouter() = default;
+      config_(config) {
+    (void)transition_mutex_for(this);
+}
+BackendRouter::~BackendRouter() { erase_transition_mutex(this); }
 
 GenerationBackend &BackendRouter::gateway(std::string_view backend) {
     auto it = gateways_.find(backend);
@@ -102,13 +129,17 @@ GenerationBackend *BackendRouter::current() {
     return it == gateways_.end() ? nullptr : it->second.get();
 }
 GenerationBackend &BackendRouter::serve(const Account &account) {
+    const auto transition_lock = transition_mutex_for(this);
+    std::lock_guard transition(*transition_lock);
     const std::string backend(backend_for(account));
     GenerationBackend *next = nullptr, *previous = nullptr;
     {
         std::lock_guard lock(mutex_);
         next = &gateway(backend);
-        if (const auto it = gateways_.find(current_); it != gateways_.end() && it->first != backend)
+        if (const auto it = gateways_.find(current_); it != gateways_.end() && it->first != backend) {
             previous = it->second.get();
+            current_.clear();
+        }
     }
     // The other gateway's browser stops before this one starts its own.
     if (previous) previous->close();
@@ -188,9 +219,12 @@ void BackendRouter::reconfigure(const Config &config) {
     for (auto *backend : all) backend->reconfigure(config);
 }
 void BackendRouter::close() {
+    const auto transition_lock = transition_mutex_for(this);
+    std::lock_guard transition(*transition_lock);
     std::vector<GenerationBackend *> all;
     {
         std::lock_guard lock(mutex_);
+        current_.clear();
         for (auto &[name, backend] : gateways_) all.push_back(backend.get());
     }
     for (auto *backend : all) backend->close();

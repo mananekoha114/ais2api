@@ -63,10 +63,14 @@ TEST_CASE("signing cookies are the ones a request to the site root carries", "[c
     const auto stored = json::parse(R"([
         {"name":"SAPISID","value":"1","domain":".google.com","path":"/"},
         {"name":"HOST","value":"2","domain":"aistudio.google.com","path":"/"},
+        {"name":"PARENT_HOST","value":"2b","domain":"google.com","path":"/"},
         {"name":"OTHERHOST","value":"3","domain":"accounts.google.com","path":"/"},
         {"name":"DEEP","value":"4","domain":".google.com","path":"/u/0"},
         {"name":"LOOKALIKE","value":"5","domain":"evilgoogle.com","path":"/"},
-        {"name":"NOPATH","value":"6","domain":"AISTUDIO.google.com"}])").as_array();
+        {"name":"CHIPS","value":"c","domain":".google.com","path":"/","partitionKey":"https://google.com"},
+        {"name":"OPAQUE","value":"o","domain":".google.com","path":"/","partitionKeyOpaque":true},
+        {"name":"DOT","value":"d","domain":".","path":"/"},
+        {"name":"NOPATH","value":"6","domain":"AISTUDIO.google.com","partitionKeyOpaque":false}])").as_array();
     std::vector<std::string> names;
     for (const auto& cookie : cookies_for_host(stored, "aistudio.google.com")) names.push_back(string_or(cookie.as_object(), "name"));
     CHECK(names == std::vector<std::string>{"SAPISID", "HOST", "NOPATH"});

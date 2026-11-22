@@ -541,4 +541,75 @@ TEST_CASE("The embedded host files are identified for diagnostics", "[waa][spide
     }
     CHECK(versions.at("spidermonkey").as_string() == "158.0.1");
 }
+
+TEST_CASE("Reentrant native registration and multiple iframes never invalidate callbacks", "[waa][spidermonkey]") {
+    Engine engine;
+    engine.run([&] {
+        auto &context = *engine.context;
+        std::string captured = "kept-state";
+        const auto expand = context.new_function(engine.global, "expand", 1, [&context, global = engine.global, captured](js::Call &call) {
+            const auto arg = call.arg_string(0);
+            for (int index = 0; index < 64; ++index) {
+                const auto extra = context.new_function(global, "extra", 0, [index](js::Call &nested) {
+                    nested.set_return(js::Value::of(static_cast<double>(index)));
+                });
+                context.release(extra);
+            }
+            call.set_return(js::Value::of(captured + ":" + arg));
+        });
+        context.set(engine.global, "expand", js::Value::object(expand));
+        context.release(expand);
+    });
+    CHECK(engine.text("expand('ok')") == "kept-state:ok");
+
+    Page page;
+    CHECK(page.text("(() => {"
+                    "  const results = [];"
+                    "  for (let i = 0; i < 16; ++i) {"
+                    "    const frame = document.createElement('iframe');"
+                    "    document.body.appendChild(frame);"
+                    "    results.push(frame.contentWindow.crypto.randomUUID().length);"
+                    "  }"
+                    "  return results.every(n => n === 36) + ':' + results.length;"
+                    "})()") == "true:16");
+}
+
+TEST_CASE("Host timers, rejections and loaders handle edge cases cleanly", "[waa][spidermonkey]") {
+    Page page;
+    page.text("globalThis.timers = [];"
+              "setTimeout(() => timers.push('nan'), NaN);"
+              "setTimeout(() => timers.push('inf'), Infinity);"
+              "setTimeout(() => timers.push('ninf'), -Infinity);"
+              "setTimeout(() => timers.push('neg'), -25);"
+              "setTimeout(() => timers.push('huge'), 1e30);"
+              "globalThis.microtaskAfterReject = 'pending';"
+              "Promise.reject(new Error('unhandled'));"
+              "Promise.resolve().then(() => { globalThis.microtaskAfterReject = 'done'; });");
+    page.idle(25ms);
+    CHECK(page.text("timers.join()") == "nan,inf,ninf,neg");
+    CHECK(page.text("microtaskAfterReject") == "done");
+
+    for (int index = 0; index < 6; ++index) {
+        page.text("(() => { const img = new Image(); img.src = 'https://example.test/p.png?i=" + std::to_string(index) + "'; })()");
+        page.settle();
+    }
+    std::lock_guard lock(page.mutex);
+    CHECK(page.image_loads.size() == 6);
+}
+
+TEST_CASE("Rerun proofs serialize safely with concurrent callers", "[waa][spidermonkey]") {
+    auto pointer = std::make_shared<waa::Pointer>();
+    auto options = options_for("log");
+    options.pointer = pointer;
+    waa::Runtime runtime(std::move(options));
+    CHECK_THAT(runtime.run_proof("digest-0", "first"), ContainsSubstring("click|true"));
+    CHECK_THAT(runtime.rerun_proof("digest-r", 3), ContainsSubstring("click|true"));
+    CHECK(pointer->step({0ms, waa::PointerStep::Action::move, "rerun"}).rounds == 3);
+    auto first = std::async(std::launch::async, [&] { return runtime.rerun_proof("digest-1", 2); });
+    auto second = std::async(std::launch::async, [&] { return runtime.rerun_proof("digest-2", 4); });
+    CHECK_THAT(first.get(), ContainsSubstring("click|true"));
+    CHECK_THAT(second.get(), ContainsSubstring("click|true"));
+    const int final_rounds = pointer->step({0ms, waa::PointerStep::Action::move, "rerun"}).rounds;
+    CHECK((final_rounds == 2 || final_rounds == 4));
+}
 #endif

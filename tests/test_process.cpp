@@ -115,3 +115,44 @@ TEST_CASE("stopping an owned process ends its output reader at once", "[process]
     CHECK(Clock::now() - stopping < 10s);
     CHECK_FALSE(process.alive());
 }
+
+TEST_CASE("stopping a continuously writing process bounds output draining", "[process]") {
+    Directory directory;
+    std::atomic<bool> saw_output = false;
+    ProcessOptions options;
+    options.on_output = [&](std::string_view line) {
+        if (line == "spam") saw_output.store(true);
+    };
+    auto [executable, args] = shell("while true; do echo spam; done", "while ($true) { Write-Output 'spam' }");
+    OwnedProcess process;
+    process.start(executable, args, directory.path / "private", options);
+    const auto deadline = Clock::now() + 60s;
+    while (!saw_output.load() && Clock::now() < deadline) std::this_thread::sleep_for(20ms);
+    REQUIRE(saw_output.load());
+    const auto stopping = Clock::now();
+    process.stop();
+    CHECK(Clock::now() - stopping < 5s);
+    CHECK_FALSE(process.alive());
+}
+
+#ifndef _WIN32
+TEST_CASE("stopping a POSIX process that ignores SIGTERM kills it cleanly", "[process]") {
+    Directory directory;
+    Lines lines;
+    ProcessOptions options;
+    options.on_output = [&](std::string_view line) {
+        std::lock_guard lock(lines.mutex);
+        lines.values.emplace_back(line);
+    };
+    auto [executable, args] = shell("trap '' TERM; echo ready; sleep 60", "");
+    OwnedProcess process;
+    process.start(executable, args, directory.path / "private", options);
+    const auto deadline = Clock::now() + 60s;
+    while (!lines.contains("ready") && Clock::now() < deadline) std::this_thread::sleep_for(20ms);
+    REQUIRE(lines.contains("ready"));
+    const auto stopping = Clock::now();
+    process.stop();
+    CHECK(Clock::now() - stopping < 10s);
+    CHECK_FALSE(process.alive());
+}
+#endif

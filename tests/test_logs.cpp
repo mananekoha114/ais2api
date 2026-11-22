@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Mana Nekoha (mananekoha114)
 // SPDX-License-Identifier: MPL-2.0
 #include "ais2api/logs.hpp"
+#include "ais2api/log_sources.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <thread>
@@ -70,11 +71,32 @@ TEST_CASE("Journal rejects unsafe paths oversized entries and incomplete records
     CHECK(partial.at("entries").as_array().size() == 1);
     CHECK(string_or(partial, "next_cursor") == string_or(first, "next_cursor"));
     CHECK_FALSE(partial.at("has_more").as_bool());
-    CHECK_THROWS_AS(journal.append({{"event", "later"}}), Error);
+    REQUIRE_NOTHROW(journal.append({{"event", "later"}}));
+    auto healed = journal.read();
+    REQUIRE(healed.at("entries").as_array().size() == 2);
+    CHECK(string_or(healed.at("entries").as_array()[1].as_object().at("record").as_object(), "event") == "later");
+    fs::remove(dir.path / "management.log");
+    {
+        std::ofstream out(dir.path / "management.log", std::ios::binary | std::ios::trunc);
+        out << "{\"event\":\"truncated-only";
+    }
+    REQUIRE_NOTHROW(journal.append({{"event", "after-zero"}}));
+    auto reset = journal.read();
+    REQUIRE(reset.at("entries").as_array().size() == 1);
+    CHECK(string_or(reset.at("entries").as_array()[0].as_object().at("record").as_object(), "event") == "after-zero");
     fs::remove(dir.path / "management.log");
     fs::create_directory(dir.path / "management.log");
     CHECK_THROWS_AS(journal.read(), Error);
     CHECK_THROWS_AS(journal.append({{"event", "failed"}}), Error);
+}
+TEST_CASE("Journal allows symlinked ancestors while refusing symlinked data directory", "[logs]") {
+    LogDirectory dir;
+    fs::create_directories(dir.path / "real" / "data");
+    std::error_code error;
+    fs::create_directory_symlink(dir.path / "real", dir.path / "alias", error);
+    if (error) { SUCCEED("Symlink creation unavailable for this account"); return; }
+    CHECK_NOTHROW(logs::Journal(dir.path / "alias" / "data"));
+    CHECK_THROWS_AS(logs::Journal(dir.path / "alias"), Error);
 }
 TEST_CASE("Journal refuses symlink files", "[logs]") {
     LogDirectory dir;
@@ -218,4 +240,61 @@ TEST_CASE("Journal trims service.log when it is this process's stderr", "[logs]"
     unrelated.append({{"event", "trim"}});
     CHECK(fs::file_size(other.path / "service.log") == filler.size());
     CHECK_FALSE(fs::exists(other.path / "service.1.log"));
+}
+TEST_CASE("Journal concurrent reader survives rapid rotations and log_sources handles truncation", "[logs]") {
+    LogDirectory dir;
+    logs::Journal journal(dir.path, 512);
+    std::atomic<bool> started{false};
+    std::atomic<bool> done{false};
+    std::atomic<int> read_errors{0};
+    std::vector<std::int64_t> seen;
+    std::jthread reader([&] {
+        std::string cursor = "0";
+        while (true) {
+            const bool finishing = done.load();
+            bool more = false;
+            try {
+                auto page = journal.read(cursor, 7);
+                started.store(true);
+                for (const auto& entry : page.at("entries").as_array()) {
+                    const auto& record = entry.as_object().at("record").as_object();
+                    if (string_or(record, "event") == "race")
+                        seen.push_back(record.at("sequence").as_int64());
+                }
+                cursor = string_or(page, "next_cursor");
+                more = bool_or(page, "has_more");
+            } catch (...) {
+                ++read_errors;
+                break;
+            }
+            if (finishing && !more) break;
+            if (!more) std::this_thread::yield();
+        }
+    });
+    while (!started.load()) std::this_thread::yield();
+    for (int i = 0; i < 120; ++i) {
+        journal.append({{"event", "race"}, {"sequence", i}, {"message", std::string(40, 'x')}});
+        if (i % 5 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    done.store(true);
+    reader.join();
+    CHECK(read_errors.load() == 0);
+    REQUIRE_FALSE(seen.empty());
+    for (std::size_t i = 1; i < seen.size(); ++i)
+        CHECK(seen[i] > seen[i - 1]);
+    CHECK(seen.back() == 119);
+
+    atomic_write(dir.path / "service.log", "line-one\nline-two\n", true);
+    auto listed = log_sources(dir.path).at("sources").as_array();
+    CHECK(listed.size() >= 2);
+    auto chunk = read_log_source(dir.path, "service", "0", 100);
+    CHECK(string_or(chunk, "next_cursor") == "18");
+    atomic_write(dir.path / "service.log", "short\n", true);
+    try {
+        (void)read_log_source(dir.path, "service", "18", 100);
+        FAIL("Truncated offset was accepted");
+    } catch (const Error& error) {
+        CHECK(error.status == 409);
+        CHECK(error.code == "log_truncated");
+    }
 }

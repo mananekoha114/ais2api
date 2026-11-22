@@ -111,3 +111,25 @@ it('saves the non-streaming keepalive interval and rejects values above 120 seco
   await flushPromises()
   expect(backend.patch).toHaveBeenLastCalledWith('/config', { nonstream_keepalive_seconds: 10 })
 })
+
+it('validates admin_key minimum length and request_bytes upper bound', async () => {
+  await show()
+  const adminKey = () => wrapper!.get<HTMLInputElement>('input[id="f-admin-key"]')
+  for (const invalid of ['short', '1234567', 'admin', 'has space']) {
+    await adminKey().setValue(invalid)
+    expect(adminKey().attributes('aria-invalid')).toBe('true')
+    expect(saveButton().element.disabled).toBe(true)
+  }
+  await adminKey().setValue('strong-admin-8')
+  expect(adminKey().attributes('aria-invalid')).toBeUndefined()
+  expect(saveButton().element.disabled).toBe(false)
+
+  await adminKey().setValue('')
+  const requestBytes = () => wrapper!.get<HTMLInputElement>('input[id="f-limits.request_bytes"]')
+  await requestBytes().setValue(String(64 * 1024 * 1024 + 1))
+  expect(requestBytes().attributes('aria-invalid')).toBe('true')
+  expect(saveButton().element.disabled).toBe(true)
+  await requestBytes().setValue(String(64 * 1024 * 1024))
+  expect(requestBytes().attributes('aria-invalid')).toBeUndefined()
+  expect(saveButton().element.disabled).toBe(false)
+})

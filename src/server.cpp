@@ -6,6 +6,7 @@
 
 #include "ais2api/backend_router.hpp"
 #include "ais2api/diagnostics.hpp"
+#include "ais2api/download.hpp"
 #include "ais2api/runtime.hpp"
 #include "ais2api/flow.hpp"
 #include "ais2api/retry_policy.hpp"
@@ -26,8 +27,10 @@
 #include <deque>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <thread>
 #include <utility>
@@ -97,13 +100,16 @@ class Service {
                 log({{"event", "runtime_leftovers_removed"}, {"count", removed}});
         } catch (...) {}
     }
-    ~Service() { shutdown(); token_counter_.join(); log_writer_.join(); }
+    ~Service() { shutdown(); log_writer_.join(); }
     void shutdown() {
+        if (shut_down_.exchange(true)) return;
         stop();
         worker_.request_stop();
         available_.notify_all();
         if (worker_.joinable())
             worker_.join();
+        token_counter_.stop();
+        token_counter_.join();
         gateway_->close();
         prices_.stop();
         // Queued request history reaches the database while logging still works.
@@ -498,7 +504,7 @@ class Service {
     std::string active_account_id_;
     Clock::time_point started_ = Clock::now();
     std::map<std::string, Operation> operations_;
-    std::atomic<bool> stopping_{false};
+    std::atomic<bool> stopping_{false}, shut_down_{false};
     std::stop_source shutdown_;
     std::jthread worker_;
     void work_loop(std::stop_token token) {
@@ -794,6 +800,8 @@ class Service {
             bool recovered = false;
             // One automatic 6-hour Firefox backend switch per request.
             bool switched_backend = false;
+            // One stale request-template discard per request.
+            bool template_refreshed = false;
             unsigned max_attempts = cfg.limits.max_attempts;
             for (unsigned attempt = 0; attempt < max_attempts; ++attempt) {
                 ++trace.attempts;
@@ -913,12 +921,12 @@ class Service {
                         throw;
                     const bool last = attempt + 1 >= max_attempts;
                     const bool was_recovered = recovered;
-                    auto decision = classify_failure(e, attempt, recovered);
+                    auto decision = classify_failure(e, attempt, recovered, template_refreshed);
                     // Without an attempt left a recovery cannot run; judge the
                     // failure as if the recovery had already failed.
                     if (last && (decision.action == FailureAction::rebuild_session ||
                                  decision.action == FailureAction::restart_browser))
-                        decision = classify_failure(e, attempt, true);
+                        decision = classify_failure(e, attempt, true, template_refreshed);
                     switch (decision.action) {
                     case FailureAction::fail:
                         throw;
@@ -937,6 +945,7 @@ class Service {
                     }
                     case FailureAction::refresh_template:
                         if (last) throw;
+                        template_refreshed = true;
                         // The page captures a new template on the next attempt;
                         // the request keeps its single session recovery.
                         log({{"event", "template_refresh"}, {"request_id", work->usage->id()},
@@ -1073,7 +1082,7 @@ std::string normalize_gemini_path(std::string_view path) {
         return "/v1beta" + std::string(resource);
     return std::string(path);
 }
-std::string token_from(const http::request<http::string_body> &request) {
+std::string token_from(const http::request_header<> &request) {
     std::string_view target(request.target().data(), request.target().size());
     auto query = target.find('?');
     if (query != std::string_view::npos) {
@@ -1112,13 +1121,19 @@ net::awaitable<void> send_json(beast::tcp_stream &stream, unsigned status,
     stream.expires_after(15s);
     co_await http::async_write(stream, response, net::use_awaitable);
 }
+net::awaitable<void> write_chunk(beast::tcp_stream &stream, std::string_view part,
+                                 std::chrono::seconds timeout = 30s) {
+    stream.expires_after(timeout);
+    co_await net::async_write(stream, http::make_chunk(net::buffer(part.data(), part.size())),
+                              net::use_awaitable);
+}
+net::awaitable<void> write_chunk_last(beast::tcp_stream &stream,
+                                      std::chrono::seconds timeout = 30s) {
+    stream.expires_after(timeout);
+    co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+}
 net::awaitable<void> json_sse(beast::tcp_stream &stream, const json::object &object,
                               std::size_t window, bool named = false) {
-    auto write = [&](std::string_view part) -> net::awaitable<void> {
-        stream.expires_after(30s);
-        co_await net::async_write(stream, http::make_chunk(net::buffer(part.data(), part.size())),
-                                  net::use_awaitable);
-    };
     // One HTTP chunk per event (more only for events larger than the relay
     // window), so a client never waits on a partial event.
     std::string pending = named ? "event: " + string_or(object, "type") + "\ndata: " : "data: ";
@@ -1128,12 +1143,12 @@ net::awaitable<void> json_sse(beast::tcp_stream &stream, const json::object &obj
     while (!serializer.done()) {
         pending.append(serializer.read(block.data(), block.size()));
         if (pending.size() >= block.size()) {
-            co_await write(pending);
+            co_await write_chunk(stream, pending);
             pending.clear();
         }
     }
     pending += "\n\n";
-    co_await write(pending);
+    co_await write_chunk(stream, pending);
 }
 struct NextEvent {
     // Empty with `due` unset once generation has finished.
@@ -1187,12 +1202,12 @@ net::awaitable<void> write_json_header(beast::tcp_stream &stream) {
     http::response_serializer<http::empty_body> header(response);
     stream.expires_after(15s);
     co_await http::async_write_header(stream, header, net::use_awaitable);
+    stream.expires_never();
 }
 net::awaitable<void> write_json_body(beast::tcp_stream &stream, const json::object &object) {
     const auto body = json::serialize(object);
-    stream.expires_after(15s);
-    co_await net::async_write(stream, http::make_chunk(net::buffer(body)), net::use_awaitable);
-    co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+    co_await write_chunk(stream, body, 15s);
+    co_await write_chunk_last(stream, 15s);
 }
 // Which API shape errors and model listings take.
 enum class ApiFlavor { gemini, openai, anthropic };
@@ -1240,15 +1255,66 @@ json::object admin_body(const http::request<http::string_body>& request) {
     if (ec || !parsed.is_object()) throw Error(400, "invalid_json", "Expected a JSON object");
     return std::move(parsed.as_object());
 }
-std::string admin_token(const http::request<http::string_body>& request) {
+std::string admin_token(const http::request_header<>& request) {
     return std::string(bearer_token(request[http::field::authorization]));
 }
-void admin_origin(const Config& config, const http::request<http::string_body>& request,
+bool valid_host_port(std::string_view port) {
+    if (port.empty() || port.size() > 5) return false;
+    unsigned value = 0;
+    for (unsigned char ch : port) {
+        if (ch < '0' || ch > '9') return false;
+        value = value * 10 + (ch - '0');
+    }
+    return value >= 1 && value <= 65535;
+}
+bool allowed_self_host(const Config& config, std::string_view host) {
+    if (host.empty() || host.find_first_of("/?#@\\ \t\r\n") != std::string_view::npos)
+        return false;
+    for (unsigned char ch : host)
+        if (ch <= 32 || ch >= 127) return false;
+    std::string_view hostname;
+    if (host.front() == '[') {
+        const auto end = host.find(']');
+        if (end == std::string_view::npos || end <= 1) return false;
+        hostname = host.substr(1, end - 1);
+        boost::system::error_code ec;
+        const auto addr = net::ip::make_address(std::string(hostname), ec);
+        if (ec || !addr.is_v6() || hostname.find('%') != std::string_view::npos)
+            return false;
+        const auto rest = host.substr(end + 1);
+        if (!rest.empty() && (rest.front() != ':' || !valid_host_port(rest.substr(1))))
+            return false;
+    } else {
+        if (host.find('[') != std::string_view::npos || host.find(']') != std::string_view::npos)
+            return false;
+        const auto colon = host.find(':');
+        hostname = host.substr(0, colon);
+        if (colon != std::string_view::npos &&
+            (host.find(':', colon + 1) != std::string_view::npos ||
+             !valid_host_port(host.substr(colon + 1))))
+            return false;
+        if (hostname.empty()) return false;
+    }
+    if (ascii_equal(hostname, "localhost") || local_network_address(hostname))
+        return true;
+    boost::system::error_code bind_ec;
+    const auto bind_addr = net::ip::make_address(config.bind, bind_ec);
+    if (!bind_ec) {
+        if (bind_addr.is_unspecified()) return false;
+        boost::system::error_code host_ec;
+        const auto host_addr = net::ip::make_address(std::string(hostname), host_ec);
+        return !host_ec && host_addr == bind_addr;
+    }
+    return !config.bind.empty() && ascii_equal(hostname, config.bind);
+}
+void admin_origin(const Config& config, const http::request_header<>& request,
                   ConnectionState& state) {
     auto origin = std::string(request[http::field::origin]);
     if (origin.empty()) return;
-    const auto host = std::string(request[http::field::host]);
-    bool allowed = origin == "http://" + host;
+    const auto host = request[http::field::host];
+    bool allowed = request.count(http::field::host) == 1 &&
+                   allowed_self_host(config, std::string_view(host.data(), host.size())) &&
+                   origin == "http://" + std::string(host);
     for (const auto& value : config.admin_origins)
         allowed = allowed || (value.is_string() && value.as_string() == origin);
     if (!allowed) throw Error(403, "admin_origin", "Management origin is not allowed");
@@ -1257,19 +1323,55 @@ void admin_origin(const Config& config, const http::request<http::string_body>& 
 // Admission limits total live request bytes before reading bodies. Browser/JSON
 // objects have separate bounds, and the scheduler admits one generation at once.
 std::atomic<std::size_t> admitted_bytes{0};
+constexpr std::size_t max_admitted_bytes = 256ull * 1024 * 1024 + 65536;
 struct Admission {
     std::size_t bytes = 0;
-    ~Admission() { admitted_bytes.fetch_sub(bytes); }
+    Admission() = default;
+    Admission(const Admission &) = delete;
+    Admission &operator=(const Admission &) = delete;
+    ~Admission() { release(); }
     bool reserve(std::size_t n) {
+        if (n <= bytes) {
+            shrink(n);
+            return true;
+        }
+        const std::size_t delta = n - bytes;
         auto current = admitted_bytes.load();
         do {
-            if (n > 256ull * 1024 * 1024 - current)
+            if (delta > max_admitted_bytes - current)
                 return false;
-        } while (!admitted_bytes.compare_exchange_weak(current, current + n));
-        bytes = n;
+        } while (!admitted_bytes.compare_exchange_weak(current, current + delta));
+        bytes += delta;
         return true;
     }
+    void shrink(std::size_t new_bytes) {
+        if (new_bytes >= bytes) return;
+        const std::size_t delta = bytes - new_bytes;
+        admitted_bytes.fetch_sub(delta);
+        bytes = new_bytes;
+    }
+    void release() {
+        if (!bytes) return;
+        admitted_bytes.fetch_sub(bytes);
+        bytes = 0;
+    }
 };
+void check_default_admin_access(const beast::tcp_stream &stream,
+                                const http::request_header<> &request,
+                                std::string_view admin_path) {
+    boost::system::error_code peer_error;
+    const auto peer = stream.socket().remote_endpoint(peer_error);
+    if (peer_error || !local_network_address(peer.address().to_string()) ||
+        request.find("X-Forwarded-For") != request.end() ||
+        request.find("Forwarded") != request.end() ||
+        request.find("X-Real-IP") != request.end())
+        throw Error(403, "admin_default_password_remote",
+                    "The default management password only works from this machine or a local network");
+    if (!(request.method() == http::verb::get && admin_path == "/auth/check") &&
+        !(request.method() == http::verb::post && admin_path == "/auth/password"))
+        throw Error(403, "admin_password_change_required",
+                    "Change the default management password before using the management API");
+}
 net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
     ConnectionState& state, const http::request<http::string_body>& request, std::string path) {
     state.category = "management";
@@ -1285,6 +1387,7 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
         response.set(http::field::access_control_allow_headers, "Authorization, Content-Type, Last-Event-ID");
         response.set(http::field::cache_control, "no-store");
         response.keep_alive(false);
+        stream.expires_after(15s);
         co_await http::async_write(stream, response, net::use_awaitable);
         co_return;
     }
@@ -1292,18 +1395,8 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
     if (!cfg.authenticate_admin(token)) throw Error(401, "admin_authentication", "A valid management Bearer key is required");
     auto method = request.method();
     const bool get = method == http::verb::get, post = method == http::verb::post;
-    if (cfg.admin_key_is_default()) {
-        // The default password is public knowledge: accept it only from this
-        // machine or a private network, and only to replace it.
-        boost::system::error_code peer_error;
-        const auto peer = stream.socket().remote_endpoint(peer_error);
-        if (peer_error || !local_network_address(peer.address().to_string()))
-            throw Error(403, "admin_default_password_remote",
-                        "The default management password only works from this machine or a local network");
-        if (!(get && path == "/auth/check") && !(post && path == "/auth/password"))
-            throw Error(403, "admin_password_change_required",
-                        "Change the default management password before using the management API");
-    }
+    if (cfg.admin_key_is_default())
+        check_default_admin_access(stream, request, path);
     auto query = query_parameters(std::string_view(request.target()));
     auto parameter = [&](const char* key, std::string fallback = {}) {
         auto it = query.find(key); return it == query.end() ? fallback : it->second;
@@ -1338,6 +1431,7 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
         http::response_serializer<http::empty_body> serializer(response);
         stream.expires_after(15s);
         co_await http::async_write_header(stream, serializer, net::use_awaitable);
+        stream.expires_never();
         state.committed = true;
         auto executor = co_await net::this_coro::executor;
         net::steady_timer timer(executor);
@@ -1349,8 +1443,8 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
             if (data || Clock::now()-heartbeat >= 5s) {
                 auto message = data ? "id: " + next + "\nevent: logs\ndata: " + json::serialize(batch) + "\n\n"
                                     : ": heartbeat\n\n";
-                stream.expires_after(15s);
-                co_await net::async_write(stream, http::make_chunk(net::buffer(message)), net::use_awaitable);
+                co_await write_chunk(stream, message, 15s);
+                stream.expires_never();
                 heartbeat = Clock::now();
             }
             cursor = next;
@@ -1360,7 +1454,7 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
             }
             batch = read();
         }
-        co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+        co_await write_chunk_last(stream, 15s);
         co_return;
     }
     if (get && path == "/auth/check") result = {{"authenticated", true}, {"api_version", "v1"},
@@ -1517,6 +1611,123 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
     state.response_status = status;
     co_await send_json(stream, status, result, state.origin);
 }
+void set_flavor(const http::request_header<> &head, std::string_view path, ConnectionState &state) {
+    // Anthropic clients send anthropic-version, which also selects the
+    // Anthropic model list on the shared /v1/models route.
+    if (path.starts_with("/v1/messages") ||
+        (path.starts_with("/v1/models") && head.find("anthropic-version") != head.end()))
+        state.flavor = ApiFlavor::anthropic;
+    else if (path.starts_with("/v1/"))
+        state.flavor = ApiFlavor::openai;
+}
+bool is_admin_body_route(http::verb method, std::string_view path) {
+    if (method == http::verb::post) {
+        if (path == "/auth/password" || path == "/pricing/refresh" ||
+            path == "/rotation/next" || path == "/rotation/clear-cooldown" ||
+            path == "/config/validate" || path == "/config/reload" ||
+            path == "/keys" || path == "/models/refresh" ||
+            path == "/accounts/probe" || path == "/accounts/import" ||
+            path == "/diagnostics/export" || path == "/service/stop")
+            return true;
+        if (path.starts_with("/accounts/")) {
+            auto tail = path.substr(10);
+            auto slash = tail.find('/');
+            if (slash != std::string_view::npos) {
+                auto action = tail.substr(slash + 1);
+                return action == "activate" || action == "fingerprint/regenerate" ||
+                       action == "reset" || action == "probe" || action == "detect-email";
+            }
+        }
+        return false;
+    }
+    if (method == http::verb::patch) {
+        if (path == "/config" || path.starts_with("/keys/"))
+            return true;
+        if (path.starts_with("/accounts/")) {
+            auto tail = path.substr(10);
+            auto slash = tail.find('/');
+            return slash == std::string_view::npos || tail.substr(slash + 1) == "fingerprint";
+        }
+        return false;
+    }
+    if (method == http::verb::put)
+        return path == "/keys/config";
+    return false;
+}
+void preflight_large_request(const beast::tcp_stream &stream, Service &service, const Config &cfg,
+                             ConnectionState &state, const http::request_header<> &head,
+                             std::optional<std::uint64_t> claimed) {
+    const std::string target(head.target().data(), head.target().size());
+    const auto path = normalize_gemini_path(std::string_view(target).substr(0, target.find('?')));
+    set_flavor(head, path, state);
+    const auto method = head.method();
+    if (path == "/api/accounts/probe-import" || path == "/api/admin/v1/accounts/probe-import") {
+        if (method != http::verb::post) {
+            if (path == "/api/admin/v1/accounts/probe-import" && method == http::verb::options)
+                throw Error(413, "request_limit", "This route does not accept a large request body");
+            throw Error(404, "route_not_found", "Route is not implemented");
+        }
+        const bool admin = path.starts_with("/api/admin/");
+        if (admin) {
+            admin_origin(cfg, head, state);
+            state.category = "management";
+        }
+        if ((admin ? cfg.admin_key : cfg.cookie_import_key).empty())
+            throw Error(403, admin ? "admin_disabled" : "cookie_import_disabled",
+                        admin ? "Set admin_key in config.json to enable management API"
+                              : "Set cookie_import_key in config.json to enable userscript import");
+        const auto provided = bearer_token(head[http::field::authorization]);
+        const auto principal =
+            admin ? cfg.authenticate_admin(provided) : cfg.authenticate_cookie_import(provided);
+        if (!principal)
+            throw Error(401, admin ? "admin_authentication" : "cookie_import_authentication",
+                        admin ? "A valid management key is required"
+                              : "A valid Cookie import key is required");
+        if (admin && cfg.admin_key_is_default())
+            throw Error(403, "admin_password_change_required",
+                        "Change the default management password before using the management API");
+        const auto origin = head[http::field::origin];
+        if (!admin && !origin.empty() && origin != "https://aistudio.google.com")
+            throw Error(403, "cookie_import_origin",
+                        "Cookie import requires the AI Studio userscript");
+        if (!json_content_type(std::string_view(head[http::field::content_type])))
+            throw Error(415, "content_type", "Content-Type must be application/json");
+        return;
+    }
+    if (path.starts_with("/api/admin/v1/")) {
+        state.category = "management";
+        if (cfg.admin_key.empty())
+            throw Error(403, "admin_disabled", "Set admin_key to enable management API");
+        admin_origin(cfg, head, state);
+        if (!cfg.authenticate_admin(admin_token(head)))
+            throw Error(401, "admin_authentication", "A valid management Bearer key is required");
+        const auto admin_path = std::string_view(path).substr(13);
+        if (cfg.admin_key_is_default())
+            check_default_admin_access(stream, head, admin_path);
+        if (!is_admin_body_route(method, admin_path)) {
+            if (method == http::verb::get || method == http::verb::head ||
+                method == http::verb::delete_ || method == http::verb::options)
+                throw Error(413, "request_limit", "This route does not accept a large request body");
+            throw Error(404, "route_not_found", "Unknown management route or method");
+        }
+        return;
+    }
+    const bool generation =
+        method == http::verb::post &&
+        (path == "/v1/chat/completions" || path == "/v1/responses" || path == "/v1/messages" ||
+         path == "/v1/messages/count_tokens" ||
+         (path.starts_with("/v1beta/models/") &&
+          (path.ends_with(":generateContent") || path.ends_with(":streamGenerateContent"))));
+    if (!generation) {
+        if (method == http::verb::get || method == http::verb::head || method == http::verb::options)
+            throw Error(413, "request_limit", "This route does not accept a large request body");
+        throw Error(404, "route_not_found", "Route is not implemented");
+    }
+    if (!service.authenticate_generation(token_from(head)))
+        throw Error(401, "authentication", "A valid API key is required");
+    if (!json_content_type(std::string_view(head[http::field::content_type])))
+        throw Error(415, "content_type", "Content-Type must be application/json");
+}
 net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, ConnectionState &state) {
     auto cfg = service.config();
     beast::flat_buffer input(64 * 1024);
@@ -1526,25 +1737,34 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     stream.expires_after(30s);
     co_await http::async_read_header(stream, input, parser, net::use_awaitable);
     auto claimed = parser.content_length();
-    auto reservation = claimed ? *claimed : (parser.chunked() ? cfg.limits.request_bytes : 0);
-    if (reservation > cfg.limits.request_bytes)
+    if (claimed && *claimed > cfg.limits.request_bytes)
         throw Error(413, "request_limit", "Request exceeds configured size limit");
-    Admission admission;
-    if (!admission.reserve(static_cast<std::size_t>(reservation) * 4 + 65536))
-        throw Error(429, "memory_budget", "Request admission memory budget is exhausted");
     if (parser.get().find(http::field::content_encoding) != parser.get().end())
         throw Error(415, "content_encoding", "Compressed request bodies are not supported");
+    const std::size_t reservation = claimed
+        ? static_cast<std::size_t>(*claimed)
+        : (parser.chunked() ? std::min<std::size_t>(cfg.limits.request_bytes, 4 * 1024 * 1024) : 0);
+    if (reservation > 65536)
+        preflight_large_request(stream, service, cfg, state, parser.get(),
+                                claimed ? std::optional<std::uint64_t>(*claimed) : std::nullopt);
+    Admission admission;
+    if (!admission.reserve(reservation * 4 + 65536))
+        throw Error(429, "memory_budget", "Request admission memory budget is exhausted");
     co_await http::async_read(stream, input, parser, net::use_awaitable);
+    stream.expires_never();
     auto request = parser.release();
+    if (request.body().empty() &&
+        (request.method() == http::verb::get || request.method() == http::verb::head ||
+         request.method() == http::verb::options)) {
+        admission.release();
+    } else {
+        const std::size_t actual_budget = request.body().size() * 4 + 65536;
+        if (!admission.reserve(actual_budget))
+            throw Error(429, "memory_budget", "Request admission memory budget is exhausted");
+    }
     std::string target(request.target());
     auto path = normalize_gemini_path(std::string_view(target).substr(0, target.find('?')));
-    // Anthropic clients send anthropic-version, which also selects the
-    // Anthropic model list on the shared /v1/models route.
-    if (path.starts_with("/v1/messages") ||
-        (path.starts_with("/v1/models") && request.find("anthropic-version") != request.end()))
-        state.flavor = ApiFlavor::anthropic;
-    else if (path.starts_with("/v1/"))
-        state.flavor = ApiFlavor::openai;
+    set_flavor(request, path, state);
     if (request.method() == http::verb::get || request.method() == http::verb::head) {
         if (auto asset = webui::find(path)) {
             http::response<http::string_body> response(http::status::ok, 11);
@@ -1615,6 +1835,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         if (parse_error || !value.is_object())
             throw Error(400, "invalid_json", "Cookie import body must be a JSON object");
         std::string().swap(request.body());
+        admission.release();
         auto job = service.enqueue_cookie_import(std::move(value.as_object()), *principal, admin);
         struct CancelImport {
             std::shared_ptr<CookieImportJob> job;
@@ -1788,7 +2009,10 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     if (ec || !value.is_object())
         throw Error(400, "invalid_json", "Request body must be a JSON object");
     std::string().swap(request.body());
+    admission.release();
     if (count_tokens) {
+        if (service.stopping())
+            throw Error(503, "stopping", "Service is stopping");
         // Counted locally with the Gemma 4 tokenizer: no queue, no upstream
         // and no request record.
         auto body = std::make_shared<json::object>(std::move(value.as_object()));
@@ -1868,15 +2092,15 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         auto wake_at = keepalive.count() ? Clock::now() + keepalive : Clock::time_point::max();
         try {
             while (true) {
+                stream.expires_never();
                 auto next = co_await next_event_until(work, cfg.limits.queue_seconds, wake_at);
                 if (next.due) {
                     if (!state.keepalive_committed) {
                         co_await write_json_header(stream);
                         state.keepalive_committed = true;
                     }
-                    stream.expires_after(30s);
-                    co_await net::async_write(stream, http::make_chunk(net::buffer("\n", 1)),
-                                              net::use_awaitable);
+                    co_await write_chunk(stream, "\n");
+                    stream.expires_never();
                     wake_at = Clock::now() + keepalive;
                     continue;
                 }
@@ -1918,6 +2142,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
             co_await send_json(stream, 200, output);
         co_return;
     }
+    stream.expires_never();
     auto event = co_await next_event(work, cfg.limits.queue_seconds);
     if (!event)
         throw Error(502, "empty_upstream", "Upstream returned no content");
@@ -1936,6 +2161,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     http::response_serializer<http::empty_body> header(response);
     stream.expires_after(15s);
     co_await http::async_write_header(stream, header, net::use_awaitable);
+    stream.expires_never();
     state.committed = true;
     if (responses) {
         for (const auto &response_event : state.responses_stream->start())
@@ -1944,11 +2170,12 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
             for (const auto &response_event : state.responses_stream->push(*event))
                 co_await json_sse(stream, response_event.as_object(), cfg.limits.relay_bytes, true);
             work->pipe->acknowledge();
+            stream.expires_never();
             event = co_await next_event(work, cfg.limits.queue_seconds);
         }
         for (const auto &response_event : state.responses_stream->finish())
             co_await json_sse(stream, response_event.as_object(), cfg.limits.relay_bytes, true);
-        co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+        co_await write_chunk_last(stream);
         co_return;
     }
     if (anthropic) {
@@ -1956,11 +2183,12 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
             for (const auto &message_event : state.anthropic_stream->push(*event))
                 co_await json_sse(stream, message_event.as_object(), cfg.limits.relay_bytes, true);
             work->pipe->acknowledge();
+            stream.expires_never();
             event = co_await next_event(work, cfg.limits.queue_seconds);
         }
         for (const auto &message_event : state.anthropic_stream->finish())
             co_await json_sse(stream, message_event.as_object(), cfg.limits.relay_bytes, true);
-        co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+        co_await write_chunk_last(stream);
         if (auto dropped = state.anthropic_stream->dropped())
             service.log({{"event", "anthropic_parts_dropped"}, {"request_id", work->usage->id()}, {"parts", dropped}});
         co_return;
@@ -1989,6 +2217,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         }
         co_await json_sse(stream, output, cfg.limits.relay_bytes);
         work->pipe->acknowledge();
+        stream.expires_never();
         event = co_await next_event(work, cfg.limits.queue_seconds);
     }
     if (openai && work->include_usage && final_usage) {
@@ -1998,9 +2227,8 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         co_await json_sse(stream, usage_chunk, cfg.limits.relay_bytes);
     }
     if (openai)
-        co_await net::async_write(stream, http::make_chunk(net::buffer("data: [DONE]\n\n", 14)),
-                                  net::use_awaitable);
-    co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+        co_await write_chunk(stream, "data: [DONE]\n\n");
+    co_await write_chunk_last(stream);
 }
 net::awaitable<void> connection(tcp::socket socket, Service &service,
                                 std::shared_ptr<ConnectionSlot> slot) {
@@ -2035,7 +2263,7 @@ net::awaitable<void> connection(tcp::socket socket, Service &service,
                         co_await json_sse(stream, value.as_object(), 16384, true);
                 } else
                     co_await json_sse(stream, client_error(*error, state.flavor), 16384);
-                co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+                co_await write_chunk_last(stream);
             } else if (state.keepalive_committed) {
                 // The status line already said 200; the error is the body and
                 // request history keeps the real status.
@@ -2094,6 +2322,7 @@ net::awaitable<void> accept_loop(tcp::acceptor &acceptor, Service &service) {
 int serve(Config config) { return serve_with_backend(std::move(config), {}); }
 int serve_with_backend(Config config, std::unique_ptr<GenerationBackend> backend) {
     config.validate();
+    ensure_curl_initialized();
     InstanceLock owner(config.data_dir);
     Service service(config, std::move(backend));
     net::io_context io(1);
@@ -2120,8 +2349,17 @@ int serve_with_backend(Config config, std::unique_ptr<GenerationBackend> backend
     check_listener("bind", listener_error);
     acceptor.listen(32, listener_error);
     check_listener("listen", listener_error);
-    ControlServer control(config,
-                          [&](const json::object &command) { return service.control(command); });
+    std::optional<ControlServer> control;
+    control.emplace(config,
+                    [&](const json::object &command) { return service.control(command); });
+    struct ShutdownGuard {
+        std::optional<ControlServer> &control;
+        Service &service;
+        ~ShutdownGuard() {
+            control.reset();
+            service.shutdown();
+        }
+    } shutdown_guard{control, service};
     net::signal_set signals(io, SIGINT, SIGTERM);
     signals.async_wait([&](auto, int) {
         service.stop();
@@ -2148,6 +2386,7 @@ int serve_with_backend(Config config, std::unique_ptr<GenerationBackend> backend
     service.log({{"event", "listening"}, {"bind", config.bind}, {"port", config.port}});
     net::co_spawn(io, accept_loop(acceptor, service), net::detached);
     io.run();
+    control.reset();
     service.shutdown();
     service.log({{"event", "stopped"}});
     return 0;

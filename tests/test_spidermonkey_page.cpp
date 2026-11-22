@@ -7,6 +7,15 @@
 #include "ais2api/spidermonkey.hpp"
 #include "browser_generation_fixture.hpp"
 #include <catch2/catch_test_macros.hpp>
+#ifdef AIS2API_HAS_SPIDERMONKEY
+#include "ais2api/store.hpp"
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/tcp.hpp>
+
+namespace ais2api::experiment_detail {
+void stage_page_session(SpiderMonkeyGateway &gateway, json::object session);
+}
+#endif
 
 using namespace ais2api;
 using namespace ais2api::spidermonkey_detail;
@@ -79,11 +88,17 @@ TEST_CASE("document.cookie shows the page's script-visible cookies", "[spidermon
     const json::array stored{json::object{{"name", "SAPISID"}, {"value", "a"}, {"domain", ".google.com"}, {"path", "/"}},
                              json::object{{"name", "SID"}, {"value", "b"}, {"domain", ".google.com"}, {"path", "/"}, {"httpOnly", true}},
                              json::object{{"name", "local"}, {"value", "c"}, {"domain", "aistudio.google.com"}},
+                             json::object{{"name", "LOCAL_CI"}, {"value", "C"}, {"domain", "AISTUDIO.google.com"}, {"partitionKeyOpaque", false}},
+                             json::object{{"name", "parent_host"}, {"value", "p"}, {"domain", "google.com"}, {"path", "/"}},
                              json::object{{"name", "elsewhere"}, {"value", "d"}, {"domain", "accounts.google.com"}, {"path", "/"}},
                              json::object{{"name", "deep"}, {"value", "e"}, {"domain", ".google.com"}, {"path", "/verify"}},
+                             json::object{{"name", "chips"}, {"value", "f"}, {"domain", ".google.com"}, {"path", "/"}, {"partitionKey", "https://google.com"}},
+                             json::object{{"name", "opaque"}, {"value", "g"}, {"domain", ".google.com"}, {"path", "/"}, {"partitionKeyOpaque", true}},
+                             json::object{{"name", "dot"}, {"value", "h"}, {"domain", "."}, {"path", "/"}},
+                             json::object{{"name", "ddot"}, {"value", "i"}, {"domain", "..google.com"}, {"path", "/"}},
                              expired};
-    CHECK(document_cookie(stored, 1000) == "SAPISID=a; local=c");
-    CHECK(document_cookie(stored, 100) == "SAPISID=a; local=c; old=0");
+    CHECK(document_cookie(stored, 1000) == "SAPISID=a; local=c; LOCAL_CI=C");
+    CHECK(document_cookie(stored, 100) == "SAPISID=a; local=c; LOCAL_CI=C; old=0");
     CHECK(document_cookie({}, 1000).empty());
 }
 
@@ -113,10 +128,16 @@ TEST_CASE("Catalogue responses are read as the page reads them", "[spidermonkey]
 
 TEST_CASE("Requests the page makes say how their target relates to it", "[spidermonkey]") {
     CHECK(fetch_site("https://aistudio.google.com/generate_204") == "same-origin");
+    CHECK(fetch_site("https://user:pass@AISTUDIO.GOOGLE.COM:8443/generate_204?a=1#b") == "same-origin");
     CHECK(fetch_site("https://console.cloud.google.com/onboarding/auth_warmup?origin=x") == "same-site");
-    CHECK(fetch_site("https://google.com:443/") == "same-site");
+    CHECK(fetch_site("https://user:pass@GOOGLE.COM:443/") == "same-site");
     CHECK(fetch_site("https://www.gstatic.com/x.js") == "cross-site");
     CHECK(fetch_site("https://notgoogle.com/") == "cross-site");
+    CHECK(fetch_site("https://aistudio.google.com:pass@evil.com/") == "cross-site");
+    CHECK(fetch_site("https://user@aistudio.google.com@evil.com/") == "cross-site");
+    CHECK(fetch_site("https://evil.com/@aistudio.google.com") == "cross-site");
+    CHECK(fetch_site("https://[2001:DB8::1]:8443/") == "cross-site");
+    CHECK(fetch_site("https://[::1/") == "cross-site");
 }
 
 TEST_CASE("The prompt box holds the text of the last user turn", "[spidermonkey]") {
@@ -431,3 +452,76 @@ TEST_CASE("SpiderMonkey relay states carry Retry-After into upstream errors", "[
         CHECK(error.retry_after == 30);
     }
 }
+
+#ifdef AIS2API_HAS_SPIDERMONKEY
+TEST_CASE("SpiderMonkey authorization filters out foreign, host-only parent, non-root and partitioned cookies", "[spidermonkey]") {
+    struct TempDir {
+        fs::path path = fs::temp_directory_path() / ("ais2api-sm-auth-" + random_hex(8));
+        TempDir() { fs::create_directories(path); }
+        ~TempDir() {
+            std::error_code error;
+            fs::remove_all(path, error);
+        }
+    } dir;
+
+    boost::asio::io_context io;
+    boost::asio::ip::tcp::acceptor acceptor(io, {boost::asio::ip::address_v4::loopback(), 0});
+    const unsigned short closed_port = acceptor.local_endpoint().port();
+    acceptor.close();
+
+    Config config;
+    config.data_dir = dir.path;
+    config.proxy = "http://127.0.0.1:" + std::to_string(closed_port);
+    Store store(config.data_dir);
+    SpiderMonkeyGateway gateway(config, store);
+
+    Account account;
+    account.id = "acc_sm_cookie_filter";
+    account.email = "tester@example.com";
+    account.auth_user = "0";
+
+    Request request;
+    request.model = "gemini-3.1-flash-lite-preview";
+    request.gemini = {{"contents", json::array{json::object{{"role", "user"}, {"parts", json::array{json::object{{"text", "ping"}}}}}}}};
+
+    const auto send_with_cookies = [&](json::array cookies) {
+        json::object captured{
+            {"pageId", "tab-auth-filter"},
+            {"userAgent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:158.0) Gecko/20100101 Firefox/158.0"},
+            {"acceptLanguage", "en-US,en;q=0.5"},
+            {"platform", "windows"},
+            {"cookies", std::move(cookies)},
+            {"context",
+             json::object{
+                 {"url", "https://aistudio.google.com/prompts/new_chat"},
+                 {"apiKey", "test-page-api-key"},
+                 {"visitId", "v1_auth_visit"},
+                 {"extension", ""},
+                 {"tier", "free"},
+                 {"timezone", "UTC"},
+                 {"body", json::parse(R"(["models/gemini-3.1-flash-lite-preview",[],null,{}])").as_array()},
+             }},
+        };
+        experiment_detail::stage_page_session(gateway, std::move(captured));
+        try {
+            gateway.experiment_send(request, account, "!proof-token", [](GenerationEvent) {}, {});
+            return std::string("0 none");
+        } catch (const Error &error) {
+            return std::to_string(error.status) + " " + error.code;
+        }
+    };
+
+    const json::array rejected_only{
+        json::object{{"name", "SAPISID"}, {"value", "v1"}, {"domain", "accounts.google.com"}, {"path", "/"}},
+        json::object{{"name", "SAPISID"}, {"value", "v2"}, {"domain", "google.com"}, {"path", "/"}},
+        json::object{{"name", "SAPISID"}, {"value", "v3"}, {"domain", ".google.com"}, {"path", "/verify"}},
+        json::object{{"name", "SAPISID"}, {"value", "v4"}, {"domain", ".google.com"}, {"path", "/"}, {"partitionKey", "https://google.com"}},
+        json::object{{"name", "SAPISID"}, {"value", "v5"}, {"domain", ".google.com"}, {"path", "/"}, {"partitionKeyOpaque", true}},
+    };
+    CHECK(send_with_cookies(rejected_only) == "401 missing_cookies");
+
+    json::array with_valid = rejected_only;
+    with_valid.push_back(json::object{{"name", "SAPISID"}, {"value", "valid"}, {"domain", ".google.com"}, {"path", "/"}});
+    CHECK(send_with_cookies(std::move(with_valid)) == "502 proxy_failed");
+}
+#endif

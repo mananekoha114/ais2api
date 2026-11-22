@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/flow.hpp"
+#include "ais2api/media.hpp"
 #include "ais2api/runtime.hpp"
 #include "fpgen_fixture.hpp"
 #include <catch2/catch_test_macros.hpp>
@@ -13,7 +14,14 @@
 #include <algorithm>
 #include <future>
 #include <fstream>
+#include <memory>
 #include <thread>
+#if !defined(_WIN32) && !defined(__ANDROID__)
+#include <locale.h>
+#ifdef __APPLE__
+#include <xlocale.h>
+#endif
+#endif
 using namespace ais2api;
 using namespace std::chrono_literals;
 namespace {
@@ -25,32 +33,90 @@ struct Directory {
         fs::remove_all(root, ec);
     }
 };
+struct ArchiveWriteDeleter {
+    void operator()(archive *a) const noexcept {
+        if (a) archive_write_free(a);
+    }
+};
+struct ArchiveEntryDeleter {
+    void operator()(archive_entry *e) const noexcept {
+        if (e) archive_entry_free(e);
+    }
+};
+using ArchiveWriter = std::unique_ptr<archive, ArchiveWriteDeleter>;
+using ArchiveEntry = std::unique_ptr<archive_entry, ArchiveEntryDeleter>;
+
+#if !defined(_WIN32) && !defined(__ANDROID__)
+struct Utf8LocaleGuard {
+    locale_t loc = nullptr;
+    locale_t previous = nullptr;
+    explicit Utf8LocaleGuard(bool enable = true) {
+        if (!enable) return;
+        for (const char *name : {"C.UTF-8", "en_US.UTF-8", "UTF-8"}) {
+            loc = ::newlocale(LC_CTYPE_MASK, name, nullptr);
+            if (loc) break;
+        }
+        if (loc) {
+            previous = ::uselocale(loc);
+            if (!previous) {
+                ::freelocale(loc);
+                loc = nullptr;
+            }
+        }
+    }
+    ~Utf8LocaleGuard() {
+        if (loc) {
+            ::uselocale(previous);
+            ::freelocale(loc);
+        }
+    }
+    Utf8LocaleGuard(const Utf8LocaleGuard &) = delete;
+    Utf8LocaleGuard &operator=(const Utf8LocaleGuard &) = delete;
+};
+#endif
+
 void make_archive(const fs::path &path, const std::vector<std::pair<std::string, std::string>> &files,
-                  bool zip = false) {
-    auto *out = archive_write_new();
+                  bool zip = false, bool utf8 = false) {
+#if !defined(_WIN32) && !defined(__ANDROID__)
+    Utf8LocaleGuard utf8_locale(utf8);
+#endif
+    ArchiveWriter out(archive_write_new());
+    REQUIRE(out != nullptr);
     if (zip) {
-        archive_write_set_format_zip(out);
-        archive_write_set_options(out, "zip:compression=store");
-    } else
-        archive_write_set_format_pax_restricted(out);
+        archive_write_set_format_zip(out.get());
+        archive_write_set_option(out.get(), "zip", "compression", "store");
+        if (utf8)
+            archive_write_set_option(out.get(), "zip", "hdrcharset", "UTF-8");
+    } else {
+        archive_write_set_format_pax_restricted(out.get());
+        if (utf8)
+            archive_write_set_option(out.get(), nullptr, "hdrcharset", "UTF-8");
+    }
 #ifdef _WIN32
-    REQUIRE(archive_write_open_filename_w(out, path.c_str()) == ARCHIVE_OK);
+    REQUIRE(archive_write_open_filename_w(out.get(), path.c_str()) == ARCHIVE_OK);
 #else
-    REQUIRE(archive_write_open_filename(out, path.c_str()) == ARCHIVE_OK);
+    REQUIRE(archive_write_open_filename(out.get(), path.c_str()) == ARCHIVE_OK);
 #endif
     for (auto &[name, data] : files) {
-        auto *entry = archive_entry_new();
-        archive_entry_set_pathname(entry, name.c_str());
-        archive_entry_set_size(entry, data.size());
-        archive_entry_set_filetype(entry, AE_IFREG);
-        archive_entry_set_perm(entry, 0755);
-        REQUIRE(archive_write_header(out, entry) == ARCHIVE_OK);
-        REQUIRE(archive_write_data(out, data.data(), data.size()) ==
+        ArchiveEntry entry(archive_entry_new());
+        REQUIRE(entry != nullptr);
+        if (utf8) {
+#ifdef _WIN32
+            archive_entry_copy_pathname_w(entry.get(), fs::u8path(name).c_str());
+#else
+            archive_entry_set_pathname_utf8(entry.get(), name.c_str());
+#endif
+        } else {
+            archive_entry_set_pathname(entry.get(), name.c_str());
+        }
+        archive_entry_set_size(entry.get(), data.size());
+        archive_entry_set_filetype(entry.get(), AE_IFREG);
+        archive_entry_set_perm(entry.get(), 0755);
+        REQUIRE(archive_write_header(out.get(), entry.get()) == ARCHIVE_OK);
+        REQUIRE(archive_write_data(out.get(), data.data(), data.size()) ==
                 static_cast<la_ssize_t>(data.size()));
-        archive_entry_free(entry);
     }
-    archive_write_close(out);
-    archive_write_free(out);
+    REQUIRE(archive_write_close(out.get()) == ARCHIVE_OK);
 }
 std::size_t entries(const fs::path &directory) {
     return static_cast<std::size_t>(std::distance(fs::directory_iterator(directory), fs::directory_iterator()));
@@ -658,3 +724,93 @@ TEST_CASE("Windows archive names cannot overwrite through aliases or device path
     REQUIRE(read_file(d.root / "case/File") == "first");
 }
 #endif
+
+TEST_CASE("archive extraction blocks root-relative Zip Slip, symlinks, and preserves UTF-8 names", "[setup]") {
+    Directory d;
+    for (const auto *unsafe : {"/evil.txt", "\\evil.txt", "C:/evil.txt", "C:evil.txt"}) {
+        const auto bad = d.root / ("zipslip-" + random_hex(4) + ".zip");
+        make_archive(bad, {{unsafe, "no"}}, true);
+        CHECK_THROWS_AS(extract_archive(bad, d.root / ("stage-" + random_hex(4))), Error);
+    }
+    CHECK_FALSE(fs::exists(d.root / "evil.txt"));
+
+    bool check_utf8_zip = true;
+#if !defined(_WIN32) && !defined(__ANDROID__)
+    {
+        Utf8LocaleGuard probe(true);
+        check_utf8_zip = probe.loc != nullptr;
+    }
+#endif
+    if (check_utf8_zip) {
+        const auto utf8_zip = d.root / "utf8.zip";
+        make_archive(utf8_zip, {{"日本語/データ.txt", "utf8-ok"}, {"dir/résumé.txt", "ok"}}, true, true);
+        const auto utf8_stage = d.root / "utf8-stage";
+        REQUIRE_NOTHROW(extract_archive(utf8_zip, utf8_stage));
+        CHECK(read_file(utf8_stage / fs::u8path("日本語/データ.txt")) == "utf8-ok");
+        CHECK(read_file(utf8_stage / fs::u8path("dir/résumé.txt")) == "ok");
+    }
+
+#ifdef _WIN32
+    for (const std::string bad_ctrl : {std::string("bad\x01name.txt"), std::string("bad\nname.txt")}) {
+        const auto ctrl_tar = d.root / ("ctrl-" + random_hex(4) + ".tar");
+        make_archive(ctrl_tar, {{bad_ctrl, "no"}});
+        CHECK_THROWS_AS(extract_archive(ctrl_tar, d.root / ("ctrl-stage-" + random_hex(4))), Error);
+    }
+#endif
+
+    // Root "." / "./" directory entries must succeed cleanly.
+    const auto root_dir_tar = d.root / "rootdir.tar";
+    {
+        ArchiveWriter out(archive_write_new());
+        REQUIRE(out != nullptr);
+        archive_write_set_format_pax_restricted(out.get());
+#ifdef _WIN32
+        REQUIRE(archive_write_open_filename_w(out.get(), root_dir_tar.c_str()) == ARCHIVE_OK);
+#else
+        REQUIRE(archive_write_open_filename(out.get(), root_dir_tar.c_str()) == ARCHIVE_OK);
+#endif
+        ArchiveEntry dir_entry(archive_entry_new());
+        REQUIRE(dir_entry != nullptr);
+        archive_entry_set_pathname(dir_entry.get(), "./");
+        archive_entry_set_filetype(dir_entry.get(), AE_IFDIR);
+        archive_entry_set_perm(dir_entry.get(), 0755);
+        REQUIRE(archive_write_header(out.get(), dir_entry.get()) == ARCHIVE_OK);
+
+        ArchiveEntry file_entry(archive_entry_new());
+        REQUIRE(file_entry != nullptr);
+        archive_entry_set_pathname(file_entry.get(), "./sub/ok.txt");
+        archive_entry_set_size(file_entry.get(), 2);
+        archive_entry_set_filetype(file_entry.get(), AE_IFREG);
+        archive_entry_set_perm(file_entry.get(), 0644);
+        REQUIRE(archive_write_header(out.get(), file_entry.get()) == ARCHIVE_OK);
+        REQUIRE(archive_write_data(out.get(), "ok", 2) == 2);
+        REQUIRE(archive_write_close(out.get()) == ARCHIVE_OK);
+    }
+    const auto dot_stage = d.root / "dot-stage";
+    REQUIRE_NOTHROW(extract_archive(root_dir_tar, dot_stage));
+    CHECK(read_file(dot_stage / "sub" / "ok.txt") == "ok");
+
+    const auto real_empty = d.root / "real-empty";
+    fs::create_directories(real_empty);
+    const auto link_dest = d.root / "link-dest";
+    std::error_code link_ec;
+    fs::create_directory_symlink(real_empty, link_dest, link_ec);
+    if (!link_ec) {
+        const auto ok_tar = d.root / "ok.tar";
+        make_archive(ok_tar, {{"good.txt", "ok"}});
+        CHECK_THROWS_AS(extract_archive(ok_tar, link_dest), Error);
+        CHECK_FALSE(fs::exists(real_empty / "good.txt"));
+    }
+}
+
+TEST_CASE("fetch_public_media honors stop_token cancellation", "[setup][media]") {
+    std::stop_source stop;
+    stop.request_stop();
+    try {
+        (void)fetch_public_media("https://example.com/image.png", 1024, "", stop.get_token());
+        FAIL("Expected cancellation error");
+    } catch (const Error &error) {
+        CHECK(error.status == 499);
+        CHECK(error.code == "cancelled");
+    }
+}

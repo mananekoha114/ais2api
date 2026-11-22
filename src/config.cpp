@@ -406,8 +406,10 @@ Config Config::patched(const json::object& patch) const {
   for (auto key : {"api_key", "admin_key", "cookie_import_key"})
     if (auto value = patch.if_contains(key); value && value->is_string() && value->as_string() == "***")
       throw Error(400, "invalid_config", "Redacted secrets cannot be saved");
-  if (auto value = patch.if_contains("admin_key"); value && value->is_string() && value->as_string() == default_admin_key)
-    throw Error(400, "admin_password_invalid", "The default management password cannot be configured");
+  if (auto value = patch.if_contains("admin_key"); value && value->is_string() && !value->as_string().empty()) {
+    const std::string_view next(value->as_string().data(), value->as_string().size());
+    validate_admin_password(next, {});
+  }
   // Only limits merge recursively. Model maps and arrays replace the old value.
   return parse_config(*this, std::move(o));
 }
@@ -504,7 +506,8 @@ void Config::validate() const {
   for (auto &m : configured_models)
     if (!m.is_string() && !m.is_object())
       throw Error(400, "invalid_config", "Invalid configured model");
-  if (!limits.request_bytes || !limits.object_bytes || !limits.relay_bytes ||
+  if (!limits.request_bytes || limits.request_bytes > 64ull * 1024 * 1024 ||
+      !limits.object_bytes || !limits.relay_bytes ||
       !limits.queue_size || !limits.queue_seconds ||
       !limits.generation_seconds || !limits.stream_idle_seconds ||
       !limits.max_attempts || limits.max_attempts > 16 ||

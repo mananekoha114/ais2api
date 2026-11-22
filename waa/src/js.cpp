@@ -202,7 +202,8 @@ bool dispatch_native(std::uintptr_t id, std::int32_t native, mz_call *raw) {
     auto &context = *reinterpret_cast<Context *>(id);
     Call call(raw, context);
     try {
-        context.natives_.at(static_cast<std::size_t>(native))(call);
+        const Native fn = context.natives_.at(static_cast<std::size_t>(native));
+        fn(call);
         return true;
     } catch (const Throw &thrown) {
         mz_call_throw(raw, thrown.type.c_str(), thrown.message.c_str());

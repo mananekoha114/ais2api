@@ -13,22 +13,31 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <charconv>
 #include <cctype>
 #include <optional>
 namespace ais2api {
 namespace {
-struct CurlInit {
-    CurlInit() {
+struct CurlGlobalGuard {
+    CurlGlobalGuard() {
         if (curl_global_init(CURL_GLOBAL_DEFAULT))
             throw Error(500, "network_init", "Cannot initialize downloader");
     }
-    ~CurlInit() { curl_global_cleanup(); }
+    ~CurlGlobalGuard() { curl_global_cleanup(); }
 };
+} // namespace
+
+void ensure_curl_initialized() {
+    static std::once_flag once;
+    std::call_once(once, [] { static CurlGlobalGuard guard; });
+}
+
+namespace {
 using Curl = std::unique_ptr<CURL, decltype(&curl_easy_cleanup)>;
 Curl curl_handle(const download_detail::Options &options) {
-    static CurlInit init;
+    ensure_curl_initialized();
     Curl c(curl_easy_init(), curl_easy_cleanup);
     if (!c)
         throw Error(500, "network_init", "Cannot allocate downloader");
@@ -186,8 +195,11 @@ Segments segmented(std::string_view url, const fs::path &part, std::string_view 
     std::array<fs::path,4> paths;
     auto marker=part; marker += ".ranges.json";
     const auto identity=json::serialize(json::object{{"sha256",std::string(digest)}, {"etag",probe.response_etag}, {"size",total}, {"url",address}});
-    bool resume=fs::is_regular_file(marker) && !fs::is_symlink(fs::symlink_status(marker)) && read_file(marker,65536)==identity;
-    if (fs::is_symlink(fs::symlink_status(marker))) throw Error(400,"unsafe_path","Download marker cannot be a symbolic link");
+    const auto marker_status = fs::symlink_status(marker);
+    if (fs::is_symlink(marker_status)) throw Error(400,"unsafe_path","Download marker cannot be a symbolic link");
+    if (fs::exists(marker_status) && !fs::is_regular_file(marker_status))
+        throw Error(400,"unsafe_path","Download marker must be a regular file");
+    bool resume=fs::is_regular_file(marker_status) && read_file(marker,65536)==identity;
     atomic_write(marker,identity,true);
     std::unique_ptr<CURLM,decltype(&curl_multi_cleanup)> multi(curl_multi_init(),curl_multi_cleanup);
     if (!multi) throw Error(500,"network_init","Cannot allocate parallel downloader");
@@ -287,11 +299,22 @@ void download_detail::download_with_options(std::string_view url, const fs::path
     if (!url.starts_with("https://") || digest.size() != 64 ||
         digest.find_first_not_of("0123456789abcdef") != std::string_view::npos)
         throw Error(400, "invalid_artifact", "Artifact requires HTTPS and a SHA-256 digest");
-    fs::create_directories(destination.parent_path());
+    if (!destination.parent_path().empty())
+        fs::create_directories(destination.parent_path());
     auto part = destination;
     part += ".part";
-    if (fs::is_symlink(fs::symlink_status(part)) || fs::is_symlink(fs::symlink_status(destination)))
-        throw Error(400, "unsafe_path", "Download path cannot be a symbolic link");
+    auto check_regular = [](const fs::path &path, const char *label) {
+        std::error_code ec;
+        const auto status = fs::symlink_status(path, ec);
+        if (ec && ec != std::errc::no_such_file_or_directory)
+            throw Error(400, "unsafe_path", std::string(label) + " path cannot be inspected");
+        if (fs::is_symlink(status))
+            throw Error(400, "unsafe_path", "Download path cannot be a symbolic link");
+        if (fs::exists(status) && !fs::is_regular_file(status))
+            throw Error(400, "unsafe_path", std::string(label) + " path must be a regular file");
+    };
+    check_regular(part, "Download cache");
+    check_regular(destination, "Download destination");
     if (fs::is_regular_file(destination) && (!expected_size || fs::file_size(destination) == expected_size) && file_digest(destination) == digest) {
         cleanup_ranges(part);
         return;
@@ -299,9 +322,13 @@ void download_detail::download_with_options(std::string_view url, const fs::path
     for (unsigned failures = 0; failures < 5;) {
         const auto before = range_bytes(part);
         const auto outcome = segmented(url, part, digest, proxy, expected_size, options);
-        if (outcome == Segments::unsupported) break;
+        if (outcome == Segments::unsupported) {
+            cleanup_ranges(part);
+            break;
+        }
         if (outcome == Segments::interrupted) {
             failures = range_bytes(part) > before ? 1 : failures + 1;
+            if (failures >= 5) break;
             std::this_thread::sleep_for(backoff(options, failures));
             continue;
         }
@@ -388,6 +415,10 @@ void download_detail::download_with_options(std::string_view url, const fs::path
             throw Error(413, "download_limit", "Browser archive exceeded its locked size");
         }
         if (result == CURLE_OK) {
+            if (!out) {
+                fs::remove(part);
+                throw Error(500, "download_write", "Cannot finalize downloaded archive");
+            }
             if ((expected_size && fs::file_size(part) != expected_size) || file_digest(part) != digest) {
                 fs::remove(part);
                 throw Error(502, "digest_mismatch",
@@ -406,6 +437,7 @@ void download_detail::download_with_options(std::string_view url, const fs::path
         }
         std::error_code error;
         const auto received = fs::file_size(part, error);
+        if (!error && received > offset) cleanup_ranges(part);
         failures = !error && received > offset ? 1 : failures + 1;
         if (failures == 5 || result == CURLE_PEER_FAILED_VERIFICATION)
             throw Error(502, "download_failed",

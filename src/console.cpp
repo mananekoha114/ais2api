@@ -51,7 +51,7 @@ bool colored(Stream stream) {
         return GetConsoleMode(handle(Stream::out), &mode) &&
                SetConsoleMode(handle(Stream::out), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 #else
-        return true;
+        return interactive(Stream::out);
 #endif
     }();
     static const auto err = [] {
@@ -61,7 +61,7 @@ bool colored(Stream stream) {
         return GetConsoleMode(handle(Stream::err), &mode) &&
                SetConsoleMode(handle(Stream::err), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 #else
-        return true;
+        return interactive(Stream::err);
 #endif
     }();
     return stream == Stream::out ? out : err;

@@ -38,6 +38,14 @@ std::string lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return value;
 }
+bool cookie_matches_host(std::string_view target, std::string_view stored_domain) {
+    if (stored_domain.empty()) return false;
+    if (stored_domain.front() == '.') {
+        const auto domain = lower(std::string(stored_domain.substr(1)));
+        return !domain.empty() && domain.front() != '.' && (target == domain || target.ends_with("." + domain));
+    }
+    return target == lower(std::string(stored_domain));
+}
 }
 
 json::array browser_detail::bidi_cookies(const json::array& stored) {
@@ -95,9 +103,8 @@ json::array browser_detail::cookies_for_host(const json::array& stored, std::str
     for (const auto& value : stored) {
         if (!value.is_object()) continue;
         const auto& cookie = value.as_object();
-        auto domain = lower(string_or(cookie, "domain"));
-        if (!domain.empty() && domain.front() == '.') domain.erase(0, 1);
-        if (domain.empty() || (target != domain && !target.ends_with("." + domain))) continue;
+        if (cookie.contains("partitionKey") || bool_or(cookie, "partitionKeyOpaque")) continue;
+        if (!cookie_matches_host(target, string_or(cookie, "domain"))) continue;
         // Only cookies for the site root, the path the signing request uses.
         if (const auto path = string_or(cookie, "path"); !path.empty() && path != "/") continue;
         result.push_back(cookie);
@@ -1368,6 +1375,7 @@ json::object CamoufoxGateway::probe_import(Account& account, std::stop_token can
     if (refreshed.empty()) throw Error(401, "missing_cookies", "Verified browser context has no Google cookies");
     check_cancel(cancel);
     account.storage_state["cookies"] = std::move(refreshed);
+    impl_->session_state = account.storage_state;
     impl_->account_fingerprint = sha256(json::serialize(account.storage_state) + "\n" + account.auth_user + "\n" + account.email);
     return {{"accountId", account.id}, {"email", email}, {"ready", true}, {"login", false}, {"identityAmbiguous", false}, {"status", "ready"}, {"generationVerified", false}, {"skippedPartitionCookies", skipped_partition_cookies}};
 }
@@ -1495,8 +1503,9 @@ std::string CamoufoxGateway::experiment_collect(const Account& account, const st
         }
         pause(cancel, std::chrono::duration_cast<std::chrono::milliseconds>(settle));
         const auto host = impl.eval("location.host", cancel);
-        const auto expected = std::string_view(url).substr(url.find("//") + 2);
-        if (!host.is_string() || expected.substr(0, expected.find_first_of("/?#")) != host.as_string())
+        const auto slashes = url.find("//");
+        const auto expected = slashes == std::string::npos ? std::string_view{} : std::string_view(url).substr(slashes + 2);
+        if (slashes == std::string::npos || !host.is_string() || expected.substr(0, expected.find_first_of("/?#")) != host.as_string())
             throw Error(401, "page_left", "The page left the requested host, as a sign-in redirect does");
         auto result = impl.eval(std::string(script), cancel, 180s);
         if (!result.is_string()) incompatible("The collection script did not return text");

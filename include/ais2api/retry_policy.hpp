@@ -32,7 +32,10 @@ struct FailureDecision {
 // `attempt` is zero-based. `recovered` is true once this request already used
 // its single in-place session rebuild or browser restart; a repeated failure
 // after that recovery is treated as evidence about the account.
-inline FailureDecision classify_failure(const Error& error, unsigned attempt, bool recovered) {
+// `template_refreshed` is true once this request already discarded a stale
+// request template after `upstream_no_content`.
+inline FailureDecision classify_failure(const Error& error, unsigned attempt, bool recovered,
+                                        bool template_refreshed = false) {
     using enum FailureAction;
     const auto& code = error.code;
     // Caller, configuration and environment problems are not account faults.
@@ -45,7 +48,7 @@ inline FailureDecision classify_failure(const Error& error, unsigned attempt, bo
     // Recognized upstream routing glitches are retried as-is. A first empty
     // reply may come from a stale request template: capture a new one.
     if (code == "transient_rpc_route") return {retry_same};
-    if (code == "upstream_no_content") return {attempt == 0 ? refresh_template : fail};
+    if (code == "upstream_no_content") return {!template_refreshed ? refresh_template : fail};
     if (error.status == 429) {
         return {cool_and_switch, error.quota_scope == "minute" ? "rate_limit_minute"
                                  : error.quota_scope == "day"  ? "rate_limit_day"

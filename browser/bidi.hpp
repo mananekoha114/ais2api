@@ -56,11 +56,25 @@ inline json::value remote_value_json(const json::value& remote) {
         if (value && value->is_array()) for (const auto& item : value->as_array()) result.push_back(remote_value_json(item));
         return result;
     }
-    if (type == "object" || type == "map") {
+    if (type == "object") {
         json::object result;
         if (value && value->is_array()) for (const auto& entry : value->as_array()) {
             if (!entry.is_array() || entry.as_array().size() != 2 || !entry.as_array()[0].is_string()) continue;
             result[entry.as_array()[0].as_string()] = remote_value_json(entry.as_array()[1]);
+        }
+        return result;
+    }
+    if (type == "map") {
+        json::object result;
+        if (value && value->is_array()) for (const auto& entry : value->as_array()) {
+            if (!entry.is_array() || entry.as_array().size() != 2) continue;
+            const auto& raw_key = entry.as_array()[0];
+            if (raw_key.is_string()) {
+                result[raw_key.as_string()] = remote_value_json(entry.as_array()[1]);
+            } else {
+                const auto key = remote_value_json(raw_key);
+                if (key.is_string()) result[key.as_string()] = remote_value_json(entry.as_array()[1]);
+            }
         }
         return result;
     }

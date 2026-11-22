@@ -72,8 +72,10 @@ TEST_CASE("BiDi remote values become plain JSON like returnByValue", "[bidi]") {
         ["done",{"type":"boolean","value":false}],
         ["list",{"type":"array","value":[{"type":"number","value":1},{"type":"undefined"},{"type":"set","value":[{"type":"string","value":"s"}]}]}],
         [{"type":"number","value":1},{"type":"string","value":"non-string key"}],
-        ["map",{"type":"map","value":[["k",{"type":"string","value":"v"}]]}]]})"));
-    CHECK(nested == json::parse(R"({"pending":{"sequence":3,"bytes":"QUJD"},"done":false,"list":[1,null,["s"]],"map":{"k":"v"}})"));
+        ["map",{"type":"map","value":[["k",{"type":"string","value":"v"}]]}],
+        ["remoteMap",{"type":"map","value":[[{"type":"string","value":"rk"},{"type":"string","value":"rv"}],[{"type":"number","value":1},{"type":"string","value":"skip"}]]}]]})"));
+    const auto expected_nested = json::parse(R"({"pending":{"sequence":3,"bytes":"QUJD"},"done":false,"list":[1,null,["s"]],"map":{"k":"v"},"remoteMap":{"rk":"rv"}})");
+    CHECK(nested == expected_nested);
 }
 
 TEST_CASE("BiDi correlates replies by id through events and dropped replies", "[bidi]") {

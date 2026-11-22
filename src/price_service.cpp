@@ -4,6 +4,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include "ais2api/price_service.hpp"
+#include "ais2api/download.hpp"
 #include "ais2api/pricing.hpp"
 #include <curl/curl.h>
 #include <utility>
@@ -14,9 +15,7 @@ namespace {
 constexpr std::size_t download_limit = 4 * 1024 * 1024;
 std::string fetch_catalog(std::string_view url, const std::string &proxy,
                           std::stop_token token) {
-    static const auto initialized = curl_global_init(CURL_GLOBAL_DEFAULT);
-    if (initialized != CURLE_OK)
-        throw Error(502, "price_network_init", "Cannot initialize price download");
+    ensure_curl_initialized();
     std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
     if (!curl)
         throw Error(502, "price_network_init", "Cannot initialize price download");

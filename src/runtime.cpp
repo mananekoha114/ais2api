@@ -380,9 +380,21 @@ void spawn_service(const Config &config) {
         int input = ::open("/dev/null", O_RDONLY);
         if (log < 0 || input < 0)
             _exit(126);
-        ::dup2(input, STDIN_FILENO);
-        ::dup2(log, STDOUT_FILENO);
-        ::dup2(log, STDERR_FILENO);
+        auto relocate = [](int fd) {
+            if (fd < 3) {
+                const int moved = ::fcntl(fd, F_DUPFD, 3);
+                if (moved < 0)
+                    _exit(126);
+                ::close(fd);
+                return moved;
+            }
+            return fd;
+        };
+        log = relocate(log);
+        input = relocate(input);
+        if (::dup2(input, STDIN_FILENO) < 0 || ::dup2(log, STDOUT_FILENO) < 0 ||
+            ::dup2(log, STDERR_FILENO) < 0)
+            _exit(126);
         if (input > 2)
             ::close(input);
         if (log > 2)

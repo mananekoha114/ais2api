@@ -7,6 +7,8 @@
 #include "host.hpp"
 #include "host_scripts.hpp"
 #include "text.hpp"
+#include <algorithm>
+#include <cmath>
 #include <random>
 #include <zlib.h>
 
@@ -116,7 +118,7 @@ Agent::Agent(EventLoop &loop, Profile profile, Loader load_image, Loader load_fr
 }
 
 Agent::~Agent() {
-    std::vector<std::jthread> loaders;
+    std::vector<LoaderTask> loaders;
     {
         std::lock_guard lock(loaders_mutex_);
         loaders.swap(loaders_);
@@ -209,43 +211,65 @@ void Agent::after_task() {
         ~Leave() { context.clear_kept_objects(); }
     } leave{*context_};
     if (!track_) return;
-    ++depth_;
-    try {
-        context_->flush_rejections(track_);
-        --depth_;
-    } catch (const js::Exception &exception) {
-        --depth_;
-        release(exception);
+    {
+        ++depth_;
+        struct DepthGuard {
+            int &depth;
+            ~DepthGuard() { --depth; }
+        } guard{depth_};
+        try {
+            context_->flush_rejections(track_);
+        } catch (const js::Exception &exception) {
+            release(exception);
+        } catch (const std::exception &) {
+            // An interrupted script: keep depth_ balanced so microtasks never freeze.
+        }
     }
     try {
         context_->release(invoke(notify_, 0));
     } catch (const js::Exception &exception) {
         release(exception);
+    } catch (const std::exception &) {
     }
 }
 
 void Agent::load(RealmHost &realm, const Loader &loader, std::string address, double id) {
     ++pending_;
-    std::lock_guard lock(loaders_mutex_);
-    loaders_.emplace_back([this, &realm, &loader, address = std::move(address), id] {
-        bool received = false;
-        try {
-            received = loader(address, closing_);
-        } catch (...) {
-        }
-        loop_.post([this, &realm, id, received] {
-            dispatch(realm, id, Value::of(received));
-            loaded();
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    std::vector<LoaderTask> finished;
+    {
+        std::lock_guard lock(loaders_mutex_);
+        std::erase_if(loaders_, [&](LoaderTask &entry) {
+            if (!entry.done->load(std::memory_order_acquire)) return false;
+            finished.push_back(std::move(entry));
+            return true;
         });
-    });
+        loaders_.push_back({done, std::jthread([this, &realm, &loader, address = std::move(address), id, done] {
+            struct MarkDone {
+                std::shared_ptr<std::atomic<bool>> flag;
+                ~MarkDone() { flag->store(true, std::memory_order_release); }
+            } mark_done{done};
+            bool received = false;
+            try {
+                received = loader(address, closing_);
+            } catch (...) {
+            }
+            loop_.post([this, &realm, id, received] {
+                dispatch(realm, id, Value::of(received));
+                loaded();
+            });
+        })});
+    }
 }
 
 std::vector<std::pair<std::string, Agent::Native>> Agent::natives(RealmHost &realm) {
     std::vector<std::pair<std::string, Native>> result;
     result.push_back({"schedule", {2, [this, &realm](js::Call &call) {
         const double delay = call.arg_number(0), id = call.arg_number(1);
-        // NaN and negative delays are due at once.
-        const auto wait = delay > 0 ? std::chrono::nanoseconds(static_cast<std::int64_t>(delay * 1e6)) : std::chrono::nanoseconds::zero();
+        // Non-finite and negative delays are due at once; cap positive delays
+        // to the 32-bit timer range to prevent int64_t nanosecond overflow.
+        const double ms = std::isfinite(delay) ? std::clamp(delay, 0.0, 2147483647.0) : 0.0;
+        const auto wait = ms > 0.0 ? std::chrono::nanoseconds(static_cast<std::int64_t>(ms * 1e6)) : std::chrono::nanoseconds::zero();
         loop_.schedule(wait, [this, &realm, id] { dispatch(realm, id, {}); });
     }}});
     result.push_back({"digest", {2, [](js::Call &call) {
