@@ -1692,8 +1692,6 @@ void preflight_large_request(const beast::tcp_stream &stream, Service &service, 
                         "Cookie import requires the AI Studio userscript");
         if (!json_content_type(std::string_view(head[http::field::content_type])))
             throw Error(415, "content_type", "Content-Type must be application/json");
-        if (claimed && *claimed > 1024 * 1024)
-            throw Error(413, "cookie_import_limit", "Cookie import exceeds one MiB");
         return;
     }
     if (path.starts_with("/api/admin/v1/")) {

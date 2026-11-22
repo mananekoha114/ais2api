@@ -28,6 +28,12 @@
 #include <sstream>
 #include <thread>
 #ifndef _WIN32
+#ifndef __ANDROID__
+#include <locale.h>
+#ifdef __APPLE__
+#include <xlocale.h>
+#endif
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -144,6 +150,35 @@ curl_socket_t public_socket(void *, curlsocktype, struct curl_sockaddr *address)
         return CURL_SOCKET_BAD;
     return ::socket(address->family, address->socktype, address->protocol);
 }
+#if !defined(_WIN32) && !defined(__ANDROID__)
+// Ensure libarchive reads UTF-8 filenames on Linux/macOS even when the process
+// starts in the "C" (ASCII) locale without mutating global setlocale().
+struct Utf8LocaleGuard {
+    locale_t loc = nullptr;
+    locale_t previous = nullptr;
+    Utf8LocaleGuard() {
+        for (const char *name : {"C.UTF-8", "en_US.UTF-8", "UTF-8"}) {
+            loc = ::newlocale(LC_CTYPE_MASK, name, nullptr);
+            if (loc) break;
+        }
+        if (loc) {
+            previous = ::uselocale(loc);
+            if (!previous) {
+                ::freelocale(loc);
+                loc = nullptr;
+            }
+        }
+    }
+    ~Utf8LocaleGuard() {
+        if (loc) {
+            ::uselocale(previous);
+            ::freelocale(loc);
+        }
+    }
+    Utf8LocaleGuard(const Utf8LocaleGuard &) = delete;
+    Utf8LocaleGuard &operator=(const Utf8LocaleGuard &) = delete;
+};
+#endif
 } // namespace
 void extract_archive(const fs::path &input, const fs::path &destination,
                      const std::function<bool(std::string_view)> &keep) {
@@ -155,6 +190,9 @@ void extract_archive(const fs::path &input, const fs::path &destination,
                     "Extraction destination must be an empty owned staging directory");
     secure_directory(destination);
     auto root = fs::weakly_canonical(destination);
+#if !defined(_WIN32) && !defined(__ANDROID__)
+    Utf8LocaleGuard utf8_locale;
+#endif
     std::unique_ptr<archive, decltype(&archive_read_free)> reader(archive_read_new(),
                                                                   archive_read_free);
     archive_read_support_filter_gzip(reader.get());

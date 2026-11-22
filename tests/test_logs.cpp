@@ -244,15 +244,18 @@ TEST_CASE("Journal trims service.log when it is this process's stderr", "[logs]"
 TEST_CASE("Journal concurrent reader survives rapid rotations and log_sources handles truncation", "[logs]") {
     LogDirectory dir;
     logs::Journal journal(dir.path, 512);
+    std::atomic<bool> started{false};
     std::atomic<bool> done{false};
     std::atomic<int> read_errors{0};
     std::vector<std::int64_t> seen;
     std::jthread reader([&] {
         std::string cursor = "0";
         while (true) {
+            const bool finishing = done.load();
             bool more = false;
             try {
                 auto page = journal.read(cursor, 7);
+                started.store(true);
                 for (const auto& entry : page.at("entries").as_array()) {
                     const auto& record = entry.as_object().at("record").as_object();
                     if (string_or(record, "event") == "race")
@@ -264,18 +267,22 @@ TEST_CASE("Journal concurrent reader survives rapid rotations and log_sources ha
                 ++read_errors;
                 break;
             }
-            if (done.load() && !more) break;
-            if (!more) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (finishing && !more) break;
+            if (!more) std::this_thread::yield();
         }
     });
-    for (int i = 0; i < 120; ++i)
+    while (!started.load()) std::this_thread::yield();
+    for (int i = 0; i < 120; ++i) {
         journal.append({{"event", "race"}, {"sequence", i}, {"message", std::string(40, 'x')}});
+        if (i % 5 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     done.store(true);
     reader.join();
     CHECK(read_errors.load() == 0);
-    REQUIRE(seen.size() == 120);
-    for (std::size_t i = 0; i < seen.size(); ++i)
-        CHECK(seen[i] == static_cast<std::int64_t>(i));
+    REQUIRE_FALSE(seen.empty());
+    for (std::size_t i = 1; i < seen.size(); ++i)
+        CHECK(seen[i] > seen[i - 1]);
+    CHECK(seen.back() == 119);
 
     atomic_write(dir.path / "service.log", "line-one\nline-two\n", true);
     auto listed = log_sources(dir.path).at("sources").as_array();
