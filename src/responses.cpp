@@ -256,7 +256,14 @@ void discard_unsupported_responses(json::object &in, json::array &ignored, const
             const auto model = in.if_contains("model") && in.at("model").is_string()
                                    ? std::string_view(in.at("model").as_string())
                                    : std::string_view{};
-            if (level == "NONE" || (level == "XHIGH" && !supports_xhigh_thinking(model, config))) {
+            // A thinking suffix in the model name replaces the effort later.
+            bool suffixed = false;
+            try {
+                suffixed = !resolve_model(model, config).thinking.empty();
+            } catch (const Error &) {
+            }
+            if (!suffixed &&
+                (level == "NONE" || (level == "XHIGH" && !supports_xhigh_thinking(model, config)))) {
                 r.erase("effort");
                 ignored.push_back("reasoning.effort");
             }

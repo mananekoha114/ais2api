@@ -146,6 +146,27 @@ TEST_CASE("Claude Code's default request shape is accepted without the compatibi
     CHECK(anthropic_to_gemini(summarized, false).gemini.at("generationConfig").at("thinkingConfig").at("includeThoughts") == true);
 }
 
+TEST_CASE("Anthropic model names with thinking suffixes replace the requested effort", "[anthropic][thinking-suffix]") {
+    Config config;
+    config.model_aliases["opus"] = "gemini-4-hydrogen(max)";
+    auto input = parse(R"j({"model":"gemini-4-argon(low)","max_tokens":64,"thinking":{"type":"adaptive"},
+        "output_config":{"effort":"xhigh"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]})j");
+    auto level = [&](std::string_view model) {
+        auto copy = input;
+        copy["model"] = model;
+        auto lowered = anthropic_to_gemini(copy, false, false, config);
+        auto normalized = normalize_gemini(lowered.model, lowered.gemini, true, config);
+        CHECK(normalized.include_thoughts);
+        return std::pair{normalized.model, encode_request(normalized, {}, "s")[3].as_array()[16].as_array()[3]};
+    };
+    CHECK(level("gemini-4-argon(low)") == std::pair{std::string("gemini-4-argon"), json::value(1)});
+    CHECK(level("opus") == std::pair{std::string("gemini-4-hydrogen"), json::value(6)});
+    CHECK(level("opus(medium)") == std::pair{std::string("gemini-4-hydrogen"), json::value(2)});
+    CHECK(level("gemini-4-hydrogen(auto)") == std::pair{std::string("gemini-4-hydrogen"), json::value(3)});
+    // Local counting accepts suffixed names without touching the effort.
+    CHECK(anthropic_input_tokens(anthropic_to_gemini(input, false, true, config).gemini) > 0);
+}
+
 TEST_CASE("Thinking signatures and tool calls round-trip through Anthropic messages", "[anthropic]") {
     const auto gemini = parse(R"({"candidates":[{"index":0,"content":{"role":"model","parts":[
         {"text":"pondering","thought":true},

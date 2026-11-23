@@ -18,11 +18,11 @@ std::int64_t now_ms() {
 std::int64_t elapsed(Clock::time_point start) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
 }
+constexpr std::string_view identifier_chars =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/:()";
+// Parentheses are kept for thinking suffixes such as "gemini-4-argon(high)".
 std::string identifier(std::string_view value, std::size_t limit = 256) {
-    if (value.size() > limit ||
-        value.find_first_not_of(
-            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/:") !=
-            std::string_view::npos)
+    if (value.size() > limit || value.find_first_not_of(identifier_chars) != std::string_view::npos)
         return {};
     return std::string(value);
 }

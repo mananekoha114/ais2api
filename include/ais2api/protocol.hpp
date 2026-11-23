@@ -36,7 +36,20 @@ struct GenerationEvent {
 using EventSink = std::function<void(GenerationEvent)>;
 inline constexpr std::int64_t studio_round_tokens = 32768;
 Request normalize_gemini(std::string model, const json::object& body, bool stream, const Config& config);
-// Whether this model (after aliases, `models/` and `-search`) supports XHIGH.
+// A requested model name after one `model_aliases` lookup, the `models/`
+// prefix and a trailing thinking suffix "<model>(<value>)". `model` may still
+// end in "-search". `thinking` is the lowercase suffix value, empty without
+// one; a suffix on the requested name replaces one on the alias target.
+struct ModelSelection {
+    std::string model;
+    std::string thinking;
+};
+ModelSelection resolve_model(std::string_view requested, const Config& config);
+// Throws Error 400 invalid_argument unless `target` is a usable
+// `model_aliases` value: a valid model name with an optional valid suffix.
+void validate_model_target(std::string_view target);
+// Whether this model (after aliases, `models/`, a thinking suffix and
+// `-search`) supports XHIGH.
 bool supports_xhigh_thinking(std::string_view model, const Config& config = {});
 // Whether model listings add a "<id>-search" variant (Google Search on by
 // default) for this discovered or configured model entry.

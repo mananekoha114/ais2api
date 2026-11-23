@@ -252,6 +252,20 @@ TEST_CASE("Responses opt-in sanitizer discards known optional features", "[respo
     auto lowered_xhigh = normalize_openai(responses_to_chat(supported_xhigh), cfg);
     REQUIRE(lowered_xhigh.ignored_parameters.empty());
     REQUIRE(encode_request(lowered_xhigh, {}, "s")[3].as_array()[16].as_array()[3] == 6);
+
+    // A thinking suffix replaces reasoning.effort, which is then neither
+    // reported as ignored nor validated against the model.
+    for (const auto &config : {cfg, Config{}}) {
+        auto suffixed = read(R"j({"model":"gemini-4-argon(low)","input":"hello","reasoning":{"effort":"xhigh"}})j");
+        json::array suffix_ignored;
+        if (config.ignore_unsupported_parameters)
+            discard_unsupported_responses(suffixed, suffix_ignored, config);
+        REQUIRE(suffix_ignored.empty());
+        auto lowered_suffix = normalize_openai(responses_to_chat(suffixed), config);
+        REQUIRE(lowered_suffix.ignored_parameters.empty());
+        REQUIRE(lowered_suffix.model == "gemini-4-argon");
+        REQUIRE(encode_request(lowered_suffix, {}, "s")[3].as_array()[16].as_array()[3] == 1);
+    }
 }
 TEST_CASE("Responses sanitizer preserves malformed and unknown fields", "[responses]") {
     for (auto field : {R"("store":"true")", R"("previous_response_id":4)",

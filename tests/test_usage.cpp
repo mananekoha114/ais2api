@@ -155,6 +155,21 @@ TEST_CASE("Recorded thinking levels ignore request case", "[usage]") {
         REQUIRE(store.request(id).at("settings").at("thinkingConfig").at("thinkingLevel") == "XHIGH");
     }
 }
+TEST_CASE("Requested model names keep their thinking suffix", "[usage][thinking-suffix]") {
+    Directory d;
+    Store store(d.path);
+    RequestUsage usage(store, "suffixed", "chat_completions");
+    usage.configure("gemini-4-argon(low)", false);
+    REQUIRE(usage.start());
+    usage.normalized("gemini-4-argon",
+                     json::parse(R"({"generationConfig":{"thinkingConfig":{"thinkingLevel":"LOW"}}})").as_object());
+    usage.producer_done();
+    usage.http_done(200, "", true);
+    auto record = store.request("suffixed");
+    REQUIRE(record.at("requested_model") == "gemini-4-argon(low)");
+    REQUIRE(record.at("model") == "gemini-4-argon");
+    REQUIRE(record.at("settings").at("thinkingConfig").at("thinkingLevel") == "LOW");
+}
 TEST_CASE("Request history excludes arbitrary settings text and payloads", "[usage]") {
     Directory d;
     Store store(d.path);

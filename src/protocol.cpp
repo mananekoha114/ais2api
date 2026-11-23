@@ -179,18 +179,65 @@ void canonical_gemini(json::object &o) {
                     if (f.is_object()) aliases(f.as_object(), {"parametersJsonSchema"});
         }
 }
-std::string model_name(std::string model, const Config &config) {
-    if (auto p = config.model_aliases.if_contains(model)) {
-        if (!p->is_string())
-            invalid("Model alias must be a string");
-        model = str(*p);
-    }
+bool budget_suffix(std::string_view value) {
+    return !value.empty() && value.size() <= 9 &&
+           value.find_first_not_of("0123456789") == std::string_view::npos;
+}
+// Splits "<model>(<value>)" into the model and its lowercase thinking suffix.
+std::pair<std::string, std::string> split_thinking_suffix(std::string_view name) {
+    if (!name.ends_with(')'))
+        return {std::string(name), {}};
+    const auto open = name.rfind('(');
+    if (open == std::string_view::npos || open == 0)
+        invalid("Invalid model name");
+    std::string value(name.substr(open + 1, name.size() - open - 2));
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    static const std::set<std::string, std::less<>> levels{
+        "none", "minimal", "low", "medium", "high", "xhigh", "extra_high", "max", "auto", "-1"};
+    if (!levels.contains(value) && !budget_suffix(value))
+        invalid("Invalid thinking suffix \"(" + value +
+                ")\": use none, minimal, low, medium, high, xhigh, extra_high, max, auto, -1 "
+                "or a token budget");
+    return {std::string(name.substr(0, open)), std::move(value)};
+}
+std::string checked_model(std::string model) {
     if (model.starts_with("models/"))
         model.erase(0, 7);
-    if (model.empty() || model.find_first_of("/?#\\ \t\r\n") != std::string::npos)
+    if (model.empty() || model.find_first_of("/?#\\ \t\r\n()") != std::string::npos)
         invalid("Invalid model name");
     return model;
 }
+} // namespace
+
+ModelSelection resolve_model(std::string_view requested, const Config &config) {
+    // An exact key keeps its meaning, so keys that look like suffixed or
+    // prefixed names still match before the name is taken apart.
+    std::string name(requested);
+    auto target = config.model_aliases.if_contains(name);
+    if (!target && name.starts_with("models/")) {
+        name.erase(0, 7);
+        target = config.model_aliases.if_contains(name);
+    }
+    std::string thinking;
+    if (!target) {
+        auto [base, value] = split_thinking_suffix(name);
+        thinking = std::move(value);
+        target = config.model_aliases.if_contains(base);
+        if (!target)
+            return {checked_model(std::move(base)), std::move(thinking)};
+    }
+    if (!target->is_string())
+        invalid("Model alias must be a string");
+    auto [model, target_thinking] = split_thinking_suffix(target->as_string());
+    return {checked_model(std::move(model)), thinking.empty() ? std::move(target_thinking) : std::move(thinking)};
+}
+
+void validate_model_target(std::string_view target) {
+    checked_model(split_thinking_suffix(target).first);
+}
+
+namespace {
 json::value value_wire(const json::value &v);
 json::array struct_wire(const json::object &o) {
     json::array fields;
@@ -1168,10 +1215,45 @@ std::string default_thinking_level(std::string_view family, bool image) {
         return "MEDIUM";
     return "HIGH";
 }
+// A model-name thinking suffix replaces the thinking level and budget of the
+// request body; includeThoughts stays. `none` and numbers act as a
+// thinkingBudget, `auto` and -1 leave the model default.
+void apply_thinking_suffix(json::object &request, std::string_view suffix, bool xhigh) {
+    if (suffix.empty())
+        return;
+    const bool reset = suffix == "auto" || suffix == "-1";
+    auto generation = request.if_contains("generationConfig");
+    if (!generation) {
+        if (reset) return;
+        generation = &(request["generationConfig"] = json::object{});
+    }
+    if (!generation->is_object())
+        return; // reported by the generationConfig validation
+    auto thinking = generation->as_object().if_contains("thinkingConfig");
+    if (!thinking) {
+        if (reset) return;
+        thinking = &(generation->as_object()["thinkingConfig"] = json::object{});
+    }
+    if (!thinking->is_object())
+        return;
+    auto &config = thinking->as_object();
+    config.erase("thinkingLevel");
+    config.erase("thinkingBudget");
+    if (reset)
+        return;
+    if (suffix == "none")
+        config["thinkingBudget"] = std::int64_t{0};
+    else if (budget_suffix(suffix))
+        config["thinkingBudget"] = static_cast<std::int64_t>(std::stoll(std::string(suffix)));
+    else if (suffix == "max" || suffix == "xhigh" || suffix == "extra_high")
+        config["thinkingLevel"] = suffix != "max" || xhigh ? "XHIGH" : "HIGH";
+    else
+        config["thinkingLevel"] = upper(std::string(suffix));
+}
 // `search` enables the `*-search` behavior for an explicit OpenAI search request.
 // `thoughts_by_default` is the includeThoughts value when no request or model
 // default sets it: the native Gemini API returns thoughts only on request.
-Request normalize_native(std::string model, const json::object &input, bool stream,
+Request normalize_native(ModelSelection selection, const json::object &input, bool stream,
                          const Config &config, bool search, bool thoughts_by_default) {
     auto canonical = input;
     canonical_gemini(canonical);
@@ -1182,7 +1264,7 @@ Request normalize_native(std::string model, const json::object &input, bool stre
           "safetySettings", "ais2api", "cachedContent"},
          "Gemini request");
     Request r;
-    r.model = model_name(std::move(model), config);
+    r.model = std::move(selection.model);
     const bool search_model = strip_search_suffix(r.model) || search;
     r.stream = stream;
     r.gemini = std::move(canonical);
@@ -1196,6 +1278,8 @@ Request normalize_native(std::string model, const json::object &input, bool stre
             apply_extension(r.gemini, extension);
         }
     }
+    apply_thinking_suffix(r.gemini, selection.thinking,
+                          supports_xhigh(model_family(r.model), image_model(r.model)));
     if (auto t = thinking_config(r.gemini); t && t->if_contains("thinkingLevel") &&
         t->if_contains("thinkingBudget") && model_family(r.model).starts_with("gemini-4"))
         invalid("thinkingBudget cannot be combined with thinkingLevel for Gemini 4 models");
@@ -1313,14 +1397,16 @@ Request normalize_native(std::string model, const json::object &input, bool stre
 
 Request normalize_gemini(std::string model, const json::object &input, bool stream,
                          const Config &config) {
-    return normalize_native(std::move(model), input, stream, config, false, false);
+    return normalize_native(resolve_model(model, config), input, stream, config, false, false);
 }
 
 bool supports_xhigh_thinking(std::string_view raw_model, const Config &config) {
-    std::string model(raw_model);
-    if (auto p = config.model_aliases.if_contains(model); p && p->is_string())
-        model = std::string(p->as_string());
-    if (model.starts_with("models/")) model.erase(0, 7);
+    std::string model;
+    try {
+        model = resolve_model(raw_model, config).model;
+    } catch (const Error &) {
+        return false; // normalization reports the invalid name
+    }
     strip_search_suffix(model);
     const bool image = image_model(model);
     return supports_xhigh(model_family(std::move(model)), image);
@@ -2081,7 +2167,11 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
           "web_search_options",
           "ais2api"},
          "OpenAI request");
-    auto model = model_name(required_string(input, "model"), config);
+    auto selection = resolve_model(required_string(input, "model"), config);
+    const auto &model = selection.model;
+    // A thinking suffix in the model name overrides the requested effort.
+    if (!selection.thinking.empty())
+        input.erase("reasoning_effort");
     if (config.ignore_unsupported_parameters) {
         if (auto effort = input.if_contains("reasoning_effort"); effort && effort->is_string()) {
             const auto level = upper(std::string(effort->as_string()));
@@ -2402,7 +2492,7 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
             if (!kv.value().is_null())
                 ignored_parameter(discarded, "web_search_options." + std::string(kv.key()));
     }
-    auto request = normalize_native(model, body, bool_or(input, "stream"), config, search, true);
+    auto request = normalize_native(std::move(selection), body, bool_or(input, "stream"), config, search, true);
     for (const auto &parameter : discarded)
         ignored_parameter(request.ignored_parameters, str(parameter));
     request.protocol = Protocol::openai;

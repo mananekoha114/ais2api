@@ -1215,3 +1215,127 @@ TEST_CASE("Schema encoding handles nested unions and Gemini 4 edge cases",
     CHECK(zero_wire[10] == 1);
     CHECK(zero_wire[3].as_array()[3] == 0);
 }
+
+TEST_CASE("Model name thinking suffixes replace the requested thinking controls", "[protocol][thinking-suffix]") {
+    auto native = [](std::string model, std::string_view thinking = {}, const Config &config = {}) {
+        auto body = obj(R"({"contents":[{"parts":[{"text":"x"}]}]})");
+        if (!thinking.empty())
+            body["generationConfig"] = json::object{{"thinkingConfig", json::parse(thinking)}};
+        return normalize_gemini(std::move(model), body, false, config);
+    };
+    auto level = [](const Request &request) { return encode_request(request, {}, "s")[3].as_array()[16].as_array()[3]; };
+
+    // A suffix wins over the body, keeps includeThoughts and is not part of the model.
+    constexpr std::string_view high_with_thoughts = R"({"thinkingLevel":"HIGH","includeThoughts":true})";
+    auto low = native("gemini-4-argon(low)", high_with_thoughts);
+    CHECK(low.model == "gemini-4-argon");
+    CHECK(level(low) == 1);
+    CHECK(low.include_thoughts);
+    CHECK(low.ignored_parameters.empty());
+    CHECK(level(native("models/gemini-4-argon(HIGH)")) == 3);
+    CHECK(level(native("gemini-4-argon(Medium)")) == 2);
+    // XHIGH stays limited to Hydrogen and Neon; max falls back to HIGH elsewhere.
+    for (auto suffix : {"(xhigh)", "(extra_high)", "(MAX)"}) {
+        CHECK(level(native(std::string("gemini-4-hydrogen") + suffix)) == 6);
+        CHECK(level(native(std::string("gemini-4-neon-search") + suffix)) == 6);
+    }
+    CHECK(level(native("gemini-4-argon(max)")) == 3);
+    CHECK(level(native("gemini-3-flash(max)")) == 3);
+    CHECK_THROWS_AS(native("gemini-4-argon(xhigh)"), Error);
+    CHECK_THROWS_AS(native("gemini-4-argon(minimal)"), Error);
+    CHECK(level(native("gemini-3-flash(minimal)")) == 4);
+    // none and numbers act as a thinkingBudget; auto and -1 restore the default.
+    for (auto suffix : {"(none)", "(0)"}) {
+        auto zero = native(std::string("gemini-4-argon") + suffix, high_with_thoughts);
+        CHECK(level(zero) == 1);
+        CHECK(zero.ignored_parameters.empty());
+    }
+    auto budget = native("gemini-4-argon(8192)");
+    CHECK(level(budget) == 2);
+    CHECK(budget.ignored_parameters == json::array{"generationConfig.thinkingConfig.thinkingBudget"});
+    auto old_none = native("gemini-3-flash(none)");
+    CHECK(level(old_none) == 3);
+    CHECK(old_none.ignored_parameters == json::array{"generationConfig.thinkingConfig.thinkingBudget"});
+    for (auto suffix : {"(auto)", "(-1)"}) {
+        auto reset = native(std::string("gemini-4-hydrogen") + suffix, R"({"thinkingLevel":"LOW","thinkingBudget":0})");
+        CHECK(level(reset) == 3);
+        CHECK(reset.ignored_parameters.empty());
+    }
+    // Replaced body values are not validated against the model.
+    constexpr std::string_view replaced_json = R"({"thinkingLevel":"XHIGH","thinkingBudget":5})";
+    CHECK(level(native("gemini-4-argon(low)", replaced_json)) == 1);
+    // The suffix follows -search, and model defaults use the bare model.
+    Config defaults;
+    defaults.model_defaults["gemini-4-argon"] = json::parse(R"({"generationConfig":{"temperature":0.3,"thinkingConfig":{"thinkingLevel":"HIGH"}}})");
+    auto searched = native("gemini-4-argon-search(low)", {}, defaults);
+    CHECK(searched.model == "gemini-4-argon");
+    CHECK(level(searched) == 1);
+    CHECK(searched.gemini.at("generationConfig").as_object().at("temperature") == 0.3);
+    CHECK(encode_request(searched, {}, "s")[6] == json::parse("[[null,null,null,[null,[[]]]]]"));
+    CHECK(level(native("gemini-4-argon(auto)", {}, defaults)) == 3);
+    for (auto bad : {"gemini-4-argon(banana)", "gemini-4-argon()", "(low)", "gemini-4-argon(low", "gemini-4-argon)",
+                     "gemini-4-argon(-2)", "gemini-4-argon(1234567890)", "gemini-4-argon(low)(high)", "gemini-4-argon(lo w)"})
+        CHECK_THROWS_AS(native(bad), Error);
+
+    // OpenAI Chat drops reasoning_effort for a suffix, even values it would reject.
+    for (auto ignore : {false, true}) {
+        Config chat_cfg;
+        chat_cfg.ignore_unsupported_parameters = ignore;
+        for (auto effort : {"xhigh", "none", "high"}) {
+            auto chat = obj(R"j({"model":"gemini-4-argon(low)","messages":[{"role":"user","content":"x"}]})j");
+            chat["reasoning_effort"] = effort;
+            auto normalized = normalize_openai(chat, chat_cfg);
+            CHECK(normalized.model == "gemini-4-argon");
+            CHECK(level(normalized) == 1);
+            CHECK(normalized.ignored_parameters.empty());
+        }
+    }
+    auto chat = obj(R"j({"model":"gemini-4-hydrogen(max)","messages":[{"role":"user","content":"x"}]})j");
+    CHECK(level(normalize_openai(chat, Config{})) == 6);
+    chat["model"] = "gemini-4-hydrogen(huge)";
+    CHECK_THROWS_AS(normalize_openai(chat, Config{}), Error);
+}
+
+TEST_CASE("Model aliases resolve once and compose with thinking suffixes", "[protocol][thinking-suffix]") {
+    Config config;
+    config.model_aliases["fast"] = "gemini-4-argon(low)";
+    config.model_aliases["deep"] = "models/gemini-4-hydrogen";
+    config.model_aliases["chain"] = "fast";
+    config.model_aliases["odd(high)"] = "gemini-3-flash";
+    config.model_aliases["web"] = "gemini-4-argon-search(medium)";
+    auto resolved = [&](std::string_view name) {
+        auto selection = resolve_model(name, config);
+        return std::pair{selection.model, selection.thinking};
+    };
+    CHECK(resolved("fast") == std::pair<std::string, std::string>{"gemini-4-argon", "low"});
+    CHECK(resolved("fast(high)") == std::pair<std::string, std::string>{"gemini-4-argon", "high"});
+    CHECK(resolved("models/fast(HIGH)") == std::pair<std::string, std::string>{"gemini-4-argon", "high"});
+    CHECK(resolved("deep(xhigh)") == std::pair<std::string, std::string>{"gemini-4-hydrogen", "xhigh"});
+    CHECK(resolved("chain") == std::pair<std::string, std::string>{"fast", ""});
+    CHECK(resolved("odd(high)") == std::pair<std::string, std::string>{"gemini-3-flash", ""});
+    CHECK(resolved("gemini-4-neon(4096)") == std::pair<std::string, std::string>{"gemini-4-neon", "4096"});
+    CHECK(resolved("web") == std::pair<std::string, std::string>{"gemini-4-argon-search", "medium"});
+    CHECK_THROWS_AS(resolve_model("fast(banana)", config), Error);
+
+    // Both protocols replace an alias once: a chained alias is a model name.
+    auto body = obj(R"({"contents":[{"parts":[{"text":"x"}]}]})");
+    CHECK(normalize_gemini("chain", body, false, config).model == "fast");
+    auto chat = obj(R"({"model":"chain","messages":[{"role":"user","content":"x"}]})");
+    CHECK(normalize_openai(chat, config).model == "fast");
+    auto level = [](const Request &request) { return encode_request(request, {}, "s")[3].as_array()[16].as_array()[3]; };
+    CHECK(level(normalize_gemini("fast", body, false, config)) == 1);
+    CHECK(level(normalize_gemini("fast(auto)", body, false, config)) == 2);
+    auto web = normalize_gemini("web", body, false, config);
+    CHECK(web.model == "gemini-4-argon");
+    CHECK(level(web) == 2);
+    CHECK(encode_request(web, {}, "s")[6] == json::parse("[[null,null,null,[null,[[]]]]]"));
+
+    CHECK(supports_xhigh_thinking("deep(low)", config));
+    CHECK_FALSE(supports_xhigh_thinking("fast(xhigh)", config));
+    CHECK_FALSE(supports_xhigh_thinking("bad name(", config));
+
+    validate_model_target("gemini-4-argon(low)");
+    validate_model_target("models/gemini-4-argon-search(8192)");
+    for (auto bad : {"gemini-4-argon(banana)", "two words", "gemini)", "a/b", "models/", "(low)"})
+        CHECK_THROWS_AS(validate_model_target(bad), Error);
+}
