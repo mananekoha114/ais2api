@@ -9,7 +9,7 @@
 所有 API 适配器先把请求归一化为标准 Gemini 请求对象，再由浏览器传输层基于页面中实时捕获的模板重新编码为 JSPB 请求：
 
 - 每次请求都会替换或清空模板中已知的生成字段、contents、model、签名、系统提示、tools 与缓存内容字段；未知字段保留，以兼容上游变化。
-- 模型别名（`model_aliases`）在编码前解析。
+- [模型别名](#模型别名)（`model_aliases`）与模型名末尾的[思考强度后缀](#思考强度后缀)在编码前解析。
 - 服务不保存聊天历史，客户端每次提交完整历史，可以任意编辑或删除单条消息。
 
 ## Gemini 路由
@@ -46,10 +46,27 @@
 
 ### 思考
 
-- `thinkingLevel` 不区分大小写。未指定时按官方思考指南的模型默认值补全：非图片的 `gemini-4-hydrogen*` 与 `gemini-4-neon*` 为 `HIGH`；其他 `gemini-4*`、`gemini-3.6-flash*`、`gemini-3.8-flash*` 为 `MEDIUM`；`gemini-3.1-flash-lite*`、`gemini-3.5-flash-lite*` 与 id 中含 `image` 的模型为 `MINIMAL`；其他文本模型为 `HIGH`（与参考项目一致）。判断使用解析别名并去掉 `-search` 后缀的模型 id，不区分大小写。
+- `thinkingLevel` 不区分大小写。未指定时按官方思考指南的模型默认值补全：非图片的 `gemini-4-hydrogen*` 与 `gemini-4-neon*` 为 `HIGH`；其他 `gemini-4*`、`gemini-3.6-flash*`、`gemini-3.8-flash*` 为 `MEDIUM`；`gemini-3.1-flash-lite*`、`gemini-3.5-flash-lite*` 与 id 中含 `image` 的模型为 `MINIMAL`；其他文本模型为 `HIGH`（与参考项目一致）。判断使用解析别名、去掉思考后缀与 `-search` 后缀的模型 id，不区分大小写。
 - `includeThoughts` 接受布尔值，与官方一致默认为 `false`：原生 Gemini 接口只在请求或 `model_defaults` 设为 `true` 时返回思考文本。被隐藏的思考在聚合或 SSE 输出前移除，带签名的思考部件变为官方使用的空文本签名部件 `{"text":"","thoughtSignature":...}`，函数调用和 usage 保留；它不会关闭模型推理。Chat Completions 与 Responses 默认仍输出思考（`reasoning_content` / reasoning 项）。
 - Gemini 4（`gemini-4*`）与官方规则一致：拒绝 `thinkingLevel: MINIMAL`；`thinkingLevel: XHIGH`（及别名 `EXTRA_HIGH`）仅支持非图片的 `gemini-4-hydrogen*` 与 `gemini-4-neon*`，其他模型返回 400；请求同时提供 `thinkingLevel` 与 `thinkingBudget` 时返回 400；只提供 `thinkingBudget: 0` 时映射为 `LOW`（无法关闭思考，取最接近的等级）。官方没有公开其他预算值到等级的阈值，因此其他单独的预算值保持模型默认等级。
 - 除上述 Gemini 4 映射外，`thinkingBudget`（≥ -1 的整数）与 `seed`（整数）为兼容原生 Gemini 客户端而接受，但**被忽略**：私有上游没有经过验证的对应字段。字段名（不含值）记录在 `generation_parameters_ignored` 日志中。`thinkingBudget: 0` 在其他模型上不会关闭推理，也不会取消默认等级。
+
+### 思考强度后缀
+
+客户端没有思考强度设置时，可以写进模型名：`<模型>(<值>)`，例如 `gemini-4-argon(low)`、`gemini-4-hydrogen(xhigh)`。原生 Gemini（模型名在 URL 中，括号可以写成 `%28`、`%29`）、Chat Completions、Responses、Anthropic Messages 与 `/v1/messages/count_tokens` 都支持。值不区分大小写：
+
+| 值 | 效果 |
+|---|---|
+| `minimal`、`low`、`medium`、`high` | 对应的 `thinkingLevel`，规则同上（例如 Gemini 4 拒绝 `minimal`） |
+| `xhigh`、`extra_high` | `XHIGH`，只支持非图片的 `gemini-4-hydrogen*` 与 `gemini-4-neon*`，其他模型返回 400 |
+| `max` | 支持 `XHIGH` 的模型为 `XHIGH`，其他模型为 `HIGH`（与 Anthropic 的 `effort: max` 一致） |
+| `none`、非负整数（最多 9 位） | 等同 `thinkingBudget: 0` 或该数值：Gemini 4 上的 0 映射为 `LOW`，其他情况按上文被忽略并记录 |
+| `auto`、`-1` | 使用模型默认等级 |
+
+- 后缀覆盖请求体中的思考强度与预算：原生 `thinkingLevel` / `thinkingBudget`（含 `ais2api.gemini` 扩展）、Chat 的 `reasoning_effort`、Responses 的 `reasoning.effort`、Anthropic 的 `output_config.effort`。被覆盖的值不再按模型校验，也不记为忽略参数。是否返回思考文本（`includeThoughts`、Anthropic 的 `thinking`）不受影响。
+- 带 `-search` 时后缀写在最后，例如 `gemini-3.8-flash-search(low)`。
+- 去掉后缀的模型 id 用于账号调度、`model_defaults`、价格、请求记录的 `model` 和响应中的 `model`；请求记录的 `requested_model` 保留原样。`model_defaults` 只补全请求里缺少的字段，因此 `auto` 之后仍可由它设置等级。
+- 其他值、空括号或括号不成对时返回 400 `invalid_argument`。模型列表不展开带后缀的条目。
 
 ### 总输出预算与自动续接
 
@@ -146,6 +163,14 @@ HTTP 错误体不算生成流；任何生成流字节都排除补试，包括未
 
 Chat Completions 的 `web_search_options` 对所请求的模型应用同样的规则。`search_context_size`（low/medium/high）、`user_location`（`{"type":"approximate","approximate":{city,country,region,timezone}}`）与 `filters.allowed_domains` 会校验格式并记为忽略参数，没有经过验证的私有字段可映射。Responses 的 `web_search` / `web_search_preview` 工具（每个请求一个）会转换为这些选项，扁平的位置字段转换为 Chat 的嵌套格式；用 `tool_choice` 指定网页搜索仍不支持。由于不返回搜索来源，Responses 不输出 `web_search_call` 项。
 
+## 模型别名
+
+配置项 `model_aliases`（见 [配置参考](configuration.md#生成行为)）把客户端使用的名称映射到实际模型：
+
+- 先用请求名整体匹配（可带 `models/` 前缀），找不到时去掉末尾的思考后缀再匹配。别名只替换一次，目标不会再按别名解析。
+- 目标可以带思考后缀和 `-search`，例如 `{"fast": "gemini-4-argon(low)", "web": "gemini-3.8-flash-search"}`。请求名自带后缀时替换目标的后缀：`fast(high)` 按 `gemini-4-argon(high)` 处理。保存配置时会校验目标的模型名和后缀。
+- 模型列表（`/v1/models`、`/v1beta/models`、Anthropic 格式及详情路由）在模型清单和 `-search` 条目之后列出别名：字段复制自目标条目，`displayName` 为别名，`source` 为 `alias`。只列出目标（去掉后缀后）在列表中的别名；与列表中 id 同名的别名替换该条目。键里带括号或斜杠的别名可以请求，但不列出。
+
 <a id="optional-unsupported-parameter-dropping"></a>
 
 ## 可选：舍弃不支持的参数
@@ -170,7 +195,7 @@ Chat Completions 的 `web_search_options` 对所请求的模型应用同样的�
 - 支持文本、`image_url`（data URL 或公开 HTTPS 地址）以及 `input_audio`（wav/mp3）。音频与图片最终是否可用取决于所选模型。
 - 开头连续的 system / developer 消息成为 `systemInstruction`；对话开始后出现的 system / developer 消息保留在原位置，转为不带标签的 user 消息。
 - 连续的普通 user / assistant 消息不会合并；连续的 tool 结果合并为一条 user 消息，内含按顺序排列的 functionResponse 部件。
-- 函数工具、`tool_choice`、JSON 响应格式、token/采样控制与 `reasoning_effort` 均会转换。只支持 `n = 1`。不支持的字段以 `invalid_argument` 失败，不会被当作隐含支持。
+- 函数工具、`tool_choice`、JSON 响应格式、token/采样控制与 `reasoning_effort` 均会转换；模型名带[思考强度后缀](#思考强度后缀)时舍弃 `reasoning_effort`。只支持 `n = 1`。不支持的字段以 `invalid_argument` 失败，不会被当作隐含支持。
 - 函数参数 JSON 必须是对象；非对象或字符串形式的工具结果包装为 `{"result": ...}`。
 
 ### 远程图片
@@ -217,7 +242,7 @@ Chat Completions 的 `web_search_options` 对所请求的模型应用同样的�
 | `temperature`、`top_p`、`top_k`、`stop_sequences` | `temperature`、`topP`、`topK`、`stopSequences` |
 | `thinking`：`enabled`、`adaptive` | 返回思考块。`display` 为默认的 `summarized` 时 `includeThoughts: true`；为 `omitted` 或 `updates` 时不返回思考文本 |
 | `thinking`：`disabled`、`between_tools` 或省略 | `includeThoughts: false` |
-| `output_config.effort`：`low`、`medium`、`high`、`xhigh`、`max` | `thinkingLevel`：`LOW`、`MEDIUM`、`HIGH`；`xhigh` 与 `max` 在 `gemini-4-hydrogen*` / `gemini-4-neon*` 上为 `XHIGH`，其他模型为 `HIGH`；未提供时按模型默认等级 |
+| `output_config.effort`：`low`、`medium`、`high`、`xhigh`、`max` | `thinkingLevel`：`LOW`、`MEDIUM`、`HIGH`；`xhigh` 与 `max` 在 `gemini-4-hydrogen*` / `gemini-4-neon*` 上为 `XHIGH`，其他模型为 `HIGH`；未提供时按模型默认等级；模型名带思考强度后缀时以后缀为准 |
 | `output_config.format` 或 `output_format`（`json_schema`） | `responseMimeType: application/json` 与 `responseSchema` |
 | `tools`：自定义工具（`name`、`description`、`input_schema`） | `functionDeclarations`，`input_schema` 经过 [JSON Schema](#json-schema) 适配 |
 | `tool_choice`：`auto`、`none` | 默认、`NONE` |
@@ -279,7 +304,7 @@ Chat Completions 的 `web_search_options` 对所请求的模型应用同样的�
 
 ### 模型列表
 
-请求带 `anthropic-version` 头时，`GET /v1/models` 与 `/v1/models/{id}` 按 Anthropic 格式返回：`data` 中每项为 `{"type":"model","id":...,"display_name":...,"created_at":...}`，上游提供限额时附 `max_input_tokens` 与 `max_tokens`；外层带 `has_more: false`、`first_id`、`last_id`。不带这个头时仍是 OpenAI 格式。
+请求带 `anthropic-version` 头时，`GET /v1/models` 与 `/v1/models/{id}` 按 Anthropic 格式返回：`data` 中每项为 `{"type":"model","id":...,"display_name":...,"created_at":...}`，上游提供限额时附 `max_input_tokens` 与 `max_tokens`；外层带 `has_more: false`、`first_id`、`last_id`。不带这个头时仍是 OpenAI 格式。两种格式都包含 [模型别名](#模型别名)。
 
 ## ais2api 扩展（版本 1）
 

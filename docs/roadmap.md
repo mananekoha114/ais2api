@@ -1,6 +1,6 @@
 # 路线图与实施状态
 
-状态截至 2026-11-16。阶段按原计划的进入条件验收，不能只根据代码是否存在判断完成。各项的证据见 [验证记录](validation.md)。
+状态截至 2026-11-23。阶段按原计划的进入条件验收，不能只根据代码是否存在判断完成。各项的证据见 [验证记录](validation.md)。
 
 浏览器后端已从 CloakBrowser 迁移为 Camoufox 与 SpiderMonkey 两种 Firefox 后端（见 [Firefox 后端迁移计划](firefox-backends.md)），并随 [v0.2.0](https://github.com/mananekoha114/ais2api/releases/tag/v0.2.0) 预发布。真实账号目前只在 Windows 上验证过。
 
@@ -54,7 +54,7 @@
 - 搜索来源与引用元数据未解码，Responses 不输出 `web_search_call`。
 - Anthropic Messages 不支持服务端工具（WebSearch、代码执行等）、强制工具调用和 `clear_thinking_20251015` 以外的 `context_management`；`count_tokens` 是本地估算。
 - Camoufox 后端尚未识别 `GetLoggingContext` 返回的 Code 7（地区或账号不受支持），SpiderMonkey 后端已识别。
-- 模型名思考强度后缀、`MODEL_MAPPING` 风格的模型别名和代理池尚未实现（见 [低成本改进](firefox-backends.md#低成本改进独立推进)）。
+- 代理池尚未实现（见 [低成本改进](firefox-backends.md#低成本改进独立推进)）。模型名思考强度后缀只按模型系列判断支持的档位，没有读取 `ListModels` 的档位目录。
 - `thinkingBudget` 与 `seed` 没有可验证的上游映射。
 - RikkaHub `includeServerSideToolInvocations` 要求的额外调用记录未实现。
 - 没有 Files、embeddings、独立的图片/音频接口；Responses 没有服务端存储与续接。
