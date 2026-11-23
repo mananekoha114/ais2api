@@ -144,7 +144,12 @@ public:
     // Every enabled, unexpired account has a recorded tier that `policy`
     // refuses for `model` (and there is at least one such account).
     bool tier_blocked(std::string_view model, const TierPolicy& policy);
-    void failure(std::string_view account, std::string_view model, std::string_view kind, unsigned retry_seconds = 0);
+    // `retry_seconds` (an upstream Retry-After) can extend the cooldown by up
+    // to a day; `until` (Unix seconds) is a deadline the cooldown lasts at
+    // least until, such as the next daily quota reset, which can be 25 hours
+    // away on the day Pacific time falls back.
+    void failure(std::string_view account, std::string_view model, std::string_view kind, unsigned retry_seconds = 0,
+                 std::int64_t until = 0);
     // Daily quota estimate per account and model (ignoring case, stored
     // lowercase), kept for the Pacific quota day of `at` (0: now) and pruned
     // after a week. reset_account() clears it;

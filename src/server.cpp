@@ -1061,7 +1061,7 @@ class Service {
                                 }
                             }
                         }
-                        unsigned retry = e.retry_after;
+                        std::int64_t until_reset = 0;
                         if (decision.cooldown == "rate_limit_day") {
                             // When the local estimate agrees that the day's
                             // allowance is spent, wait for the reset instead of
@@ -1069,13 +1069,11 @@ class Service {
                             // comes last for the model until the reset.
                             const auto known = tier.empty() ? store_.benefit_tier(account->id) : tier;
                             const auto used = store_.daily_use(account->id, request.model);
-                            if (tiers->exhausted(request.model, known, used.requests, used.tokens)) {
-                                const auto now = unix_seconds();
-                                retry = std::max(retry, static_cast<unsigned>(next_quota_reset(now) - now));
-                            }
+                            if (tiers->exhausted(request.model, known, used.requests, used.tokens))
+                                until_reset = next_quota_reset(unix_seconds());
                             store_.mark_daily_exhausted(account->id, request.model);
                         }
-                        store_.failure(account->id, request.model, decision.cooldown, retry);
+                        store_.failure(account->id, request.model, decision.cooldown, e.retry_after, until_reset);
                         count_cooldown(backend, decision.cooldown);
                         log({{"event", "account_failure"}, {"request_id", work->usage->id()},
                              {"account_id", account->id}, {"kind", decision.cooldown}, {"code", e.code}});

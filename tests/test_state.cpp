@@ -143,6 +143,10 @@ TEST_CASE("model quota cooldowns isolate counters and preserve drip recovery", "
     CHECK(store.choose("m")->id == id);
     store.clear_cooldown(id);
     store.failure(id, "m", "rate_limit_day", 100000); delay_is(86400);
+    // A deadline, such as the reset 25 hours away on the day Pacific time
+    // falls back, is not capped like Retry-After.
+    store.clear_cooldown(id);
+    store.failure(id, "m", "rate_limit_day", 0, unix_seconds() + 90000); delay_is(90000);
     store.remove_account(id);
     CHECK(scalar("SELECT COUNT(*) FROM quota_counters") == 0);
 }

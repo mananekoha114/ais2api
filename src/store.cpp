@@ -1076,7 +1076,7 @@ json::object Store::backend_events() {
     });
 }
 void Store::failure(std::string_view id, std::string_view model, std::string_view kind,
-                    unsigned retry) {
+                    unsigned retry, std::int64_t until_at) {
     impl_->run([&] {
         exec(impl_->db, "BEGIN IMMEDIATE");
         try {
@@ -1124,7 +1124,7 @@ void Store::failure(std::string_view id, std::string_view model, std::string_vie
                 const auto delay = std::max(base_delay, std::min(retry, 86400u));
                 auto until =
                     (kind == "permission" || kind == "403") ? INT64_MAX : current_time + delay;
-                until = std::max(until, quota_deadline);
+                until = std::max({until, quota_deadline, until_at});
                 if (quota_error) {
                     Statement save_quota(impl_->db, "INSERT INTO quota_counters(account,model,count,day,cooldown_until) VALUES(?,?,?,?,?) ON CONFLICT(account,model) DO UPDATE SET count=excluded.count,day=excluded.day,cooldown_until=excluded.cooldown_until");
                     save_quota.text(1, id); save_quota.text(2, m);
