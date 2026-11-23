@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/config.hpp"
+#include "ais2api/protocol.hpp"
 #include "ais2api/runtime.hpp"
 #include "ais2api/proxy.hpp"
 #include <algorithm>
@@ -69,6 +70,36 @@ std::string env(const char *k) {
   auto p = std::getenv(k);
   return p ? p : "";
 #endif
+}
+std::string_view trimmed(std::string_view text) {
+  const auto first = text.find_first_not_of(" \t\r\n");
+  if (first == std::string_view::npos)
+    return {};
+  return text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
+}
+bool json_object_text(std::string_view text) {
+  return trimmed(text).starts_with('{');
+}
+// The reference project's MODEL_MAPPING form "alias:model,alias2:model2":
+// each item splits at its last ':' and the first item for an alias wins.
+json::object mapping_aliases(std::string_view text) {
+  json::object aliases;
+  while (!text.empty()) {
+    const auto comma = text.find(',');
+    const auto item = trimmed(text.substr(0, comma));
+    text = comma == std::string_view::npos ? std::string_view{} : text.substr(comma + 1);
+    if (item.empty())
+      continue;
+    const auto colon = item.rfind(':');
+    const auto alias = colon == std::string_view::npos ? std::string_view{} : trimmed(item.substr(0, colon));
+    const auto model = colon == std::string_view::npos ? std::string_view{} : trimmed(item.substr(colon + 1));
+    if (alias.empty() || model.empty())
+      throw Error(400, "invalid_config",
+                  "AIS2API_MODEL_ALIASES must be a JSON object or alias:model items separated by commas");
+    if (!aliases.if_contains(alias))
+      aliases[alias] = model;
+  }
+  return aliases;
 }
 fs::path absolute_path(const fs::path &path, const fs::path &base) {
   return (path.is_absolute() ? path : base / path).lexically_normal();
@@ -253,6 +284,10 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
                     {"AIS2API_MODEL_DEFAULTS", "model_defaults"}}) {
     auto value = env(pair.first);
     if (env_exists(pair.first)) {
+      if (std::string_view(pair.second) == "model_aliases" && !json_object_text(value)) {
+        e[pair.second] = mapping_aliases(value);
+        continue;
+      }
       try {
         e[pair.second] = json::parse(value);
       } catch (...) {
@@ -499,10 +534,17 @@ void Config::validate() const {
   if (!cookie_import_max_accounts || cookie_import_max_accounts > 32 ||
       !cookie_import_timeout_seconds || cookie_import_timeout_seconds > 240)
     throw Error(400, "invalid_config", "Cookie import permits 1..32 accounts and a 1..240 second timeout");
-  for (auto &p : model_aliases)
+  for (auto &p : model_aliases) {
     if (!p.value().is_string() || p.value().as_string().empty())
       throw Error(400, "invalid_config",
                   "Model aliases must map to nonempty strings");
+    try {
+      validate_model_target(p.value().as_string());
+    } catch (const Error &error) {
+      throw Error(400, "invalid_config",
+                  "Model alias \"" + std::string(p.key()) + "\": " + error.what());
+    }
+  }
   for (auto &m : configured_models)
     if (!m.is_string() && !m.is_object())
       throw Error(400, "invalid_config", "Invalid configured model");

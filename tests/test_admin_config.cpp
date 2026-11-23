@@ -343,3 +343,23 @@ TEST_CASE("config patches enforce admin_key length policy and request_bytes uppe
     CHECK(at_limit.limits.request_bytes == 64ull * 1024 * 1024);
     CHECK_THROWS_AS(cfg.patched({{"limits", json::object{{"request_bytes", 64ull * 1024 * 1024 + 1}}}}), Error);
 }
+TEST_CASE("model alias targets accept thinking suffixes and the MODEL_MAPPING environment form", "[config][admin][thinking-suffix]") {
+    CompatibilityEnvironment environment("AIS2API_MODEL_ALIASES");
+    AdminDirectory dir;
+    auto cfg = Config::load(dir.path / "config.json");
+    auto patched = cfg.patched({{"model_aliases", json::object{{"fast", "gemini-4-argon(low)"},
+                                                               {"deep", "models/gemini-4-hydrogen-search(8192)"}}}});
+    CHECK(patched.model_aliases.at("fast") == "gemini-4-argon(low)");
+    for (const auto* bad : {"gemini-4-argon(banana)", "two words", "gemini)", "(low)", "a/b"})
+        CHECK_THROWS_AS(cfg.patched({{"model_aliases", json::object{{"x", bad}}}}), Error);
+
+    environment.set(" fast : gemini-4-argon(low) , deep:gemini-4-hydrogen,fast:gemini-ignored ,, a:b:gemini-x ");
+    CHECK(Config::load(cfg.config_file).model_aliases ==
+          json::object{{"fast", "gemini-4-argon(low)"}, {"deep", "gemini-4-hydrogen"}, {"a:b", "gemini-x"}});
+    environment.set(R"j( {"json": "gemini-4-neon(max)"})j");
+    CHECK(Config::load(cfg.config_file).model_aliases == json::object{{"json", "gemini-4-neon(max)"}});
+    for (const auto* bad : {"fast", "fast:", ":gemini-x", "fast:gemini(banana)", "{not json"}) {
+        environment.set(bad);
+        CHECK_THROWS_AS(Config::load(cfg.config_file), Error);
+    }
+}

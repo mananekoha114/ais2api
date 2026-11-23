@@ -440,7 +440,7 @@ const bytesHint = (field: FieldDef) => (field.unit === 'bytes' && typeof form[fi
             <FIcon name="branch" :size="20" class="t-secondary" />
             <div class="setting-text">
               <div class="label-row">模型别名 model_aliases</div>
-              <div class="desc">把客户端请求的模型名映射到实际模型。整体替换保存。</div>
+              <div class="desc">把客户端请求的模型名映射到实际模型；实际模型在模型目录中时，别名也会列在模型列表里。实际模型可带思考强度后缀，如 <code>gemini-4-argon(low)</code>；请求 <code>别名(high)</code> 时以请求的后缀为准。整体替换保存。</div>
             </div>
             <div class="setting-control column">
               <div v-for="(alias, index) in aliases" :key="index" class="list-row alias">

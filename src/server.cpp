@@ -1923,6 +1923,42 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
             object["source"] = "search_variant";
             expanded.push_back(std::move(object));
         }
+        // Aliases follow with their target's fields. An alias named like a
+        // listed model replaces that entry; one whose target is not listed
+        // still works but is not shown.
+        std::map<std::string, std::size_t, std::less<>> position;
+        for (std::size_t i = 0; i < expanded.size(); ++i)
+            if (expanded[i].is_object()) {
+                auto id = string_or(expanded[i].as_object(), "id", string_or(expanded[i].as_object(), "name"));
+                position.emplace(id.starts_with("models/") ? id.substr(7) : id, i);
+            }
+        for (auto &alias : cfg.model_aliases) {
+            // Keys that are not plain model names (a suffix, a slash) stay unlisted.
+            std::string name, listed_target;
+            try {
+                auto self = resolve_model(alias.key(), Config{});
+                if (!self.thinking.empty() || !alias.value().is_string())
+                    continue;
+                name = std::move(self.model);
+                listed_target = resolve_model(alias.value().as_string(), Config{}).model;
+            } catch (const Error &) {
+                continue;
+            }
+            auto found = position.find(listed_target);
+            if (found == position.end())
+                continue;
+            auto object = expanded[found->second].as_object();
+            object.erase("id");
+            object["name"] = "models/" + name;
+            object["displayName"] = name;
+            object["source"] = "alias";
+            if (auto existing = position.find(name); existing != position.end())
+                expanded[existing->second] = std::move(object);
+            else {
+                position.emplace(name, expanded.size());
+                expanded.push_back(std::move(object));
+            }
+        }
         for (auto &value : expanded) {
             if (!value.is_object())
                 continue;
