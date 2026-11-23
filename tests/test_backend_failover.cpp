@@ -878,3 +878,56 @@ TEST_CASE("Daily quota 429s wait for the Pacific reset only when the estimate ag
     CHECK(cooldown_until() >= reset - 2);
     CHECK(cooldown_until() <= std::max(reset, unix_seconds() + 60) + 2);
 }
+
+TEST_CASE("Tier skips never hide another account's failure or a cooling account that could serve",
+          "[tier][failover]") {
+    // Two attempts per request keep each scenario to the accounts it names.
+    FailoverServer server(2, [](std::string_view, const Config &) { return true; }, "windows-x64");
+    auto &store = *server.router_store;
+    const auto pro = server.first_id, fresh = server.second_id;
+    const auto third = import_account(store, "third-account", "Third");
+    adopt_backends(store, server.config);
+    // The Pro account is known; the other two are free accounts whose tier
+    // the page confirms only when they are tried.
+    store.set_benefit_tier(pro, "pro");
+    {
+        std::lock_guard lock(server.state->mutex);
+        server.state->tiers[pro] = "pro";
+        server.state->tiers[fresh] = "free";
+        server.state->tiers[third] = "free";
+    }
+    server.state->behavior = [pro](std::string_view, const Account &account, const Request &, unsigned) {
+        if (account.id == pro) throw Error(429, "rate_limit", "Model quota");
+        throw Error(403, "permission_denied", "Model needs a paid tier");
+    };
+
+    // The Pro account's 429 is the answer, not a tier refusal.
+    auto response = server.generate_chat("gemini-4-argon");
+    CHECK(response.result_int() == 429);
+    CHECK(response.body().find("tier_insufficient") == std::string::npos);
+    CHECK(store.benefit_tier(fresh) == "free");
+    {
+        std::lock_guard lock(server.state->mutex);
+        REQUIRE(server.state->attempts.size() == 2);
+        CHECK(server.state->attempts[0].account_id == pro);
+        CHECK(server.state->attempts[1].account_id == fresh);
+    }
+
+    // With the Pro account cooling, a newly confirmed free account leaves no
+    // account to try, which is not a tier refusal either.
+    response = server.generate_chat("gemini-4-argon");
+    CHECK(response.result_int() == 503);
+    CHECK(response.body().find("no_account") != std::string::npos);
+    CHECK(store.benefit_tier(third) == "free");
+    {
+        std::lock_guard lock(server.state->mutex);
+        REQUIRE(server.state->attempts.size() == 3);
+        CHECK(server.state->attempts[2].account_id == third);
+    }
+
+    // Once no usable account's tier can serve, the refusal is reported.
+    store.update_account_metadata(pro, {{"disabled", true}});
+    response = server.generate_chat("gemini-4-argon");
+    CHECK(response.result_int() == 403);
+    CHECK(response.body().find("tier_insufficient") != std::string::npos);
+}
