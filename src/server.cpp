@@ -19,6 +19,7 @@
 #include "ais2api/webui.hpp"
 #include "ais2api/usage.hpp"
 #include "ais2api/price_service.hpp"
+#include "ais2api/quota_service.hpp"
 #include <charconv>
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -88,6 +89,7 @@ class Service {
     explicit Service(Config config, std::unique_ptr<GenerationBackend> backend)
         : config_(std::move(config)), journal_(config_.data_dir), store_(config_.data_dir),
           prices_(store_, [this] { return this->config(); }, !backend),
+          quotas_(store_, [this] { return this->config(); }, !backend),
           custom_backend_(bool(backend)),
           gateway_(backend ? std::move(backend) : std::make_unique<BackendRouter>(config_, store_)),
           worker_([this](std::stop_token token) { work_loop(token); }) {
@@ -112,6 +114,7 @@ class Service {
         token_counter_.join();
         gateway_->close();
         prices_.stop();
+        quotas_.stop();
         // Queued request history reaches the database while logging still works.
         try { store_.flush_requests(); } catch (...) {}
     }
@@ -121,6 +124,7 @@ class Service {
     }
     Store &store() { return store_; }
     PriceService &prices() { return prices_; }
+    QuotaService &quotas() { return quotas_; }
     // Local token counting runs here, off the HTTP thread and outside the
     // generation queue.
     net::thread_pool::executor_type count_executor() { return token_counter_.get_executor(); }
@@ -494,6 +498,7 @@ class Service {
     std::atomic<bool> logging_healthy_{true};
     Store store_;
     PriceService prices_;
+    QuotaService quotas_;
     std::atomic<bool> usage_healthy_{true};
     const bool custom_backend_;
     std::unique_ptr<GenerationBackend> gateway_;
@@ -1507,6 +1512,11 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
         if (!admin_body(request).empty()) throw Error(400, "invalid_price_refresh", "Price refresh takes an empty object");
         service.prices().refresh(); result = service.prices().status(); status = 202;
     }
+    else if (get && path == "/quotas") result = service.quotas().status();
+    else if (post && path == "/quotas/refresh") {
+        if (!admin_body(request).empty()) throw Error(400, "invalid_quota_refresh", "Quota refresh takes an empty object");
+        service.quotas().refresh(); result = service.quotas().status(); status = 202;
+    }
     else if (method == http::verb::delete_ && path == "/stats") command = {{"command", "stats.reset"}};
     else if (get && path == "/accounts") command = {{"command", "accounts.list"}};
     else if (get && path == "/accounts/active") {
@@ -1622,7 +1632,7 @@ void set_flavor(const http::request_header<> &head, std::string_view path, Conne
 }
 bool is_admin_body_route(http::verb method, std::string_view path) {
     if (method == http::verb::post) {
-        if (path == "/auth/password" || path == "/pricing/refresh" ||
+        if (path == "/auth/password" || path == "/pricing/refresh" || path == "/quotas/refresh" ||
             path == "/rotation/next" || path == "/rotation/clear-cooldown" ||
             path == "/config/validate" || path == "/config/reload" ||
             path == "/keys" || path == "/models/refresh" ||

@@ -2842,6 +2842,175 @@
           }
         }
       }
+    },
+    "/quotas": {
+      "get": {
+        "operationId": "get_quotas",
+        "summary": "Get the tier quota catalog source and the effective table",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotaStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query or body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid management Bearer credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Management permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request missing or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Active requests prevent resetting statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/quotas/refresh": {
+      "post": {
+        "operationId": "refresh_quotas",
+        "summary": "Queue a tier quota catalog download independently of generation",
+        "parameters": [],
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotaStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query or body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid management Bearer credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Management permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request missing or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Active requests prevent resetting statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "maxProperties": 0
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3450,6 +3619,31 @@
           },
           "model_defaults": {
             "type": "object"
+          },
+          "tier_quotas": {
+            "type": "object",
+            "description": "Per-model replacements of the tier quota catalog; keys are lowercase model ids.",
+            "additionalProperties": {
+              "type": "object",
+              "propertyNames": {
+                "enum": [
+                  "free",
+                  "plus",
+                  "pro",
+                  "ultra"
+                ]
+              },
+              "additionalProperties": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TierLimit"
+                  }
+                ]
+              }
+            }
           },
           "limits": {
             "type": "object",
@@ -4387,6 +4581,124 @@
           "refreshing",
           "error",
           "sources"
+        ]
+      },
+      "TierLimit": {
+        "type": "object",
+        "properties": {
+          "requests": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000
+          },
+          "tokens": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000000
+          }
+        },
+        "required": [
+          "requests",
+          "tokens"
+        ],
+        "additionalProperties": false
+      },
+      "QuotaStatus": {
+        "type": "object",
+        "properties": {
+          "refreshing": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          },
+          "source": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string"
+              },
+              "fetched_at": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "attempted_at": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "error": {
+                "type": "string"
+              },
+              "published_at": {
+                "type": "string"
+              },
+              "models": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "embedded": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "url",
+              "fetched_at",
+              "attempted_at",
+              "error",
+              "published_at",
+              "models",
+              "embedded"
+            ]
+          },
+          "models": {
+            "type": "object",
+            "description": "Effective table; a tier missing from tiers has no known limit, null cannot use the model.",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "origin": {
+                  "enum": [
+                    "catalog",
+                    "config"
+                  ]
+                },
+                "tiers": {
+                  "type": "object",
+                  "propertyNames": {
+                    "enum": [
+                      "free",
+                      "plus",
+                      "pro",
+                      "ultra"
+                    ]
+                  },
+                  "additionalProperties": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/TierLimit"
+                      }
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "origin",
+                "tiers"
+              ]
+            }
+          }
+        },
+        "required": [
+          "refreshing",
+          "error",
+          "source",
+          "models"
         ]
       }
     },

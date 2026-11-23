@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/config.hpp"
+#include "ais2api/tier_quota.hpp"
 #include "ais2api/protocol.hpp"
 #include "ais2api/runtime.hpp"
 #include "ais2api/proxy.hpp"
@@ -195,7 +196,8 @@ json::object Config::to_json(bool portable_paths) const {
             {"max_continuation_retries", limits.max_continuation_retries}}},
           {"model_aliases", model_aliases},
           {"configured_models", configured_models},
-          {"model_defaults", model_defaults}};
+          {"model_defaults", model_defaults},
+          {"tier_quotas", tier_quotas}};
 }
 void Config::save() const {
   validate();
@@ -281,7 +283,8 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
                     {"AIS2API_LIMITS", "limits"},
                     {"AIS2API_MODEL_ALIASES", "model_aliases"},
                     {"AIS2API_CONFIGURED_MODELS", "configured_models"},
-                    {"AIS2API_MODEL_DEFAULTS", "model_defaults"}}) {
+                    {"AIS2API_MODEL_DEFAULTS", "model_defaults"},
+                    {"AIS2API_TIER_QUOTAS", "tier_quotas"}}) {
     auto value = env(pair.first);
     if (env_exists(pair.first)) {
       if (std::string_view(pair.second) == "model_aliases" && !json_object_text(value)) {
@@ -336,7 +339,7 @@ static Config parse_config(Config c, json::object o) {
              "cookie_import_max_accounts", "cookie_import_timeout_seconds", "data_dir", "browser_executable",
              "browser_backend", "proxy", "browser_proxy_relay", "headless", "ignore_unsupported_parameters",
              "search_model_drop_functions", "browser_idle_seconds", "limits", "model_aliases",
-             "configured_models", "model_defaults", "request_retention_days", "continuation_retry_enabled",
+             "configured_models", "model_defaults", "tier_quotas", "request_retention_days", "continuation_retry_enabled",
              "nonstream_keepalive_seconds"});
   auto text = [&](const char *k) {
     if (!o.at(k).is_string())
@@ -402,7 +405,7 @@ static Config parse_config(Config c, json::object o) {
   c.request_retention_days = static_cast<unsigned>(retention);
   if (!o.at("limits").is_object() || !o.at("model_aliases").is_object() ||
       !o.at("configured_models").is_array() ||
-      !o.at("model_defaults").is_object())
+      !o.at("model_defaults").is_object() || !o.at("tier_quotas").is_object())
     throw Error(400, "invalid_config", "Invalid configuration container");
   auto &l = o.at("limits").as_object();
   fields(l, {"request_bytes", "object_bytes", "relay_bytes", "queue_size",
@@ -426,6 +429,7 @@ static Config parse_config(Config c, json::object o) {
   c.model_aliases = o.at("model_aliases").as_object();
   c.configured_models = o.at("configured_models").as_array();
   c.model_defaults = o.at("model_defaults").as_object();
+  c.tier_quotas = o.at("tier_quotas").as_object();
   c.validate();
   return c;
 }
@@ -548,6 +552,7 @@ void Config::validate() const {
   for (auto &m : configured_models)
     if (!m.is_string() && !m.is_object())
       throw Error(400, "invalid_config", "Invalid configured model");
+  (void)parse_quota_overrides(tier_quotas);
   if (!limits.request_bytes || limits.request_bytes > 64ull * 1024 * 1024 ||
       !limits.object_bytes || !limits.relay_bytes ||
       !limits.queue_size || !limits.queue_seconds ||

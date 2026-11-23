@@ -60,6 +60,33 @@ export interface Account {
 
 export type AccountBackend = 'auto' | 'camoufox' | 'spidermonkey'
 
+/** Subscription tiers GetAiStudioBenefitTier names. */
+export type BenefitTier = 'free' | 'plus' | 'pro' | 'ultra'
+
+/** Daily Playground allowance of one tier for one model. */
+export interface TierLimit {
+  requests: number
+  tokens: number
+}
+
+/** GET /quotas and POST /quotas/refresh. */
+export interface QuotaStatus {
+  refreshing: boolean
+  error: string
+  source: {
+    url: string
+    fetched_at: number
+    attempted_at: number
+    error: string
+    published_at: string
+    models: number
+    /** Never downloaded: the build's embedded snapshot is in use. */
+    embedded: boolean
+  }
+  /** Effective table; a tier missing from `tiers` has no known limit, null cannot use the model. */
+  models: Record<string, { origin: 'catalog' | 'config'; tiers: Partial<Record<BenefitTier, TierLimit | null>> }>
+}
+
 /** GET/PATCH /accounts/{id}/fingerprint and POST .../regenerate. */
 export interface FingerprintView {
   seed: number
@@ -286,6 +313,8 @@ export interface Config {
   model_aliases?: Record<string, string>
   configured_models?: Array<string | Record<string, unknown>>
   model_defaults?: Record<string, unknown>
+  /** Per-model replacements of the tier quota catalog. */
+  tier_quotas?: Record<string, Partial<Record<BenefitTier, TierLimit | null>>>
   limits?: Limits
   admin_key?: string
   admin_origins?: string[]

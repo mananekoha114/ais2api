@@ -34,6 +34,67 @@ void ensure_curl_initialized() {
     std::call_once(once, [] { static CurlGlobalGuard guard; });
 }
 
+std::string fetch_small_https(std::string_view url, const std::string &proxy, std::stop_token token,
+                              std::size_t limit, std::string_view error_prefix) {
+    ensure_curl_initialized();
+    const std::string prefix(error_prefix);
+    std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
+    if (!curl)
+        throw Error(502, prefix + "_network_init", "Cannot initialize catalog download");
+    const std::string address(url);
+    struct Download {
+        std::string text;
+        std::size_t limit = 0;
+        bool exceeded = false;
+    } data;
+    data.limit = limit;
+    curl_easy_setopt(curl.get(), CURLOPT_URL, address.c_str());
+    curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, "ais2api/0.1");
+    curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR, "https");
+    curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 30L);
+    if (!proxy.empty())
+        curl_easy_setopt(curl.get(), CURLOPT_PROXY, proxy.c_str());
+    curl_easy_setopt(
+        curl.get(), CURLOPT_WRITEFUNCTION,
+        +[](char *ptr, std::size_t size, std::size_t count, void *context) -> std::size_t {
+            auto &d = *static_cast<Download *>(context);
+            if (size && count > (d.limit - d.text.size()) / size) {
+                d.exceeded = true;
+                return 0;
+            }
+            auto bytes = size * count;
+            try {
+                d.text.append(ptr, bytes);
+            } catch (...) {
+                return 0;
+            }
+            return bytes;
+        });
+    curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &data);
+    curl_easy_setopt(curl.get(), CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(
+        curl.get(), CURLOPT_XFERINFOFUNCTION,
+        +[](void *context, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
+            return static_cast<std::stop_token *>(context)->stop_requested() ? 1 : 0;
+        });
+    curl_easy_setopt(curl.get(), CURLOPT_XFERINFODATA, &token);
+    auto code = curl_easy_perform(curl.get());
+    check_cancel(token);
+    if (data.exceeded)
+        throw Error(502, prefix + "_catalog_too_large",
+                    "Catalog exceeds " + std::to_string(limit / (1024 * 1024)) + " MiB");
+    if (code != CURLE_OK)
+        throw Error(502, prefix + "_download_failed", "Catalog download failed");
+    long status = 0;
+    curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
+    if (status != 200)
+        throw Error(502, prefix + "_http_" + std::to_string(status), "Catalog source rejected download");
+    return std::move(data.text);
+}
+
 namespace {
 using Curl = std::unique_ptr<CURL, decltype(&curl_easy_cleanup)>;
 Curl curl_handle(const download_detail::Options &options) {
