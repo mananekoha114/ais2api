@@ -6,6 +6,7 @@ import {
   exhaustedModels,
   formatTokensWan,
   quotaCell,
+  quotaProblem,
   quotaResetText,
   quotaSourceText,
   tierBadge,
@@ -116,6 +117,13 @@ describe('daily quota formatting', () => {
     expect(quotaSourceText(status)).toBe(
       `数据版本 ${formatTimestamp(Date.parse('2026-11-23T00:00:00Z') / 1000)} · 10 个模型 · 内置快照 · 尚未联网检查`,
     )
+    // A failed download is reported from the source; the request and service errors come first.
+    expect(quotaProblem(null)).toBe('')
+    expect(quotaProblem(status)).toBe('')
+    const failed = { ...status, source: { ...status.source, error: 'quota_http_404', attempted_at: NOW } }
+    expect(quotaProblem(failed)).toBe('quota_http_404')
+    expect(quotaProblem({ ...failed, error: 'quota_snapshot_invalid' })).toBe('quota_snapshot_invalid')
+    expect(quotaProblem(failed, '网络错误')).toBe('网络错误')
     expect(quotaSourceText({ ...status, source: { ...status.source, embedded: false, fetched_at: NOW, attempted_at: NOW } })).toContain(
       `GitHub 获取于 ${formatTimestamp(NOW)} · 上次检查 ${formatTimestamp(NOW)}`,
     )

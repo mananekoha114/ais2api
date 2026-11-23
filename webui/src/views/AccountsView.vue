@@ -22,6 +22,7 @@ import {
   formatTokensWan,
   now,
   quotaCell,
+  quotaProblem,
   quotaResetText,
   quotaSourceText,
   tierBadge,
@@ -246,13 +247,16 @@ function menuFor(a: Account): MenuItem[] {
         <summary>
           <strong>每日额度</strong>
           <span class="t-caption t-secondary">{{ quotaResetText(rotation?.quota_resets_at, clock) }}</span>
+          <span v-if="quotaProblem(quotas, quotaError)" class="t-caption quota-warn">
+            <FIcon name="warning" :size="12" /> 额度数据更新失败
+          </span>
         </summary>
         <div class="stack" style="--gap: 8px; margin-top: 12px">
           <FInfoBar
-            v-if="quotaError || quotas?.error"
+            v-if="quotaProblem(quotas, quotaError)"
             severity="warning"
             title="额度数据更新失败，继续使用已保存的数据"
-            :message="quotaError || quotas?.error || ''"
+            :message="quotaProblem(quotas, quotaError)"
           />
           <p class="t-caption t-secondary">{{ quotaSourceText(quotas) }}</p>
           <p class="t-caption t-secondary">
@@ -555,6 +559,9 @@ function menuFor(a: Account): MenuItem[] {
 }
 .quota summary .t-caption {
   margin-left: 12px;
+}
+.quota-warn {
+  color: var(--caution);
 }
 .quota {
   padding: 12px 16px;

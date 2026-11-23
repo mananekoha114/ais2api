@@ -104,6 +104,14 @@ export const exhaustedModels = (account: Account) => (account.daily_usage ?? [])
 export const quotaResetText = (resetsAt: number | undefined, at = now()) =>
   resetsAt ? `下次重置 ${formatTimestamp(resetsAt)}（${formatRelative(resetsAt, at)}）` : ''
 
+/**
+ * The quota table's current problem: reading it failed, the service could not
+ * load it, or the last download failed (`source.error`, such as
+ * `quota_http_404`); the stored table stays in use meanwhile.
+ */
+export const quotaProblem = (status: QuotaStatus | null, requestError = '') =>
+  requestError || status?.error || status?.source.error || ''
+
 /** Where the quota table came from and when it was last checked. */
 export function quotaSourceText(status: QuotaStatus | null): string {
   if (!status) return '正在读取额度数据…'
