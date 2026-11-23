@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/store.hpp"
+#include "ais2api/tier_quota.hpp"
 #include "ais2api/usage.hpp"
 #include "../browser/rate_policy.hpp"
 #include <catch2/catch_test_macros.hpp>
@@ -740,4 +741,66 @@ TEST_CASE("account tiers persist, ignore unknown answers and leave with the acco
     CHECK(store.benefit_tier("acc_missing").empty());
     store.remove_account(id);
     CHECK(store.benefit_tier(id).empty());
+}
+
+namespace {
+// m-pro: free refused; m-all: every tier; other models are unlisted.
+TierPolicy test_tier_policy() {
+    const auto catalog = json::parse(R"({"schema_version":1,"published_at":"2026-11-23T00:00:00Z",
+      "tier_fallback":{"plus":"free"},
+      "models":{"m-pro":{"free":null,"pro":{"requests":5,"tokens":500},"ultra":{"requests":9,"tokens":900}},
+                "m-all":{"free":{"requests":2,"tokens":200},"pro":{"requests":5,"tokens":500},"ultra":{"requests":9,"tokens":900}}}})");
+    return TierPolicy(parse_quota_catalog(catalog, 0), {});
+}
+} // namespace
+
+TEST_CASE("tier policies filter accounts and prefer lower tiers when switching", "[tier][state]") {
+    Directory d;
+    Store store(d.path);
+    const auto import = [&](std::string name) { return string_or(store.import_accounts(credential(name))[0].as_object(), "id"); };
+    // Import order: unknown, ultra, pro, free.
+    const auto unknown = import("unknown"), ultra = import("ultra"), pro = import("pro"), free = import("free");
+    store.set_benefit_tier(ultra, "ultra");
+    store.set_benefit_tier(pro, "pro");
+    store.set_benefit_tier(free, "free");
+    const auto policy = test_tier_policy();
+    const auto chosen = [&](std::string_view model, const std::vector<std::string> &excluded = {}, const TierPolicy *p = nullptr) {
+        auto account = store.choose(model, excluded, false, p);
+        return account ? account->id : std::string();
+    };
+    // Without a policy the order is unchanged: import order.
+    CHECK(chosen("m-all") == unknown);
+    CHECK(chosen("m-pro") == unknown);
+    // Lower tiers first; unknown tiers last; refused tiers never.
+    CHECK(chosen("m-all", {}, &policy) == free);
+    CHECK(chosen("m-pro", {}, &policy) == pro);
+    CHECK(chosen("m-pro", {pro}, &policy) == ultra);
+    CHECK(chosen("m-pro", {pro, ultra}, &policy) == unknown);
+    CHECK(chosen("m-pro", {pro, ultra, unknown}, &policy).empty());
+    // Unlisted models are never filtered.
+    CHECK(chosen("other", {}, &policy) == free);
+    // The resident account stays first while it can serve the model.
+    store.success(ultra, "m-all");
+    CHECK(chosen("m-all", {}, &policy) == ultra);
+    CHECK(chosen("m-pro", {}, &policy) == ultra);
+    store.success(free, "m-all");
+    CHECK(chosen("m-pro", {}, &policy) == pro);
+    // The preferred account outranks tiers; selecting also makes it current.
+    store.select_account(unknown);
+    CHECK(chosen("m-pro", {}, &policy) == unknown);
+    CHECK(chosen("m-pro", {unknown}, &policy) == pro);
+    // Cooldowns and auth probes respect the policy too.
+    store.failure(pro, "m-pro", "rate_limit_minute");
+    CHECK(chosen("m-pro", {unknown}, &policy) == ultra);
+
+    CHECK_FALSE(store.tier_blocked("m-pro", policy));
+    CHECK_FALSE(store.tier_blocked("m-all", policy));
+    store.update_account_metadata(unknown, {{"disabled", true}});
+    store.update_account_metadata(ultra, {{"disabled", true}});
+    store.update_account_metadata(pro, {{"disabled", true}});
+    CHECK(store.tier_blocked("m-pro", policy));
+    CHECK_FALSE(store.tier_blocked("m-all", policy));
+    CHECK_FALSE(store.tier_blocked("other", policy));
+    store.update_account_metadata(free, {{"disabled", true}});
+    CHECK_FALSE(store.tier_blocked("m-pro", policy));
 }

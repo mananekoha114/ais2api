@@ -14,6 +14,7 @@
 #include "ais2api/usage.hpp"
 #include "../browser/rate_policy.hpp"
 #include <algorithm>
+#include <tuple>
 #include <condition_variable>
 #include <deque>
 #include <future>
@@ -819,45 +820,62 @@ void Store::reset_account(std::string_view id) {
         }
     });
 }
-std::optional<Account> Store::choose(std::string_view model,
-                                     const std::vector<std::string> &excluded, bool auth_probe) {
+std::optional<Account> Store::choose(std::string_view model, const std::vector<std::string> &excluded,
+                                     bool auth_probe, const TierPolicy *policy) {
     return impl_->run([&]() -> std::optional<Account> {
         const auto now = unix_seconds();
         // Stay on the account that last completed a generation (the browser's
         // resident session) while it can serve the model; switching rebuilds
         // the page and may restart the browser for another fingerprint. Then
-        // the preferred account, then the account that last served the model.
-        constexpr std::string_view preference =
-            " ORDER BY (a.id=(SELECT v FROM settings WHERE k='current')) DESC,(a.id=(SELECT v FROM "
-            "settings WHERE k='selected')) DESC,(a.id=(SELECT account FROM sticky WHERE model=?3)) DESC,a.rowid";
+        // the preferred account. With a tier policy, lower tiers come next,
+        // keeping higher tiers' allowance for the models only they can use;
+        // then the account that last served the model, then import order. A
+        // policy also leaves out accounts whose known tier cannot use the model.
+        struct Candidate {
+            Account account;
+            bool current, selected, sticky;
+            int rank;
+        };
         auto pick = [&](std::string_view filter) -> std::optional<Account> {
-            Statement s(impl_->db, (std::string(filter) + std::string(preference)).c_str());
+            Statement s(impl_->db,
+                        ("SELECT a.id,a.name,a.email,a.auth_user,a.state,a.disabled,"
+                         "a.id=(SELECT v FROM settings WHERE k='current'),a.id=(SELECT v FROM settings WHERE k='selected'),"
+                         "a.id=(SELECT account FROM sticky WHERE model=?3),"
+                         "COALESCE((SELECT tier FROM account_tiers t WHERE t.account=a.id),'') FROM accounts a WHERE " +
+                         std::string(filter) + " ORDER BY a.rowid")
+                            .c_str());
             s.text(1, model);
             s.integer(2, now);
             s.text(3, model);
+            std::vector<Candidate> candidates;
             while (s.row()) {
                 auto a = decode(s);
                 if (std::find(excluded.begin(), excluded.end(), a.id) != excluded.end())
                     continue;
-                return a;
+                const auto tier = s.str(9);
+                if (policy && policy->excludes(model, tier))
+                    continue;
+                candidates.push_back({std::move(a), sqlite3_column_int(s.p, 6) != 0, sqlite3_column_int(s.p, 7) != 0,
+                                      sqlite3_column_int(s.p, 8) != 0, policy ? tier_rank(tier) : 0});
             }
-            return {};
+            // The first of the best keeps import order among equals.
+            const auto key = [](const Candidate &c) { return std::tuple(!c.current, !c.selected, c.rank, !c.sticky); };
+            const auto best = std::min_element(candidates.begin(), candidates.end(),
+                                               [&](const Candidate &x, const Candidate &y) { return key(x) < key(y); });
+            if (best == candidates.end()) return {};
+            return std::move(best->account);
         };
-        if (auto a = pick("SELECT a.id,a.name,a.email,a.auth_user,a.state,a.disabled FROM "
-                          "accounts a WHERE a.disabled=0 AND a.expired=0 AND NOT EXISTS(SELECT 1 "
-                          "FROM failures f WHERE f.account=a.id AND (f.model=?1 OR f.model='*') "
-                          "AND f.until>?2)"))
+        if (auto a = pick("a.disabled=0 AND a.expired=0 AND NOT EXISTS(SELECT 1 FROM failures f WHERE f.account=a.id AND "
+                          "(f.model=?1 OR f.model='*') AND f.until>?2)"))
             return a;
         if (!auth_probe) return {};
         // Every account is cooling down. An auth cooldown alone may be stale
         // (the session problem resolved itself), so admit one account blocked
         // only by it for a single attempt per cooldown; quota, permission,
         // expiry and disabled states are never bypassed.
-        auto a = pick("SELECT a.id,a.name,a.email,a.auth_user,a.state,a.disabled FROM "
-                      "accounts a WHERE a.disabled=0 AND a.expired=0 AND EXISTS(SELECT 1 FROM "
-                      "failures f WHERE f.account=a.id AND f.model='*' AND f.kind='auth' AND "
-                      "f.probed=0 AND f.until>?2) AND NOT EXISTS(SELECT 1 FROM failures f WHERE "
-                      "f.account=a.id AND (f.model=?1 OR f.model='*') AND f.until>?2 AND NOT "
+        auto a = pick("a.disabled=0 AND a.expired=0 AND EXISTS(SELECT 1 FROM failures f WHERE f.account=a.id AND "
+                      "f.model='*' AND f.kind='auth' AND f.probed=0 AND f.until>?2) AND NOT EXISTS(SELECT 1 FROM failures f "
+                      "WHERE f.account=a.id AND (f.model=?1 OR f.model='*') AND f.until>?2 AND NOT "
                       "(f.model='*' AND f.kind='auth' AND f.probed=0))");
         if (a) {
             Statement probed(impl_->db, "UPDATE failures SET probed=1 WHERE account=? AND model='*' AND kind='auth'");
@@ -865,6 +883,18 @@ std::optional<Account> Store::choose(std::string_view model,
             probed.row();
         }
         return a;
+    });
+}
+bool Store::tier_blocked(std::string_view model, const TierPolicy &policy) {
+    return impl_->run([&] {
+        Statement s(impl_->db, "SELECT COALESCE(t.tier,'') FROM accounts a LEFT JOIN account_tiers t ON t.account=a.id "
+                               "WHERE a.disabled=0 AND a.expired=0");
+        bool any = false;
+        while (s.row()) {
+            any = true;
+            if (!policy.excludes(model, s.str(0))) return false;
+        }
+        return any;
     });
 }
 ModelCatalog Store::model_catalog() {

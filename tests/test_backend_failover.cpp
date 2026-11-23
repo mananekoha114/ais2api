@@ -93,6 +93,8 @@ struct FailoverState {
     std::function<void(std::string_view backend, const Account &account, const Request &request, unsigned backend_call)>
         behavior;
     std::map<std::string, unsigned, std::less<>> backend_calls;
+    // The benefit tier each account's page reports.
+    std::map<std::string, std::string, std::less<>> tiers;
 };
 
 class ScriptedGateway final : public GenerationBackend {
@@ -117,6 +119,11 @@ class ScriptedGateway final : public GenerationBackend {
     json::array models(const Account &, std::stop_token) override { return {}; }
     json::object probe(const Account &, std::stop_token) override { return {{"ok", true}, {"status", "ok"}}; }
     json::object diagnostics() override { return {{"status", name_ + "_ready"}}; }
+    std::string benefit_tier(const Account &account) override {
+        std::lock_guard lock(state_->mutex);
+        const auto found = state_->tiers.find(account.id);
+        return found == state_->tiers.end() ? std::string() : found->second;
+    }
     void reconfigure(const Config &) override {}
     void close() override {
         std::lock_guard lock(state_->mutex);
@@ -754,4 +761,49 @@ TEST_CASE("Service generate fails over auto Firefox accounts for 6 hours after r
         CHECK(server.state->attempts[2].account_id == server.second_id);
     }
 #endif
+}
+
+TEST_CASE("Service skips accounts whose confirmed tier refuses the model without penalties", "[tier][failover]") {
+    FailoverServer server(3, [](std::string_view, const Config &) { return true; }, "windows-x64");
+    {
+        std::lock_guard lock(server.state->mutex);
+        server.state->tiers[server.first_id] = "free";
+        server.state->tiers[server.second_id] = "pro";
+    }
+    const auto first = server.first_id;
+    server.state->behavior = [first](std::string_view, const Account &account, const Request &, unsigned) {
+        if (account.id == first) throw Error(403, "permission_denied", "Model needs a paid tier");
+    };
+    auto response = server.generate_chat("gemini-4-argon");
+    REQUIRE(response.result_int() == 200);
+    {
+        std::lock_guard lock(server.state->mutex);
+        REQUIRE(server.state->attempts.size() == 2);
+        CHECK(server.state->attempts[0].account_id == server.first_id);
+        CHECK(server.state->attempts[1].account_id == server.second_id);
+        // No session rebuild or browser restart for a tier refusal.
+        CHECK(server.state->events.empty());
+    }
+    CHECK(server.router_store->benefit_tier(server.first_id) == "free");
+    CHECK(server.router_store->benefit_tier(server.second_id) == "pro");
+    CHECK_FALSE(server.router_store->backend_switch(server.first_id).has_value());
+    for (const auto &row : server.router_store->account_status())
+        CHECK(row.at("failures").as_array().empty());
+
+    // Known tiers route the next request straight to the account that can serve.
+    response = server.generate_chat("gemini-4-argon");
+    REQUIRE(response.result_int() == 200);
+    {
+        std::lock_guard lock(server.state->mutex);
+        REQUIRE(server.state->attempts.size() == 3);
+        CHECK(server.state->attempts[2].account_id == server.second_id);
+    }
+
+    // When no account's tier can use the model, nothing is attempted.
+    server.router_store->set_benefit_tier(server.second_id, "plus");
+    response = server.generate_chat("gemini-4-carbon");
+    CHECK(response.result_int() == 403);
+    CHECK(response.body().find("tier_insufficient") != std::string::npos);
+    std::lock_guard lock(server.state->mutex);
+    CHECK(server.state->attempts.size() == 3);
 }

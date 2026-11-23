@@ -810,13 +810,22 @@ class Service {
             // One stale request-template discard per request.
             bool template_refreshed = false;
             unsigned max_attempts = cfg.limits.max_attempts;
+            // Which tiers can use the model, and their daily allowances.
+            const auto tiers = quotas_.policy(cfg);
+            const auto tier_refused = [&] {
+                return Error(403, "tier_insufficient",
+                             "No account has a subscription tier that can use " + request.model);
+            };
             for (unsigned attempt = 0; attempt < max_attempts; ++attempt) {
                 ++trace.attempts;
                 check_cancel(token);
-                auto account = retry_account ? std::exchange(retry_account, std::nullopt) : store_.choose(request.model, excluded, true);
+                auto account = retry_account ? std::exchange(retry_account, std::nullopt)
+                                             : store_.choose(request.model, excluded, true, tiers.get());
                 if (!account) {
                     if (previous)
                         throw *previous;
+                    if (store_.tier_blocked(request.model, *tiers))
+                        throw tier_refused();
                     throw Error(503, "no_account",
                                 "No usable account for this model; import or reset credentials "
                                 "with the CLI");
@@ -936,10 +945,21 @@ class Service {
                 } catch (const Error &e) {
                     work->usage->end_attempt(e.code);
                     count_error(backend, e.code);
-                    remember_tier();
+                    const auto tier = remember_tier();
                     if (token.stop_requested() || delivered || continuing)
                         throw;
                     const bool last = attempt + 1 >= max_attempts;
+                    // A page confirming a tier the model refuses explains the
+                    // 403: leave the account out of this request without a
+                    // session rebuild, cooldown or backend switch.
+                    if (e.status == 403 && !tier.empty() && tiers->excludes(request.model, tier)) {
+                        log({{"event", "tier_skip"}, {"request_id", work->usage->id()},
+                             {"account_id", account->id}, {"tier", tier}, {"code", e.code}});
+                        excluded.push_back(account->id);
+                        previous = tier_refused();
+                        if (last) throw *previous;
+                        continue;
+                    }
                     const bool was_recovered = recovered;
                     auto decision = classify_failure(e, attempt, recovered, template_refreshed);
                     // Without an attempt left a recovery cannot run; judge the

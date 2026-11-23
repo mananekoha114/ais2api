@@ -10,6 +10,7 @@
 #include <memory>
 #include <limits>
 namespace ais2api {
+class TierPolicy;
 struct Account {
     std::string id, name, email;
     std::string auth_user = "0";
@@ -127,8 +128,14 @@ public:
     std::string identity_secret();
     // With `auth_probe`, when no account is available, one account blocked only
     // by an `auth` cooldown is admitted for a single attempt per cooldown period.
+    // With `policy`, accounts whose recorded tier cannot use `model` are left
+    // out and lower tiers are preferred when the resident and preferred
+    // accounts cannot serve (see TierPolicy).
     std::optional<Account> choose(std::string_view model, const std::vector<std::string>& excluded = {},
-                                  bool auth_probe = false);
+                                  bool auth_probe = false, const TierPolicy* policy = nullptr);
+    // Every enabled, unexpired account has a recorded tier that `policy`
+    // refuses for `model` (and there is at least one such account).
+    bool tier_blocked(std::string_view model, const TierPolicy& policy);
     void failure(std::string_view account, std::string_view model, std::string_view kind, unsigned retry_seconds = 0);
     // Diagnostic counters per browser backend, kept per UTC day and cleared
     // with the request statistics: {since (Unix seconds), backends: {<backend>:
