@@ -63,6 +63,14 @@ struct Task {
     std::function<void()> execute;
     std::function<void()> cancel;
 };
+// An upstream round's own token total (usageMetadata.totalTokenCount), 0 when
+// absent or invalid.
+std::int64_t round_total_tokens(const json::object &usage) {
+    const auto value = usage.if_contains("totalTokenCount");
+    if (value && value->is_int64()) return std::max<std::int64_t>(value->as_int64(), 0);
+    if (value && value->is_uint64()) return static_cast<std::int64_t>(std::min<std::uint64_t>(value->as_uint64(), INT64_MAX));
+    return 0;
+}
 // Time reserved after the account scan for persisting accounts and replying.
 constexpr auto cookie_import_commit_margin = 5s;
 struct CookieImportJob {
@@ -125,6 +133,13 @@ class Service {
     Store &store() { return store_; }
     PriceService &prices() { return prices_; }
     QuotaService &quotas() { return quotas_; }
+    // An account list with each account's daily quota view and the next reset.
+    json::object with_quota(json::object result) {
+        if (auto accounts = result.if_contains("accounts"); accounts && accounts->is_array())
+            annotate_quota(accounts->as_array(), *quotas_.policy(config()));
+        result["quota_resets_at"] = next_quota_reset(unix_seconds());
+        return result;
+    }
     // Local token counting runs here, off the HTTP thread and outside the
     // generation queue.
     net::thread_pool::executor_type count_executor() { return token_counter_.get_executor(); }
@@ -353,7 +368,7 @@ class Service {
             }
             return result;
         }
-        if (action == "rotation.status") return store_.rotation_status(config());
+        if (action == "rotation.status") return with_quota(store_.rotation_status(config()));
         if (action == "browser.diagnostics") return gateway_->diagnostics();
         if (action == "rotation.next") return {{"preferred_account_id", store_.rotate_account()},
             {"browser_prepared", false}};
@@ -371,6 +386,7 @@ class Service {
         auto result = manage(store_, cfg, command);
         if (action == "accounts.import")
             discover_models_after_import(result.at("accounts").as_array());
+        if (action == "accounts.list") return with_quota(std::move(result));
         return result;
     }
     json::object diagnostics_report() {
@@ -849,6 +865,17 @@ class Service {
                 json::object completed_usage;
                 bool continuing = false, over_budget = false;
                 unsigned round = 1;
+                // Daily quota estimate: each upstream round that produced
+                // content counts as one request with that round's own tokens.
+                bool round_content = false;
+                std::int64_t round_tokens = 0;
+                const auto count_round = [&] {
+                    const bool counted = std::exchange(round_content, false);
+                    const auto tokens = std::exchange(round_tokens, std::int64_t{0});
+                    if (!counted) return;
+                    try { store_.record_daily_use(account->id, request.model, 1, tokens); }
+                    catch (const std::exception &) {}
+                };
                 try {
                     bool received = false;
                     bool completed = false;
@@ -857,6 +884,7 @@ class Service {
                         [&](GenerationEvent next) {
                             check_cancel(token);
                             if (next.kind == GenerationEvent::Kind::continuation_failed) {
+                                count_round();
                                 count_error(backend, string_or(next.data, "error"));
                                 work->usage->end_attempt(string_or(next.data, "error"));
                                 return;
@@ -877,7 +905,11 @@ class Service {
                                 return;
                             }
                             auto event = std::move(next.data);
-                            work->usage->event(event, has_content(event));
+                            const bool content = has_content(event);
+                            work->usage->event(event, content);
+                            round_content = round_content || content;
+                            if (auto usage = event.if_contains("usageMetadata"); usage && usage->is_object())
+                                round_tokens = round_total_tokens(usage->as_object());
                             if (next.kind == GenerationEvent::Kind::round_finished) {
                                 continuing = true;
                                 work->usage->end_attempt();
@@ -886,6 +918,7 @@ class Service {
                                     usage && usage->is_object())
                                     completed_usage =
                                         add_usage(completed_usage, usage->as_object());
+                                count_round();
                                 return;
                             }
                             check_cancel(token);
@@ -936,6 +969,7 @@ class Service {
                                     "Upstream returned no generation events");
                     if (!completed)
                         throw Error(502, "incomplete_upstream", "Upstream response ended without a finish reason");
+                    count_round();
                     store_.success(account->id, request.model);
                     remember_tier();
                     work->usage->end_attempt();
@@ -944,6 +978,8 @@ class Service {
                     return;
                 } catch (const Error &e) {
                     work->usage->end_attempt(e.code);
+                    // Content already produced used the allowance.
+                    count_round();
                     count_error(backend, e.code);
                     const auto tier = remember_tier();
                     if (token.stop_requested() || delivered || continuing)
@@ -1026,7 +1062,21 @@ class Service {
                                 }
                             }
                         }
-                        store_.failure(account->id, request.model, decision.cooldown, e.retry_after);
+                        unsigned retry = e.retry_after;
+                        if (decision.cooldown == "rate_limit_day") {
+                            // When the local estimate agrees that the day's
+                            // allowance is spent, wait for the reset instead of
+                            // retrying every few minutes; either way the account
+                            // comes last for the model until the reset.
+                            const auto known = tier.empty() ? store_.benefit_tier(account->id) : tier;
+                            const auto used = store_.daily_use(account->id, request.model);
+                            if (tiers->exhausted(request.model, known, used.requests, used.tokens)) {
+                                const auto now = unix_seconds();
+                                retry = std::max(retry, static_cast<unsigned>(next_quota_reset(now) - now));
+                            }
+                            store_.mark_daily_exhausted(account->id, request.model);
+                        }
+                        store_.failure(account->id, request.model, decision.cooldown, retry);
                         count_cooldown(backend, decision.cooldown);
                         log({{"event", "account_failure"}, {"request_id", work->usage->id()},
                              {"account_id", account->id}, {"kind", decision.cooldown}, {"code", e.code}});

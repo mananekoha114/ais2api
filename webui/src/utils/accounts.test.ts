@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { accountBackendSummary, accountState, cooldownReason, tierBadge } from './accounts'
+import {
+  accountBackendSummary,
+  accountState,
+  cooldownReason,
+  exhaustedModels,
+  formatTokensWan,
+  quotaCell,
+  quotaResetText,
+  quotaSourceText,
+  tierBadge,
+} from './accounts'
 import { formatRelative, formatTime, formatTimestamp } from './format'
 
 // The backend stores INT64_MAX as the deadline of permission cooldowns; after
@@ -68,5 +78,46 @@ describe('subscription tier badge', () => {
   it('stays unknown until a page confirms the tier', () => {
     expect(tierBadge({ id: 'a' })).toMatchObject({ text: '等级未知', known: false })
     expect(tierBadge({ id: 'a', benefit_tier: '' }).known).toBe(false)
+  })
+})
+
+describe('daily quota formatting', () => {
+  it('shows tokens in units of 万 and cells as used / limit', () => {
+    expect(formatTokensWan(6)).toBe('6')
+    expect(formatTokensWan(12_345)).toBe('1.2 万')
+    expect(formatTokensWan(15_000_000)).toBe('1,500 万')
+    expect(quotaCell(4, 50)).toBe('4 / 50')
+    expect(quotaCell(4, null)).toBe('4')
+    expect(quotaCell(150_000, 5_000_000, formatTokensWan)).toBe('15 万 / 500 万')
+  })
+
+  it('lists spent models and the next reset', () => {
+    const account = {
+      id: 'a',
+      daily_usage: [
+        { model: 'm-a', requests: 50, tokens: 0, request_limit: 50, token_limit: 1000, exhausted: true },
+        { model: 'm-b', requests: 1, tokens: 0, request_limit: null, token_limit: null, exhausted: false },
+      ],
+    }
+    expect(exhaustedModels(account).map((row) => row.model)).toEqual(['m-a'])
+    expect(exhaustedModels({ id: 'b' })).toEqual([])
+    expect(quotaResetText(undefined, NOW)).toBe('')
+    expect(quotaResetText(NOW + 7200, NOW)).toBe(`下次重置 ${formatTimestamp(NOW + 7200)}（2 小时后）`)
+  })
+
+  it('describes where the quota table came from', () => {
+    const status = {
+      refreshing: false,
+      error: '',
+      source: { url: '', fetched_at: 0, attempted_at: 0, error: '', published_at: '2026-11-23T00:00:00Z', models: 10, embedded: true },
+      models: {},
+    }
+    expect(quotaSourceText(null)).toBe('正在读取额度数据…')
+    expect(quotaSourceText(status)).toBe(
+      `数据版本 ${formatTimestamp(Date.parse('2026-11-23T00:00:00Z') / 1000)} · 10 个模型 · 内置快照 · 尚未联网检查`,
+    )
+    expect(quotaSourceText({ ...status, source: { ...status.source, embedded: false, fetched_at: NOW, attempted_at: NOW } })).toContain(
+      `GitHub 获取于 ${formatTimestamp(NOW)} · 上次检查 ${formatTimestamp(NOW)}`,
+    )
   })
 })

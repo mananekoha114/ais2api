@@ -4,6 +4,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include "ais2api/tier_quota.hpp"
+#include "../browser/rate_policy.hpp"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -191,5 +192,52 @@ json::object TierPolicy::effective() const {
                                {"tiers", std::move(resolved)}};
     }
     return out;
+}
+
+std::int64_t next_quota_reset(std::int64_t now) {
+    return browser_detail::next_pacific_reset(now);
+}
+
+void annotate_quota(json::array &accounts, const TierPolicy &policy) {
+    const auto count = [](const json::object &row, std::string_view key) -> std::int64_t {
+        const auto value = row.if_contains(key);
+        return value && value->is_int64() ? std::max<std::int64_t>(value->as_int64(), 0) : 0;
+    };
+    const auto table = policy.effective();
+    for (auto &item : accounts) {
+        if (!item.is_object()) continue;
+        auto &account = item.as_object();
+        const auto tier = string_or(account, "benefit_tier");
+        std::map<std::string, json::object, std::less<>> used;
+        if (auto raw = account.if_contains("daily_usage"); raw && raw->is_array())
+            for (auto &row : raw->as_array())
+                if (row.is_object()) used.emplace(lowercase(string_or(row.as_object(), "model")), row.as_object());
+        json::array view;
+        const auto add = [&](std::string_view model, const json::object *row) {
+            const auto quota = policy.lookup(model, tier);
+            const auto requests = row ? count(*row, "requests") : 0;
+            const auto tokens = row ? count(*row, "tokens") : 0;
+            const bool flagged = row && bool_or(*row, "exhausted");
+            view.push_back(json::object{
+                {"model", model},
+                {"requests", requests},
+                {"tokens", tokens},
+                {"request_limit", quota.requests > 0 ? json::value(quota.requests) : json::value(nullptr)},
+                {"token_limit", quota.tokens > 0 ? json::value(quota.tokens) : json::value(nullptr)},
+                {"exhausted", flagged || policy.exhausted(model, tier, requests, tokens)}});
+        };
+        // The models the tier has limits for, in table order, then any other
+        // model used today.
+        for (auto &entry : table) {
+            const std::string_view model(entry.key().data(), entry.key().size());
+            const auto quota = policy.lookup(model, tier);
+            if (!quota.available || !quota.limited()) continue;
+            const auto found = used.find(model);
+            add(model, found == used.end() ? nullptr : &found->second);
+            if (found != used.end()) used.erase(found);
+        }
+        for (auto &[key, row] : used) add(string_or(row, "model"), &row);
+        account["daily_usage"] = std::move(view);
+    }
 }
 } // namespace ais2api

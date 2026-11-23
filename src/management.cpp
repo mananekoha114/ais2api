@@ -24,7 +24,8 @@ std::string identifier(const json::object& command) {
 json::object account_summary(const json::object& input) {
     json::object output;
     for (auto key : {"id", "name", "email", "auth_user", "disabled", "expired", "failures", "fingerprint",
-                     "firefox_identity", "backend", "effective_backend", "backend_switched_until"}) {
+                     "firefox_identity", "backend", "effective_backend", "backend_switched_until",
+                     "benefit_tier", "benefit_tier_at", "daily_usage"}) {
         if (auto value = input.if_contains(key)) output[key] = *value;
     }
     return output;

@@ -70,4 +70,14 @@ class TierPolicy {
     std::map<std::string, std::string, std::less<>> fallback_;
     std::set<std::string, std::less<>> overridden_;
 };
+
+// Unix seconds when the Pacific quota day containing `now` ends and the daily
+// allowances reset (midnight America/Los_Angeles).
+std::int64_t next_quota_reset(std::int64_t now);
+// Turns each account's raw "daily_usage" (Store::account_status()) into its
+// quota view: the models its tier has daily limits for, in table order, then
+// any other model it used today, each {model, requests, tokens, request_limit,
+// token_limit, exhausted}. Limits are null when unknown; exhausted when a
+// daily 429 marked the model or the estimate reaches a limit.
+void annotate_quota(json::array &accounts, const TierPolicy &policy);
 } // namespace ais2api

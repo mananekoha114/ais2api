@@ -3129,6 +3129,13 @@
             "minimum": 0,
             "maximum": 9007199254740991,
             "description": "Unix seconds of that confirmation; 0 when unknown."
+          },
+          "daily_usage": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DailyUsage"
+            },
+            "description": "Today's (Pacific quota day) use: the models the tier has daily limits for, then any other model used today."
           }
         },
         "additionalProperties": true
@@ -3141,6 +3148,12 @@
             "items": {
               "$ref": "#/components/schemas/Account"
             }
+          },
+          "quota_resets_at": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "Unix seconds of the next daily quota reset (midnight America/Los_Angeles)."
           }
         }
       },
@@ -3439,6 +3452,12 @@
             "items": {
               "$ref": "#/components/schemas/Account"
             }
+          },
+          "quota_resets_at": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "Unix seconds of the next daily quota reset (midnight America/Los_Angeles)."
           }
         },
         "required": []
@@ -4616,6 +4635,53 @@
         "required": [
           "requests",
           "tokens"
+        ],
+        "additionalProperties": false
+      },
+      "DailyUsage": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "requests": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "request_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "description": "Null when the tier has no known limit."
+          },
+          "token_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "description": "Null when the tier has no known limit."
+          },
+          "exhausted": {
+            "type": "boolean",
+            "description": "A daily 429 or the estimate says the allowance is spent; the account is tried last for the model."
+          }
+        },
+        "required": [
+          "model",
+          "requests",
+          "tokens",
+          "request_limit",
+          "token_limit",
+          "exhausted"
         ],
         "additionalProperties": false
       },

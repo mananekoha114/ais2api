@@ -60,6 +60,20 @@ export interface Account {
   benefit_tier?: BenefitTier | ''
   /** Unix seconds of that confirmation; 0 when unknown. */
   benefit_tier_at?: number
+  /** Today's (Pacific quota day) estimate: the tier's limited models, then any other model used today. */
+  daily_usage?: DailyUsage[]
+}
+
+/** One model's use during the current Pacific quota day. */
+export interface DailyUsage {
+  model: string
+  requests: number
+  tokens: number
+  /** Null when the tier has no known limit for the model. */
+  request_limit: number | null
+  token_limit: number | null
+  /** A daily 429 or the estimate says the allowance is spent; such accounts are tried last. */
+  exhausted: boolean
 }
 
 export type AccountBackend = 'auto' | 'camoufox' | 'spidermonkey'
@@ -118,6 +132,8 @@ export interface Rotation {
   next_account_id?: string | null
   active_generation_account_id?: string | null
   accounts?: Account[]
+  /** Unix seconds of the next daily quota reset (midnight Pacific time). */
+  quota_resets_at?: number
 }
 
 export interface Operation<R = Record<string, unknown>> {

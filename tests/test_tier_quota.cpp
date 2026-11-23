@@ -220,3 +220,55 @@ TEST_CASE("Background quota refresh keeps the newest catalog", "[quota]") {
     CHECK(service.policy(cfg)->excludes("m-all", "free"));
     CHECK(service.status().at("models").at("m-all").at("origin") == "config");
 }
+
+TEST_CASE("Account quota views list the tier's limits and today's use", "[quota][tier]") {
+    const TierPolicy policy(parse_quota_catalog(catalog_data(), 0), {});
+    const auto raw = [](std::string model, std::int64_t requests, std::int64_t tokens, bool exhausted = false) {
+        return json::object{{"model", std::move(model)}, {"requests", requests}, {"tokens", tokens}, {"exhausted", exhausted}};
+    };
+    json::array accounts{
+        json::object{{"id", "free"}, {"benefit_tier", "free"}, {"daily_usage", json::array{raw("m-all", 4, 100), raw("other", 3, 9)}}},
+        json::object{{"id", "pro"}, {"benefit_tier", "pro"}, {"daily_usage", json::array{raw("m-pro", 1, 10, true)}}},
+        json::object{{"id", "plus"}, {"benefit_tier", "plus"}, {"daily_usage", json::array{}}},
+        json::object{{"id", "unknown"}, {"benefit_tier", ""}, {"daily_usage", json::array{raw("m-all", 50, 5000)}}}};
+    annotate_quota(accounts, policy);
+    const auto view = [&](std::size_t index) { return accounts[index].at("daily_usage").as_array(); };
+
+    // Free: m-pro is refused, m-all has limits (token limit reached), then
+    // other models used today without limits.
+    auto rows = view(0);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].at("model") == "m-all");
+    CHECK(rows[0].at("requests").as_int64() == 4);
+    CHECK(rows[0].at("request_limit").as_int64() == 10);
+    CHECK(rows[0].at("token_limit").as_int64() == 100);
+    CHECK(rows[0].at("exhausted") == true);
+    CHECK(rows[1].at("model") == "other");
+    CHECK(rows[1].at("request_limit").is_null());
+    CHECK(rows[1].at("token_limit").is_null());
+    CHECK(rows[1].at("exhausted") == false);
+
+    // Pro: both models in table order; a daily 429 mark is exhausted below the limits.
+    rows = view(1);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].at("model") == "m-pro");
+    CHECK(rows[0].at("request_limit").as_int64() == 50);
+    CHECK(rows[0].at("exhausted") == true);
+    CHECK(rows[1].at("model") == "m-all");
+    CHECK(rows[1].at("requests").as_int64() == 0);
+    CHECK(rows[1].at("exhausted") == false);
+
+    // Plus uses the free limits.
+    rows = view(2);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].at("model") == "m-all");
+    CHECK(rows[0].at("request_limit").as_int64() == 10);
+
+    // An unknown tier has no limits and is never estimated as spent.
+    rows = view(3);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].at("request_limit").is_null());
+    CHECK(rows[0].at("exhausted") == false);
+
+    CHECK(next_quota_reset(0) == 8 * 3600);
+}

@@ -59,6 +59,17 @@ TEST_CASE("Pacific quota dates follow modern DST boundaries", "[quota-policy]") 
     CHECK(pacific_quota_day(seconds_at(2026y / November / 1, 9)) == november);
     CHECK(pacific_quota_day(seconds_at(2026y / November / 2, 7, 59)) == november);
     CHECK(pacific_quota_day(seconds_at(2026y / November / 2, 8)) == november + 1);
+
+    // Resets fall on Pacific midnight: 08:00 UTC in standard time, 07:00 UTC
+    // in daylight time, and a changeover day starts with the old offset.
+    using browser_detail::next_pacific_reset;
+    CHECK(next_pacific_reset(seconds_at(2026y / March / 7, 12)) == seconds_at(2026y / March / 8, 8));
+    CHECK(next_pacific_reset(seconds_at(2026y / March / 8, 12)) == seconds_at(2026y / March / 9, 7));
+    CHECK(next_pacific_reset(seconds_at(2026y / October / 31, 12)) == seconds_at(2026y / November / 1, 7));
+    CHECK(next_pacific_reset(seconds_at(2026y / November / 1, 12)) == seconds_at(2026y / November / 2, 8));
+    CHECK(next_pacific_reset(seconds_at(2026y / November / 23, 7, 59)) == seconds_at(2026y / November / 23, 8));
+    CHECK(next_pacific_reset(seconds_at(2026y / November / 23, 8)) == seconds_at(2026y / November / 24, 8));
+    CHECK(next_pacific_reset(seconds_at(2026y / December / 31, 20)) == seconds_at(2027y / January / 1, 8));
 }
 
 TEST_CASE("model quota cooldowns isolate counters and preserve drip recovery", "[quota-policy]") {
@@ -803,4 +814,88 @@ TEST_CASE("tier policies filter accounts and prefer lower tiers when switching",
     CHECK_FALSE(store.tier_blocked("other", policy));
     store.update_account_metadata(free, {{"disabled", true}});
     CHECK_FALSE(store.tier_blocked("m-pro", policy));
+}
+
+TEST_CASE("daily use counts per Pacific quota day and keeps one week", "[quota][state]") {
+    Directory d;
+    Store store(d.path);
+    const auto id = string_or(store.import_accounts(credential())[0].as_object(), "id");
+    const auto now = unix_seconds();
+    constexpr std::int64_t day = 86400;
+    store.record_daily_use(id, "m-all", 1, 120);
+    store.record_daily_use(id, "m-all", 1, 30);
+    store.record_daily_use(id, "other", 1, 5);
+    auto use = store.daily_use(id, "m-all");
+    CHECK(use.requests == 2);
+    CHECK(use.tokens == 150);
+    CHECK_FALSE(use.exhausted);
+    // Use on another Pacific day is kept apart.
+    store.record_daily_use(id, "m-all", 1, 7, now - day);
+    CHECK(store.daily_use(id, "m-all").requests == 2);
+    CHECK(store.daily_use(id, "m-all", now - day).requests == 1);
+    // A daily 429 marks only today's row of that model.
+    store.mark_daily_exhausted(id, "m-all");
+    CHECK(store.daily_use(id, "m-all").exhausted);
+    CHECK_FALSE(store.daily_use(id, "m-all", now - day).exhausted);
+    CHECK_FALSE(store.daily_use(id, "other").exhausted);
+    // The account list reports today's raw use.
+    const auto usage = store.account_status()[0].at("daily_usage").as_array();
+    REQUIRE(usage.size() == 2);
+    CHECK(usage[0].at("model") == "m-all");
+    CHECK(usage[0].at("requests").as_int64() == 2);
+    CHECK(usage[0].at("tokens").as_int64() == 150);
+    CHECK(usage[0].at("exhausted") == true);
+    CHECK(usage[1].at("model") == "other");
+    // Rows older than a week go with the next write.
+    store.record_daily_use(id, "m-all", 1, 1, now - 9 * day);
+    CHECK(store.daily_use(id, "m-all", now - 9 * day).requests == 1);
+    store.record_daily_use(id, "other", 1, 1);
+    CHECK(store.daily_use(id, "m-all", now - 9 * day).requests == 0);
+    CHECK(store.daily_use(id, "m-all", now - day).requests == 1);
+    // Clearing a cooldown keeps the estimate; resetting the account clears it.
+    store.clear_cooldown(id);
+    CHECK(store.daily_use(id, "m-all").requests == 2);
+    store.reset_account(id);
+    CHECK(store.daily_use(id, "m-all").requests == 0);
+    CHECK_FALSE(store.daily_use(id, "m-all").exhausted);
+    // Unknown accounts record nothing; removed accounts take their use along.
+    store.record_daily_use("acc_missing", "m-all", 1, 1);
+    store.mark_daily_exhausted("acc_missing", "m-all");
+    CHECK(store.daily_use("acc_missing", "m-all").requests == 0);
+    CHECK_FALSE(store.daily_use("acc_missing", "m-all").exhausted);
+    store.record_daily_use(id, "m-all", 1, 1);
+    store.remove_account(id);
+    CHECK(store.daily_use(id, "m-all").requests == 0);
+}
+
+TEST_CASE("accounts whose daily allowance is spent come last without being refused", "[quota][tier][state]") {
+    Directory d;
+    Store store(d.path);
+    const auto import = [&](std::string name) { return string_or(store.import_accounts(credential(name))[0].as_object(), "id"); };
+    const auto first = import("first"), second = import("second");
+    store.set_benefit_tier(first, "free");
+    store.set_benefit_tier(second, "free");
+    // m-all allows a free account 2 requests or 200 tokens a day.
+    const auto policy = test_tier_policy();
+    const auto chosen = [&](std::string_view model, const TierPolicy *p) {
+        auto account = store.choose(model, {}, false, p);
+        return account ? account->id : std::string();
+    };
+    CHECK(chosen("m-all", &policy) == first);
+    store.record_daily_use(first, "m-all", 2, 10);
+    CHECK(chosen("m-all", &policy) == second);
+    // Other models keep their order.
+    CHECK(chosen("other", &policy) == first);
+    // A spent allowance outranks even the resident account.
+    store.success(first, "m-all");
+    CHECK(chosen("m-all", &policy) == second);
+    // The token limit counts as well; with every allowance spent, the usual
+    // order applies again, since the estimate refuses nothing.
+    store.record_daily_use(second, "m-all", 1, 200);
+    CHECK(chosen("m-all", &policy) == first);
+    // Without a policy only a daily 429 mark moves an account back.
+    CHECK(chosen("other", nullptr) == first);
+    store.mark_daily_exhausted(first, "other");
+    CHECK(chosen("other", nullptr) == second);
+    CHECK(chosen("other", &policy) == second);
 }

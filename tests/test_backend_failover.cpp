@@ -8,6 +8,7 @@
 #include "ais2api/diagnostics.hpp"
 #include "ais2api/management.hpp"
 #include "ais2api/runtime.hpp"
+#include "ais2api/tier_quota.hpp"
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -806,4 +807,74 @@ TEST_CASE("Service skips accounts whose confirmed tier refuses the model without
     CHECK(response.body().find("tier_insufficient") != std::string::npos);
     std::lock_guard lock(server.state->mutex);
     CHECK(server.state->attempts.size() == 3);
+}
+
+TEST_CASE("Daily quota 429s wait for the Pacific reset only when the estimate agrees", "[quota][failover]") {
+    FailoverServer server(3, [](std::string_view, const Config &) { return true; }, "windows-x64");
+    {
+        std::lock_guard lock(server.state->mutex);
+        server.state->tiers[server.first_id] = "free";
+        server.state->tiers[server.second_id] = "free";
+    }
+    const auto first = server.first_id, second = server.second_id;
+    server.state->behavior = [first](std::string_view, const Account &account, const Request &, unsigned) {
+        if (account.id != first) return;
+        Error error(429, "rate_limit", "Daily quota spent");
+        error.quota_scope = "day";
+        throw error;
+    };
+    const std::string model = "gemini-3.1-flash-lite";
+    auto &store = *server.router_store;
+    const auto cooldown_until = [&] {
+        for (const auto &row : store.account_status())
+            if (string_or(row.as_object(), "id") == first)
+                for (const auto &failure : row.at("failures").as_array())
+                    if (string_or(failure.as_object(), "kind") == "rate_limit_day")
+                        return failure.at("until").as_int64();
+        return std::int64_t{0};
+    };
+
+    // Below the estimate: the usual short cooldown, and the account comes
+    // last for the model until the reset.
+    auto response = server.generate_chat(model);
+    REQUIRE(response.result_int() == 200);
+    auto after = unix_seconds();
+    CHECK(cooldown_until() > 0);
+    CHECK(cooldown_until() <= after + 61);
+    CHECK(store.daily_use(first, model).exhausted);
+    CHECK(store.daily_use(first, model).requests == 0);
+    // The answering account's round counts with its own tokens.
+    CHECK(store.daily_use(second, model).requests == 1);
+    CHECK(store.daily_use(second, model).tokens == 6);
+    // Both account lists carry the tier and today's quota view.
+    for (const auto *target : {"/api/admin/v1/accounts", "/api/admin/v1/accounts/active"}) {
+        INFO(target);
+        const auto listed = server.call(target, {}, http::verb::get);
+        REQUIRE(listed.result_int() == 200);
+        const auto body = json::parse(listed.body()).as_object();
+        CHECK(body.at("quota_resets_at").as_int64() > after);
+        bool found = false;
+        for (const auto &row : body.at("accounts").as_array()) {
+            if (string_or(row.as_object(), "id") != second) continue;
+            CHECK(string_or(row.as_object(), "benefit_tier") == "free");
+            for (const auto &use : row.at("daily_usage").as_array())
+                if (use.at("model").as_string() == model) {
+                    found = true;
+                    CHECK(use.at("requests").as_int64() == 1);
+                    CHECK(use.at("request_limit").is_int64());
+                }
+        }
+        CHECK(found);
+    }
+
+    // With the estimate spent, the cooldown lasts until the Pacific midnight.
+    store.clear_cooldown(first);
+    store.record_daily_use(first, model, 1000000, 0);
+    store.update_account_metadata(second, {{"disabled", true}});
+    const auto before = unix_seconds();
+    response = server.generate_chat(model);
+    CHECK(response.result_int() == 429);
+    const auto reset = next_quota_reset(before);
+    CHECK(cooldown_until() >= reset - 2);
+    CHECK(cooldown_until() <= std::max(reset, unix_seconds() + 60) + 2);
 }

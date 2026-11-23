@@ -48,6 +48,12 @@ struct ModelCatalog {
     json::array models;
     std::int64_t saved_at = 0;
 };
+// An account's use of one model during a Pacific quota day.
+struct DailyUse {
+    std::int64_t requests = 0, tokens = 0;
+    // A daily-quota 429 reported the allowance spent.
+    bool exhausted = false;
+};
 struct RequestQuery {
     bool cumulative = false;
     std::int64_t from = 0, to = 0, before = 0, snapshot = 0;
@@ -130,13 +136,22 @@ public:
     // by an `auth` cooldown is admitted for a single attempt per cooldown period.
     // With `policy`, accounts whose recorded tier cannot use `model` are left
     // out and lower tiers are preferred when the resident and preferred
-    // accounts cannot serve (see TierPolicy).
+    // accounts cannot serve (see TierPolicy). Accounts whose daily allowance
+    // for `model` is spent, by a daily 429 or by the policy's estimate, come
+    // after all others but are not refused.
     std::optional<Account> choose(std::string_view model, const std::vector<std::string>& excluded = {},
                                   bool auth_probe = false, const TierPolicy* policy = nullptr);
     // Every enabled, unexpired account has a recorded tier that `policy`
     // refuses for `model` (and there is at least one such account).
     bool tier_blocked(std::string_view model, const TierPolicy& policy);
     void failure(std::string_view account, std::string_view model, std::string_view kind, unsigned retry_seconds = 0);
+    // Daily quota estimate per account and model, kept for the Pacific quota
+    // day of `at` (0: now) and pruned after a week. reset_account() clears it;
+    // clearing a cooldown does not, since the upstream allowance stays spent.
+    void record_daily_use(std::string_view account, std::string_view model, std::int64_t requests,
+                          std::int64_t tokens, std::int64_t at = 0);
+    void mark_daily_exhausted(std::string_view account, std::string_view model);
+    DailyUse daily_use(std::string_view account, std::string_view model, std::int64_t at = 0);
     // Diagnostic counters per browser backend, kept per UTC day and cleared
     // with the request statistics: {since (Unix seconds), backends: {<backend>:
     // {<event>: {total, last_7_days, today, last_at}}}}.
@@ -165,6 +180,8 @@ public:
     // download schedule and last error.
     void seed_price_source(std::string_view source, const json::object &catalog);
     json::object price_quote(std::string_view model);
+    // Each account also carries "daily_usage": today's raw use per model as
+    // [{model, requests, tokens, exhausted}] (see annotate_quota).
     json::array account_status(const std::optional<Config>& config = std::nullopt);
     json::object create_key(std::string name);
     json::array keys();

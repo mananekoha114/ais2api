@@ -1303,6 +1303,19 @@ TEST_CASE("Continuation supports three rounds and remains distinct from pre-outp
             "hello world!");
     REQUIRE(result.at("usageMetadata").at("candidatesTokenCount") == 77491);
     REQUIRE(finished_history(server).front().at("attempt_count") == 3);
+    {
+        // Each upstream round counts toward the daily quota estimate with its
+        // own tokens, which together make the answer's summed usage.
+        std::string account;
+        {
+            std::lock_guard lock(server.state->mutex);
+            account = server.state->account_id;
+        }
+        Store store(server.config.data_dir);
+        const auto use = store.daily_use(account, "gemini-4-synthetic-continuation-three");
+        CHECK(use.requests == 3);
+        CHECK(use.tokens == result.at("usageMetadata").at("totalTokenCount").as_int64());
+    }
     // A fresh service lets the synthetic first-attempt failure fire once.
     GenerationServer retry;
     std::tie(target, body) =
