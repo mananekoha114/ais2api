@@ -43,6 +43,10 @@ class RecordingGateway final : public GenerationBackend {
         return {};
     }
     json::object diagnostics() override { return {{"status", name_ + "_status"}}; }
+    std::string benefit_tier(const Account &account) override {
+        calls_.log.push_back(name_ + ":benefit_tier:" + account.id);
+        return "pro";
+    }
     void reconfigure(const Config &config) override { calls_.log.push_back(name_ + ":reconfigure:" + config.browser_backend); }
     void close() override { calls_.log.push_back(name_ + ":close"); }
     void reset_session() override { calls_.log.push_back(name_ + ":reset_session"); }
@@ -216,6 +220,24 @@ TEST_CASE("the router serves each account on its own gateway and keeps one brows
     } else {
         CHECK(calls.log == std::vector<std::string>{"camoufox:close"});
     }
+}
+
+TEST_CASE("the router asks only the running gateway for an account's tier", "[router][tier]") {
+    Directory dir;
+    Store store(dir.path);
+    const auto cam = import_account(store, "cam");
+    store.set_backend(cam, "camoufox");
+    Config config;
+    config.data_dir = dir.path;
+    Calls calls;
+    BackendRouter router(config, store, recording(calls), {}, "windows-x64");
+    // Nothing runs yet: no gateway is created, started or asked.
+    CHECK(router.benefit_tier(account(cam)).empty());
+    CHECK(calls.log.empty());
+    router.generate({}, account(cam), {}, {});
+    calls.log.clear();
+    CHECK(router.benefit_tier(account(cam)) == "pro");
+    CHECK(calls.log == std::vector<std::string>{"camoufox:benefit_tier:" + cam});
 }
 
 TEST_CASE("accounts switch freely between Firefox backends and reject CloakBrowser", "[router][admin][fingerprint]") {

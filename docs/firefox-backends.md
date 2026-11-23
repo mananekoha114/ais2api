@@ -213,7 +213,7 @@ P4 其余主线项（静态依赖、无浏览器身份、页面桥接隐藏、�
 | 第一批 | 非流式保活：配置项，默认关闭；开启后等待超过设定秒数（推荐 10）先返回 200，之后按同样间隔写一个换行，之后出现的错误放在 200 响应体中返回 | 已完成：`nonstream_keepalive_seconds`，见 [protocol.md](protocol.md#非流式保活) |
 | 第一批 | 识别 `GetLoggingContext` 返回的 `[7,"Region not supported."]` 与 `[7,"Account not supported."]`，比只检查是否跳转 `available-regions` 更早、更准 | SpiderMonkey 后端已实现；Camoufox 后端仍只按是否跳转 `available-regions` 判断，待做 |
 | 第一批 | Anthropic Messages 接口，以 Claude Code 能完整使用为验收标准：`/v1/messages` 流式与非流式、工具调用与工具结果、思考块及签名往返、图片输入、`/v1/messages/count_tokens` | 已完成，见 [protocol.md](protocol.md#anthropic-messages) 与 [clients.md](clients.md#claude-code)。`count_tokens` 改为用内嵌的 Gemma 4 分词器在本地计数；`context_management` 只支持 `clear_thinking_20251015`；服务端工具（WebSearch 等）不支持 |
-| 第二批 | 模型名思考强度后缀（如 `model(low)`）、`MODEL_MAPPING` 模型别名 | 未开始 |
+| 第二批 | 模型名思考强度后缀（如 `model(low)`）、`MODEL_MAPPING` 模型别名 | 已完成，见 [思考强度后缀](protocol.md#思考强度后缀) 与 [模型别名](protocol.md#模型别名)：别名目标可带后缀、出现在模型列表中，`AIS2API_MODEL_ALIASES` 也接受 `别名:模型` 写法。各模型支持的档位仍按模型系列判断，没有解析 `ListModels` 的档位目录 |
 | 第三批 | 代理池：健康检查与账号固定出口 | 未开始 |
 | 待数据 | 根据 SpiderMonkey 后端 Code 7 的长期实测行为继续观察 `include/ais2api/retry_policy.hpp` 中 403 的冷却参数（2026-11-15 P4 三格对照实验 10 项操作全部通过、未触发 403，`auto` 账号已在就地恢复后仍遇 403 时自动切换后端 6 小时） | 观察中 |
 

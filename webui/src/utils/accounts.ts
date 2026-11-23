@@ -1,6 +1,6 @@
-import type { Account } from '../api/types'
+import type { Account, BenefitTier, QuotaStatus } from '../api/types'
 import type { IconName } from '../icons'
-import { isIndefinite } from './format'
+import { formatNumber, formatRelative, formatTimestamp, isIndefinite } from './format'
 
 export interface AccountState {
   tone: 'success' | 'caution' | 'critical' | 'neutral'
@@ -71,8 +71,55 @@ export function accountBackendSummary(account: Account, at = now()): { text: str
   return { text: `${stored}（${active}）`, title: `浏览器后端：${stored}，当前生效：${active}` }
 }
 
+const tierNames: Record<BenefitTier, string> = { free: 'Free', plus: 'Plus', pro: 'Pro', ultra: 'Ultra' }
+
+/** Subscription tier badge of an account row; unknown until a page confirms the tier. */
+export function tierBadge(account: Account): { text: string; known: boolean; title: string } {
+  const tier = account.benefit_tier
+  if (!tier || !(tier in tierNames)) return { text: '等级未知', known: false, title: '订阅等级尚未确认：账号被使用或检测一次后显示' }
+  const note = tier === 'plus' ? '；额度与 Free 相同' : ''
+  return { text: tierNames[tier], known: true, title: `Google AI 订阅等级：${tierNames[tier]}${note}` }
+}
+
 /** Human-readable reason of a stored cooldown kind. */
 export const cooldownReason = (kind: string | undefined) => (kind ? cooldownKinds[kind] ?? kind : '—')
 
 export const accountLabel = (account: Account | undefined, fallbackId?: string | null) =>
   account ? account.name || account.email || account.id : fallbackId || '—'
+
+/** Token counts of the daily quota table in units of 万 (10,000). */
+export function formatTokensWan(tokens: number): string {
+  if (tokens < 10000) return formatNumber(tokens)
+  return `${formatNumber(Math.round(tokens / 1000) / 10)} 万`
+}
+
+/** "used / limit" of a daily quota cell; without a known limit only the use. */
+export const quotaCell = (used: number, limit: number | null | undefined, format: (value: number) => string = formatNumber) =>
+  limit ? `${format(used)} / ${format(limit)}` : format(used)
+
+/** Models whose daily allowance is spent today. */
+export const exhaustedModels = (account: Account) => (account.daily_usage ?? []).filter((row) => row.exhausted)
+
+/** When the daily allowances reset next. */
+export const quotaResetText = (resetsAt: number | undefined, at = now()) =>
+  resetsAt ? `下次重置 ${formatTimestamp(resetsAt)}（${formatRelative(resetsAt, at)}）` : ''
+
+/**
+ * The quota table's current problem: reading it failed, the service could not
+ * load it, or the last download failed (`source.error`, such as
+ * `quota_http_404`); the stored table stays in use meanwhile.
+ */
+export const quotaProblem = (status: QuotaStatus | null, requestError = '') =>
+  requestError || status?.error || status?.source.error || ''
+
+/** Where the quota table came from and when it was last checked. */
+export function quotaSourceText(status: QuotaStatus | null): string {
+  if (!status) return '正在读取额度数据…'
+  const { source } = status
+  return [
+    source.published_at ? `数据版本 ${formatTimestamp(Date.parse(source.published_at) / 1000)}` : '暂无额度数据',
+    `${source.models} 个模型`,
+    source.embedded ? '内置快照' : `GitHub 获取于 ${formatTimestamp(source.fetched_at)}`,
+    source.attempted_at ? `上次检查 ${formatTimestamp(source.attempted_at)}` : '尚未联网检查',
+  ].join(' · ')
+}

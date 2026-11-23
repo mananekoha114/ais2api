@@ -125,9 +125,10 @@ ais2api accounts probe all
 ```
 
 - **import**：输入可以是 Cookie 请求头文本、Netscape Cookie 文本、Cookie JSON、storage state 或已有凭据包。只有显式指定 `--stdin` 才会读取标准输入。不要把 Cookie 写在命令参数里，避免进入 shell 历史。导入与列表结果不包含 Cookie 值，但账号名称和邮箱对本机用户可见。
+- **list**：服务运行与否结果相同，每个账号带订阅等级 `benefit_tier` 与今日额度 `daily_usage`，顶层带下次重置时间 `quota_resets_at`，见 [订阅等级与每日额度](quotas.md)。
 - **select**：设为首选账号。
 - **backend**：修改账号的浏览器后端；`--all` 一次修改所有账号。`auto`、`camoufox`、`spidermonkey` 共用同一 Firefox 身份，可以直接切换（为兼容旧脚本，`--yes` 仍保留并忽略）。`spidermonkey` 是实验性后端，只有开启 `AIS2API_SPIDERMONKEY` 编译的版本接受它，见 [SpiderMonkey 后端](browser.md#spidermonkey-后端实验性原型)。见 [按账号选择后端](browser.md#按账号选择后端)。
-- **reset**：清除账号记录的失败/禁用状态，不能修复已过期的 Google Cookie。账号因“需要同意条款”冷却时（欢迎对话框会自动继续，这里指其他条款对话框），先用该账号在普通浏览器中登录 AI Studio 并同意条款，再执行 reset。
+- **reset**：清除账号记录的失败/禁用状态和今日用量（保留订阅等级），不能修复已过期的 Google Cookie。账号因“需要同意条款”冷却时（欢迎对话框会自动继续，这里指其他条款对话框），先用该账号在普通浏览器中登录 AI Studio 并同意条款，再执行 reset。
 - **probe**：使用账号凭据实际访问上游，需要服务正在运行，可能会启动浏览器。不要把它当作离线健康检查。
 
 账号 ID 来自 `accounts list`。

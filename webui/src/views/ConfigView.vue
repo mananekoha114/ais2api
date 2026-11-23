@@ -104,6 +104,7 @@ const aliases = ref<{ from: string; to: string }[]>([])
 const origins = ref<string[]>([])
 const configuredModelsText = ref('')
 const modelDefaultsText = ref('')
+const tierQuotasText = ref('')
 const secrets = reactive({ admin_key: '', cookie_import_key: '', clearCookieKey: false })
 const loading = ref(true)
 const loadError = ref('')
@@ -124,6 +125,7 @@ function fill(config: Config) {
   origins.value = [...(config.admin_origins ?? [])]
   configuredModelsText.value = pretty(config.configured_models ?? [])
   modelDefaultsText.value = pretty(config.model_defaults ?? {})
+  tierQuotasText.value = pretty(config.tier_quotas ?? {})
   secrets.admin_key = ''
   secrets.cookie_import_key = ''
   secrets.clearCookieKey = false
@@ -157,6 +159,12 @@ const jsonErrors = computed(() => {
     if (!v || typeof v !== 'object' || Array.isArray(v)) errors.model_defaults = '必须是对象'
   } catch {
     errors.model_defaults = 'JSON 格式无效'
+  }
+  try {
+    const v = JSON.parse(tierQuotasText.value)
+    if (!v || typeof v !== 'object' || Array.isArray(v)) errors.tier_quotas = '必须是对象'
+  } catch {
+    errors.tier_quotas = 'JSON 格式无效'
   }
   return errors
 })
@@ -218,6 +226,10 @@ const patch = computed<Config>(() => {
   if (!jsonErrors.value.model_defaults) {
     const value = JSON.parse(modelDefaultsText.value)
     if (JSON.stringify(value) !== JSON.stringify(base.value.model_defaults ?? {})) out.model_defaults = value
+  }
+  if (!jsonErrors.value.tier_quotas) {
+    const value = JSON.parse(tierQuotasText.value)
+    if (JSON.stringify(value) !== JSON.stringify(base.value.tier_quotas ?? {})) out.tier_quotas = value
   }
 
   if (secrets.admin_key) out.admin_key = secrets.admin_key
@@ -440,7 +452,7 @@ const bytesHint = (field: FieldDef) => (field.unit === 'bytes' && typeof form[fi
             <FIcon name="branch" :size="20" class="t-secondary" />
             <div class="setting-text">
               <div class="label-row">模型别名 model_aliases</div>
-              <div class="desc">把客户端请求的模型名映射到实际模型。整体替换保存。</div>
+              <div class="desc">把客户端请求的模型名映射到实际模型；实际模型在模型目录中时，别名也会列在模型列表里。实际模型可带思考强度后缀，如 <code>gemini-4-argon(low)</code>；请求 <code>别名(high)</code> 时以请求的后缀为准。整体替换保存。</div>
             </div>
             <div class="setting-control column">
               <div v-for="(alias, index) in aliases" :key="index" class="list-row alias">
@@ -472,6 +484,17 @@ const bytesHint = (field: FieldDef) => (field.unit === 'bytes' && typeof form[fi
             <div class="setting-control column">
               <textarea id="f-model-defaults" v-model="modelDefaultsText" class="textarea mono" rows="5" spellcheck="false" :aria-invalid="!!jsonErrors.model_defaults || undefined" />
               <span v-if="jsonErrors.model_defaults" class="error-text t-caption">{{ jsonErrors.model_defaults }}</span>
+            </div>
+          </div>
+          <div class="setting stacked">
+            <FIcon name="timer" :size="20" class="t-secondary" />
+            <div class="setting-text">
+              <label for="f-tier-quotas" class="label-row">订阅等级额度覆盖 tier_quotas</label>
+              <div class="desc">按模型整条替换额度目录中的条目，例如 {"gemini-4-argon": {"free": null, "pro": {"requests": 50, "tokens": 15000000}}}；null 表示该等级不能使用。</div>
+            </div>
+            <div class="setting-control column">
+              <textarea id="f-tier-quotas" v-model="tierQuotasText" class="textarea mono" rows="5" spellcheck="false" :aria-invalid="!!jsonErrors.tier_quotas || undefined" />
+              <span v-if="jsonErrors.tier_quotas" class="error-text t-caption">{{ jsonErrors.tier_quotas }}</span>
             </div>
           </div>
         </section>

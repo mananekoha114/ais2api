@@ -19,6 +19,7 @@
 #include "ais2api/webui.hpp"
 #include "ais2api/usage.hpp"
 #include "ais2api/price_service.hpp"
+#include "ais2api/quota_service.hpp"
 #include <charconv>
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -62,6 +63,14 @@ struct Task {
     std::function<void()> execute;
     std::function<void()> cancel;
 };
+// An upstream round's own token total (usageMetadata.totalTokenCount), 0 when
+// absent or invalid.
+std::int64_t round_total_tokens(const json::object &usage) {
+    const auto value = usage.if_contains("totalTokenCount");
+    if (value && value->is_int64()) return std::max<std::int64_t>(value->as_int64(), 0);
+    if (value && value->is_uint64()) return static_cast<std::int64_t>(std::min<std::uint64_t>(value->as_uint64(), INT64_MAX));
+    return 0;
+}
 // Time reserved after the account scan for persisting accounts and replying.
 constexpr auto cookie_import_commit_margin = 5s;
 struct CookieImportJob {
@@ -88,6 +97,7 @@ class Service {
     explicit Service(Config config, std::unique_ptr<GenerationBackend> backend)
         : config_(std::move(config)), journal_(config_.data_dir), store_(config_.data_dir),
           prices_(store_, [this] { return this->config(); }, !backend),
+          quotas_(store_, [this] { return this->config(); }, !backend),
           custom_backend_(bool(backend)),
           gateway_(backend ? std::move(backend) : std::make_unique<BackendRouter>(config_, store_)),
           worker_([this](std::stop_token token) { work_loop(token); }) {
@@ -112,6 +122,7 @@ class Service {
         token_counter_.join();
         gateway_->close();
         prices_.stop();
+        quotas_.stop();
         // Queued request history reaches the database while logging still works.
         try { store_.flush_requests(); } catch (...) {}
     }
@@ -121,6 +132,14 @@ class Service {
     }
     Store &store() { return store_; }
     PriceService &prices() { return prices_; }
+    QuotaService &quotas() { return quotas_; }
+    // An account list with each account's daily quota view and the next reset.
+    json::object with_quota(json::object result) {
+        if (auto accounts = result.if_contains("accounts"); accounts && accounts->is_array())
+            annotate_quota(accounts->as_array(), *quotas_.policy(config()));
+        result["quota_resets_at"] = next_quota_reset(unix_seconds());
+        return result;
+    }
     // Local token counting runs here, off the HTTP thread and outside the
     // generation queue.
     net::thread_pool::executor_type count_executor() { return token_counter_.get_executor(); }
@@ -349,7 +368,7 @@ class Service {
             }
             return result;
         }
-        if (action == "rotation.status") return store_.rotation_status(config());
+        if (action == "rotation.status") return with_quota(store_.rotation_status(config()));
         if (action == "browser.diagnostics") return gateway_->diagnostics();
         if (action == "rotation.next") return {{"preferred_account_id", store_.rotate_account()},
             {"browser_prepared", false}};
@@ -494,6 +513,7 @@ class Service {
     std::atomic<bool> logging_healthy_{true};
     Store store_;
     PriceService prices_;
+    QuotaService quotas_;
     std::atomic<bool> usage_healthy_{true};
     const bool custom_backend_;
     std::unique_ptr<GenerationBackend> gateway_;
@@ -610,6 +630,8 @@ class Service {
                                  const auto email = string_or(value, "email");
                                  if (!email.empty() && bool_or(value, "ready") && !bool_or(value, "identityAmbiguous"))
                                      store_.update_email(a.id, email);
+                                 if (bool_or(value, "ready") && !bool_or(value, "identityAmbiguous"))
+                                     store_.set_benefit_tier(a.id, string_or(value, "benefitTier"));
                                  value["account_id"] = a.id;
                                  results.push_back(std::move(value));
                              } catch (const Error &e) {
@@ -765,13 +787,13 @@ class Service {
                 throw Error(504, "queue_timeout", "Queue wait exceeded limit");
             json::array ignored_responses;
             if (work->anthropic) {
-                auto lowered = anthropic_to_gemini(work->body, cfg.ignore_unsupported_parameters);
+                auto lowered = anthropic_to_gemini(work->body, cfg.ignore_unsupported_parameters, false, cfg);
                 work->body = std::move(lowered.gemini);
                 ignored_responses = std::move(lowered.ignored);
             }
             if (work->responses) {
                 if (cfg.ignore_unsupported_parameters)
-                    discard_unsupported_responses(work->body, ignored_responses);
+                    discard_unsupported_responses(work->body, ignored_responses, cfg);
                 work->response_options = responses_options(work->body);
                 work->body = responses_to_chat(work->body);
             }
@@ -803,25 +825,56 @@ class Service {
             // One stale request-template discard per request.
             bool template_refreshed = false;
             unsigned max_attempts = cfg.limits.max_attempts;
+            // Which tiers can use the model, and their daily allowances.
+            const auto tiers = quotas_.policy(cfg);
+            // Why no account can take the request: the last real failure of
+            // another account; otherwise a tier refusal when every usable
+            // account's tier refuses the model; otherwise no usable account.
+            const auto unavailable = [&]() -> Error {
+                if (previous) return *previous;
+                if (store_.tier_blocked(request.model, *tiers))
+                    return Error(403, "tier_insufficient",
+                                 "No account has a subscription tier that can use " + request.model);
+                return Error(503, "no_account",
+                             "No usable account for this model; import or reset credentials with the CLI");
+            };
             for (unsigned attempt = 0; attempt < max_attempts; ++attempt) {
                 ++trace.attempts;
                 check_cancel(token);
-                auto account = retry_account ? std::exchange(retry_account, std::nullopt) : store_.choose(request.model, excluded, true);
-                if (!account) {
-                    if (previous)
-                        throw *previous;
-                    throw Error(503, "no_account",
-                                "No usable account for this model; import or reset credentials "
-                                "with the CLI");
-                }
+                auto account = retry_account ? std::exchange(retry_account, std::nullopt)
+                                             : store_.choose(request.model, excluded, true, tiers.get());
+                if (!account)
+                    throw unavailable();
                 work->usage->begin_attempt(account->id);
                 const std::string backend(gateway_->backend_for(*account));
+                // The tier the page confirmed for this attempt, kept for
+                // scheduling and the account list.
+                const auto remember_tier = [&]() -> std::string {
+                    try {
+                        auto tier = gateway_->benefit_tier(*account);
+                        store_.set_benefit_tier(account->id, tier);
+                        return tier;
+                    } catch (const std::exception &) {
+                        return {};
+                    }
+                };
                 { std::lock_guard lock(queue_mutex_); active_account_id_ = account->id; }
                 log({{"event", "generation_attempt"}, {"request_id", work->usage->id()},
                     {"account_id", account->id}, {"attempt", attempt+1}});
                 json::object completed_usage;
                 bool continuing = false, over_budget = false;
                 unsigned round = 1;
+                // Daily quota estimate: each upstream round that produced
+                // content counts as one request with that round's own tokens.
+                bool round_content = false;
+                std::int64_t round_tokens = 0;
+                const auto count_round = [&] {
+                    const bool counted = std::exchange(round_content, false);
+                    const auto tokens = std::exchange(round_tokens, std::int64_t{0});
+                    if (!counted) return;
+                    try { store_.record_daily_use(account->id, request.model, 1, tokens); }
+                    catch (const std::exception &) {}
+                };
                 try {
                     bool received = false;
                     bool completed = false;
@@ -830,6 +883,7 @@ class Service {
                         [&](GenerationEvent next) {
                             check_cancel(token);
                             if (next.kind == GenerationEvent::Kind::continuation_failed) {
+                                count_round();
                                 count_error(backend, string_or(next.data, "error"));
                                 work->usage->end_attempt(string_or(next.data, "error"));
                                 return;
@@ -850,7 +904,11 @@ class Service {
                                 return;
                             }
                             auto event = std::move(next.data);
-                            work->usage->event(event, has_content(event));
+                            const bool content = has_content(event);
+                            work->usage->event(event, content);
+                            round_content = round_content || content;
+                            if (auto usage = event.if_contains("usageMetadata"); usage && usage->is_object())
+                                round_tokens = round_total_tokens(usage->as_object());
                             if (next.kind == GenerationEvent::Kind::round_finished) {
                                 continuing = true;
                                 work->usage->end_attempt();
@@ -859,6 +917,7 @@ class Service {
                                     usage && usage->is_object())
                                     completed_usage =
                                         add_usage(completed_usage, usage->as_object());
+                                count_round();
                                 return;
                             }
                             check_cancel(token);
@@ -909,17 +968,33 @@ class Service {
                                     "Upstream returned no generation events");
                     if (!completed)
                         throw Error(502, "incomplete_upstream", "Upstream response ended without a finish reason");
+                    count_round();
                     store_.success(account->id, request.model);
+                    remember_tier();
                     work->usage->end_attempt();
                     work->usage->producer_done();
                     work->pipe->finish();
                     return;
                 } catch (const Error &e) {
                     work->usage->end_attempt(e.code);
+                    // Content already produced used the allowance.
+                    count_round();
                     count_error(backend, e.code);
+                    const auto tier = remember_tier();
                     if (token.stop_requested() || delivered || continuing)
                         throw;
                     const bool last = attempt + 1 >= max_attempts;
+                    // A page confirming a tier the model refuses explains the
+                    // 403: leave the account out of this request without a
+                    // session rebuild, cooldown or backend switch. The tier is
+                    // recorded, so it never hides another account's failure.
+                    if (e.status == 403 && !tier.empty() && tiers->excludes(request.model, tier)) {
+                        log({{"event", "tier_skip"}, {"request_id", work->usage->id()},
+                             {"account_id", account->id}, {"tier", tier}, {"code", e.code}});
+                        excluded.push_back(account->id);
+                        if (last) throw unavailable();
+                        continue;
+                    }
                     const bool was_recovered = recovered;
                     auto decision = classify_failure(e, attempt, recovered, template_refreshed);
                     // Without an attempt left a recovery cannot run; judge the
@@ -986,7 +1061,19 @@ class Service {
                                 }
                             }
                         }
-                        store_.failure(account->id, request.model, decision.cooldown, e.retry_after);
+                        std::int64_t until_reset = 0;
+                        if (decision.cooldown == "rate_limit_day") {
+                            // When the local estimate agrees that the day's
+                            // allowance is spent, wait for the reset instead of
+                            // retrying every few minutes; either way the account
+                            // comes last for the model until the reset.
+                            const auto known = tier.empty() ? store_.benefit_tier(account->id) : tier;
+                            const auto used = store_.daily_use(account->id, request.model);
+                            if (tiers->exhausted(request.model, known, used.requests, used.tokens))
+                                until_reset = next_quota_reset(unix_seconds());
+                            store_.mark_daily_exhausted(account->id, request.model);
+                        }
+                        store_.failure(account->id, request.model, decision.cooldown, e.retry_after, until_reset);
                         count_cooldown(backend, decision.cooldown);
                         log({{"event", "account_failure"}, {"request_id", work->usage->id()},
                              {"account_id", account->id}, {"kind", decision.cooldown}, {"code", e.code}});
@@ -1507,6 +1594,11 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
         if (!admin_body(request).empty()) throw Error(400, "invalid_price_refresh", "Price refresh takes an empty object");
         service.prices().refresh(); result = service.prices().status(); status = 202;
     }
+    else if (get && path == "/quotas") result = service.quotas().status();
+    else if (post && path == "/quotas/refresh") {
+        if (!admin_body(request).empty()) throw Error(400, "invalid_quota_refresh", "Quota refresh takes an empty object");
+        service.quotas().refresh(); result = service.quotas().status(); status = 202;
+    }
     else if (method == http::verb::delete_ && path == "/stats") command = {{"command", "stats.reset"}};
     else if (get && path == "/accounts") command = {{"command", "accounts.list"}};
     else if (get && path == "/accounts/active") {
@@ -1622,7 +1714,7 @@ void set_flavor(const http::request_header<> &head, std::string_view path, Conne
 }
 bool is_admin_body_route(http::verb method, std::string_view path) {
     if (method == http::verb::post) {
-        if (path == "/auth/password" || path == "/pricing/refresh" ||
+        if (path == "/auth/password" || path == "/pricing/refresh" || path == "/quotas/refresh" ||
             path == "/rotation/next" || path == "/rotation/clear-cooldown" ||
             path == "/config/validate" || path == "/config/reload" ||
             path == "/keys" || path == "/models/refresh" ||
@@ -1923,6 +2015,42 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
             object["source"] = "search_variant";
             expanded.push_back(std::move(object));
         }
+        // Aliases follow with their target's fields. An alias named like a
+        // listed model replaces that entry; one whose target is not listed
+        // still works but is not shown.
+        std::map<std::string, std::size_t, std::less<>> position;
+        for (std::size_t i = 0; i < expanded.size(); ++i)
+            if (expanded[i].is_object()) {
+                auto id = string_or(expanded[i].as_object(), "id", string_or(expanded[i].as_object(), "name"));
+                position.emplace(id.starts_with("models/") ? id.substr(7) : id, i);
+            }
+        for (auto &alias : cfg.model_aliases) {
+            // Keys that are not plain model names (a suffix, a slash) stay unlisted.
+            std::string name, listed_target;
+            try {
+                auto self = resolve_model(alias.key(), Config{});
+                if (!self.thinking.empty() || !alias.value().is_string())
+                    continue;
+                name = std::move(self.model);
+                listed_target = resolve_model(alias.value().as_string(), Config{}).model;
+            } catch (const Error &) {
+                continue;
+            }
+            auto found = position.find(listed_target);
+            if (found == position.end())
+                continue;
+            auto object = expanded[found->second].as_object();
+            object.erase("id");
+            object["name"] = "models/" + name;
+            object["displayName"] = name;
+            object["source"] = "alias";
+            if (auto existing = position.find(name); existing != position.end())
+                expanded[existing->second] = std::move(object);
+            else {
+                position.emplace(name, expanded.size());
+                expanded.push_back(std::move(object));
+            }
+        }
         for (auto &value : expanded) {
             if (!value.is_object())
                 continue;
@@ -2016,11 +2144,11 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         // Counted locally with the Gemma 4 tokenizer: no queue, no upstream
         // and no request record.
         auto body = std::make_shared<json::object>(std::move(value.as_object()));
-        const bool discard = cfg.ignore_unsupported_parameters;
         auto tokens = co_await net::co_spawn(
             service.count_executor(),
-            [body, discard]() -> net::awaitable<std::size_t> {
-                co_return anthropic_input_tokens(anthropic_to_gemini(*body, discard, true).gemini);
+            [body, cfg]() -> net::awaitable<std::size_t> {
+                co_return anthropic_input_tokens(
+                    anthropic_to_gemini(*body, cfg.ignore_unsupported_parameters, true, cfg).gemini);
             },
             net::use_awaitable);
         co_await send_json(stream, 200, {{"input_tokens", tokens}});

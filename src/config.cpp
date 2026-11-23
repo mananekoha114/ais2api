@@ -5,6 +5,8 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/config.hpp"
+#include "ais2api/tier_quota.hpp"
+#include "ais2api/protocol.hpp"
 #include "ais2api/runtime.hpp"
 #include "ais2api/proxy.hpp"
 #include <algorithm>
@@ -69,6 +71,36 @@ std::string env(const char *k) {
   auto p = std::getenv(k);
   return p ? p : "";
 #endif
+}
+std::string_view trimmed(std::string_view text) {
+  const auto first = text.find_first_not_of(" \t\r\n");
+  if (first == std::string_view::npos)
+    return {};
+  return text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
+}
+bool json_object_text(std::string_view text) {
+  return trimmed(text).starts_with('{');
+}
+// The reference project's MODEL_MAPPING form "alias:model,alias2:model2":
+// each item splits at its last ':' and the first item for an alias wins.
+json::object mapping_aliases(std::string_view text) {
+  json::object aliases;
+  while (!text.empty()) {
+    const auto comma = text.find(',');
+    const auto item = trimmed(text.substr(0, comma));
+    text = comma == std::string_view::npos ? std::string_view{} : text.substr(comma + 1);
+    if (item.empty())
+      continue;
+    const auto colon = item.rfind(':');
+    const auto alias = colon == std::string_view::npos ? std::string_view{} : trimmed(item.substr(0, colon));
+    const auto model = colon == std::string_view::npos ? std::string_view{} : trimmed(item.substr(colon + 1));
+    if (alias.empty() || model.empty())
+      throw Error(400, "invalid_config",
+                  "AIS2API_MODEL_ALIASES must be a JSON object or alias:model items separated by commas");
+    if (!aliases.if_contains(alias))
+      aliases[alias] = model;
+  }
+  return aliases;
 }
 fs::path absolute_path(const fs::path &path, const fs::path &base) {
   return (path.is_absolute() ? path : base / path).lexically_normal();
@@ -164,7 +196,8 @@ json::object Config::to_json(bool portable_paths) const {
             {"max_continuation_retries", limits.max_continuation_retries}}},
           {"model_aliases", model_aliases},
           {"configured_models", configured_models},
-          {"model_defaults", model_defaults}};
+          {"model_defaults", model_defaults},
+          {"tier_quotas", tier_quotas}};
 }
 void Config::save() const {
   validate();
@@ -250,9 +283,14 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
                     {"AIS2API_LIMITS", "limits"},
                     {"AIS2API_MODEL_ALIASES", "model_aliases"},
                     {"AIS2API_CONFIGURED_MODELS", "configured_models"},
-                    {"AIS2API_MODEL_DEFAULTS", "model_defaults"}}) {
+                    {"AIS2API_MODEL_DEFAULTS", "model_defaults"},
+                    {"AIS2API_TIER_QUOTAS", "tier_quotas"}}) {
     auto value = env(pair.first);
     if (env_exists(pair.first)) {
+      if (std::string_view(pair.second) == "model_aliases" && !json_object_text(value)) {
+        e[pair.second] = mapping_aliases(value);
+        continue;
+      }
       try {
         e[pair.second] = json::parse(value);
       } catch (...) {
@@ -301,7 +339,7 @@ static Config parse_config(Config c, json::object o) {
              "cookie_import_max_accounts", "cookie_import_timeout_seconds", "data_dir", "browser_executable",
              "browser_backend", "proxy", "browser_proxy_relay", "headless", "ignore_unsupported_parameters",
              "search_model_drop_functions", "browser_idle_seconds", "limits", "model_aliases",
-             "configured_models", "model_defaults", "request_retention_days", "continuation_retry_enabled",
+             "configured_models", "model_defaults", "tier_quotas", "request_retention_days", "continuation_retry_enabled",
              "nonstream_keepalive_seconds"});
   auto text = [&](const char *k) {
     if (!o.at(k).is_string())
@@ -367,7 +405,7 @@ static Config parse_config(Config c, json::object o) {
   c.request_retention_days = static_cast<unsigned>(retention);
   if (!o.at("limits").is_object() || !o.at("model_aliases").is_object() ||
       !o.at("configured_models").is_array() ||
-      !o.at("model_defaults").is_object())
+      !o.at("model_defaults").is_object() || !o.at("tier_quotas").is_object())
     throw Error(400, "invalid_config", "Invalid configuration container");
   auto &l = o.at("limits").as_object();
   fields(l, {"request_bytes", "object_bytes", "relay_bytes", "queue_size",
@@ -391,6 +429,7 @@ static Config parse_config(Config c, json::object o) {
   c.model_aliases = o.at("model_aliases").as_object();
   c.configured_models = o.at("configured_models").as_array();
   c.model_defaults = o.at("model_defaults").as_object();
+  c.tier_quotas = o.at("tier_quotas").as_object();
   c.validate();
   return c;
 }
@@ -499,13 +538,21 @@ void Config::validate() const {
   if (!cookie_import_max_accounts || cookie_import_max_accounts > 32 ||
       !cookie_import_timeout_seconds || cookie_import_timeout_seconds > 240)
     throw Error(400, "invalid_config", "Cookie import permits 1..32 accounts and a 1..240 second timeout");
-  for (auto &p : model_aliases)
+  for (auto &p : model_aliases) {
     if (!p.value().is_string() || p.value().as_string().empty())
       throw Error(400, "invalid_config",
                   "Model aliases must map to nonempty strings");
+    try {
+      validate_model_target(p.value().as_string());
+    } catch (const Error &error) {
+      throw Error(400, "invalid_config",
+                  "Model alias \"" + std::string(p.key()) + "\": " + error.what());
+    }
+  }
   for (auto &m : configured_models)
     if (!m.is_string() && !m.is_object())
       throw Error(400, "invalid_config", "Invalid configured model");
+  (void)parse_quota_overrides(tier_quotas);
   if (!limits.request_bytes || limits.request_bytes > 64ull * 1024 * 1024 ||
       !limits.object_bytes || !limits.relay_bytes ||
       !limits.queue_size || !limits.queue_seconds ||

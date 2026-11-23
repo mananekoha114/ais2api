@@ -477,6 +477,21 @@ struct CamoufoxGateway::Impl {
     json::array base_template;
     std::string timezone = "UTC";
     bool models_discovered = false;
+    // The benefit tier the page last confirmed (relay state or a probe), kept
+    // as long as the page caches it and only for the page it came from.
+    std::string benefit_tier, benefit_page;
+    Clock::time_point benefit_until{};
+    void note_tier(const json::value &state) {
+        if (!state.is_object()) return;
+        const auto tier = string_or(state.as_object(), "benefitTier");
+        if (tier.empty() || tier == "unknown") return;
+        benefit_tier = tier;
+        benefit_page = page;
+        benefit_until = Clock::now() + 10min;
+    }
+    std::string current_tier() const {
+        return !page.empty() && benefit_page == page && Clock::now() < benefit_until ? benefit_tier : std::string();
+    }
     browser_detail::GoogleAuthorizationCache authorization_cache;
     std::string last_status = "not_started";
     std::string phase = "idle";
@@ -1349,6 +1364,7 @@ json::object CamoufoxGateway::diagnostics() {
     return {{"status", impl_->last_status}, {"phase", impl_->phase}, {"backend", "camoufox"},
         {"bridgeSource", "embedded"}, {"bridgeSha256", browser_detail::embedded_bridge_sha256()},
         {"running", impl_->process.alive()}, {"isolatedContext", !impl_->user_context.empty()}, {"templateCaptured", !impl_->base_template.empty()}, {"modelDiscovery", impl_->models_discovered ? "live_rpc" : "not_loaded"}, {"chunkBytes", 32768},
+        {"benefitTier", impl_->current_tier().empty() ? std::string("unknown") : impl_->current_tier()},
         {"cookieRefresh", impl_->cookie_refresh},
         {"proxy", json::object{{"mode", impl_->config.proxy.empty() ? "none" : impl_->config.browser_proxy_relay ? "relay" : "direct"},
                                {"relayError", impl_->relay ? impl_->relay->last_error() : impl_->relay_error}}},
@@ -1361,7 +1377,25 @@ json::object CamoufoxGateway::probe(const Account& account, std::stop_token canc
     result["ready"] = bool_or(result, "identityReady");
     result["status"] = string_or(result, "email").empty() ? "identity_unverified" : "ready";
     result["generationVerified"] = false;
+    // The tier through the page's own cached lookup; a failed lookup leaves
+    // the probe's answer unchanged.
+    std::string tier = "unknown";
+    try {
+        const auto authorization = impl_->authorization(cancel);
+        auto value = impl_->call_bridge(
+            "function(bridge, authUser, authorization) { return bridge.benefitTier(authUser, authorization); }",
+            {account.auth_user, authorization}, cancel, 15s);
+        if (value.is_string()) tier = std::string(value.as_string());
+        impl_->note_tier(json::object{{"benefitTier", tier}});
+    } catch (const Error &error) {
+        if (error.code == "cancelled") throw;
+    }
+    result["benefitTier"] = tier;
     return result;
+}
+std::string CamoufoxGateway::benefit_tier(const Account &account) {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->account_id == account.id ? impl_->current_tier() : std::string();
 }
 json::object CamoufoxGateway::probe_import(Account& account, std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
@@ -1422,8 +1456,10 @@ void CamoufoxGateway::Impl::send(const Request& request, const Account& account,
             phase = "generation_read";
         };
         io.next = [&](std::uint64_t acknowledgment) {
-            return call_bridge("function(bridge, sequence, waitMs) { return bridge.next(sequence, waitMs); }",
-                               {acknowledgment, 250}, token, 5s);
+            auto state = call_bridge("function(bridge, sequence, waitMs) { return bridge.next(sequence, waitMs); }",
+                                     {acknowledgment, 250}, token, 5s);
+            note_tier(state);
+            return state;
         };
         io.completed = [&] {
             phase = "generation_complete";

@@ -143,6 +143,32 @@ TEST_CASE("Recorded thinking levels ignore request case", "[usage]") {
     usage.producer_done();
     usage.http_done(200, "", true);
     REQUIRE(store.request("levels").at("settings").at("thinkingConfig").at("thinkingLevel") == "LOW");
+
+    for (auto [id, raw_level] : {std::pair{"xhigh-level", "xhigh"}, {"extra-high-level", "extra_high"}}) {
+        RequestUsage xhigh_usage(store, id, "gemini");
+        xhigh_usage.configure("gemini-4-hydrogen", false);
+        REQUIRE(xhigh_usage.start());
+        json::object settings{{"generationConfig", json::object{{"thinkingConfig", json::object{{"thinkingLevel", raw_level}}}}}};
+        xhigh_usage.normalized("gemini-4-hydrogen", settings);
+        xhigh_usage.producer_done();
+        xhigh_usage.http_done(200, "", true);
+        REQUIRE(store.request(id).at("settings").at("thinkingConfig").at("thinkingLevel") == "XHIGH");
+    }
+}
+TEST_CASE("Requested model names keep their thinking suffix", "[usage][thinking-suffix]") {
+    Directory d;
+    Store store(d.path);
+    RequestUsage usage(store, "suffixed", "chat_completions");
+    usage.configure("gemini-4-argon(low)", false);
+    REQUIRE(usage.start());
+    usage.normalized("gemini-4-argon",
+                     json::parse(R"({"generationConfig":{"thinkingConfig":{"thinkingLevel":"LOW"}}})").as_object());
+    usage.producer_done();
+    usage.http_done(200, "", true);
+    auto record = store.request("suffixed");
+    REQUIRE(record.at("requested_model") == "gemini-4-argon(low)");
+    REQUIRE(record.at("model") == "gemini-4-argon");
+    REQUIRE(record.at("settings").at("thinkingConfig").at("thinkingLevel") == "LOW");
 }
 TEST_CASE("Request history excludes arbitrary settings text and payloads", "[usage]") {
     Directory d;

@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/store.hpp"
+#include "ais2api/tier_quota.hpp"
 #include "ais2api/usage.hpp"
 #include "../browser/rate_policy.hpp"
 #include <catch2/catch_test_macros.hpp>
@@ -58,6 +59,17 @@ TEST_CASE("Pacific quota dates follow modern DST boundaries", "[quota-policy]") 
     CHECK(pacific_quota_day(seconds_at(2026y / November / 1, 9)) == november);
     CHECK(pacific_quota_day(seconds_at(2026y / November / 2, 7, 59)) == november);
     CHECK(pacific_quota_day(seconds_at(2026y / November / 2, 8)) == november + 1);
+
+    // Resets fall on Pacific midnight: 08:00 UTC in standard time, 07:00 UTC
+    // in daylight time, and a changeover day starts with the old offset.
+    using browser_detail::next_pacific_reset;
+    CHECK(next_pacific_reset(seconds_at(2026y / March / 7, 12)) == seconds_at(2026y / March / 8, 8));
+    CHECK(next_pacific_reset(seconds_at(2026y / March / 8, 12)) == seconds_at(2026y / March / 9, 7));
+    CHECK(next_pacific_reset(seconds_at(2026y / October / 31, 12)) == seconds_at(2026y / November / 1, 7));
+    CHECK(next_pacific_reset(seconds_at(2026y / November / 1, 12)) == seconds_at(2026y / November / 2, 8));
+    CHECK(next_pacific_reset(seconds_at(2026y / November / 23, 7, 59)) == seconds_at(2026y / November / 23, 8));
+    CHECK(next_pacific_reset(seconds_at(2026y / November / 23, 8)) == seconds_at(2026y / November / 24, 8));
+    CHECK(next_pacific_reset(seconds_at(2026y / December / 31, 20)) == seconds_at(2027y / January / 1, 8));
 }
 
 TEST_CASE("model quota cooldowns isolate counters and preserve drip recovery", "[quota-policy]") {
@@ -131,6 +143,10 @@ TEST_CASE("model quota cooldowns isolate counters and preserve drip recovery", "
     CHECK(store.choose("m")->id == id);
     store.clear_cooldown(id);
     store.failure(id, "m", "rate_limit_day", 100000); delay_is(86400);
+    // A deadline, such as the reset 25 hours away on the day Pacific time
+    // falls back, is not capped like Retry-After.
+    store.clear_cooldown(id);
+    store.failure(id, "m", "rate_limit_day", 0, unix_seconds() + 90000); delay_is(90000);
     store.remove_account(id);
     CHECK(scalar("SELECT COUNT(*) FROM quota_counters") == 0);
 }
@@ -715,4 +731,179 @@ TEST_CASE("Alternating models stay on the current account until it cannot serve 
     CHECK(store.rotate_account() == a);
     CHECK(store.choose("y")->id == a);
     CHECK(string_or(store.rotation_status(), "next_account_id") == a);
+}
+
+TEST_CASE("account tiers persist, ignore unknown answers and leave with the account", "[tier][state]") {
+    Directory d;
+    Store store(d.path);
+    const auto id = string_or(store.import_accounts(credential())[0].as_object(), "id");
+    auto row = [&] { return store.account_status()[0].as_object(); };
+    CHECK(store.benefit_tier(id).empty());
+    CHECK(string_or(row(), "benefit_tier").empty());
+    CHECK(row().at("benefit_tier_at").as_int64() == 0);
+    store.set_benefit_tier(id, "pro");
+    CHECK(store.benefit_tier(id) == "pro");
+    CHECK(row().at("benefit_tier_at").as_int64() > 0);
+    // A failed lookup never erases a known tier.
+    store.set_benefit_tier(id, "unknown");
+    store.set_benefit_tier(id, "");
+    store.set_benefit_tier(id, "gold");
+    CHECK(store.benefit_tier(id) == "pro");
+    store.set_benefit_tier(id, "plus");
+    CHECK(string_or(row(), "benefit_tier") == "plus");
+    // Unknown accounts gain nothing; removed accounts take their tier along.
+    store.set_benefit_tier("acc_missing", "ultra");
+    CHECK(store.benefit_tier("acc_missing").empty());
+    store.remove_account(id);
+    CHECK(store.benefit_tier(id).empty());
+}
+
+namespace {
+// m-pro: free refused; m-all: every tier; other models are unlisted.
+TierPolicy test_tier_policy() {
+    const auto catalog = json::parse(R"({"schema_version":1,"published_at":"2026-11-23T00:00:00Z",
+      "tier_fallback":{"plus":"free"},
+      "models":{"m-pro":{"free":null,"pro":{"requests":5,"tokens":500},"ultra":{"requests":9,"tokens":900}},
+                "m-all":{"free":{"requests":2,"tokens":200},"pro":{"requests":5,"tokens":500},"ultra":{"requests":9,"tokens":900}}}})");
+    return TierPolicy(parse_quota_catalog(catalog, 0), {});
+}
+} // namespace
+
+TEST_CASE("tier policies filter accounts and prefer lower tiers when switching", "[tier][state]") {
+    Directory d;
+    Store store(d.path);
+    const auto import = [&](std::string name) { return string_or(store.import_accounts(credential(name))[0].as_object(), "id"); };
+    // Import order: unknown, ultra, pro, free.
+    const auto unknown = import("unknown"), ultra = import("ultra"), pro = import("pro"), free = import("free");
+    store.set_benefit_tier(ultra, "ultra");
+    store.set_benefit_tier(pro, "pro");
+    store.set_benefit_tier(free, "free");
+    const auto policy = test_tier_policy();
+    const auto chosen = [&](std::string_view model, const std::vector<std::string> &excluded = {}, const TierPolicy *p = nullptr) {
+        auto account = store.choose(model, excluded, false, p);
+        return account ? account->id : std::string();
+    };
+    // Without a policy the order is unchanged: import order.
+    CHECK(chosen("m-all") == unknown);
+    CHECK(chosen("m-pro") == unknown);
+    // Lower tiers first; unknown tiers last; refused tiers never.
+    CHECK(chosen("m-all", {}, &policy) == free);
+    CHECK(chosen("m-pro", {}, &policy) == pro);
+    CHECK(chosen("m-pro", {pro}, &policy) == ultra);
+    CHECK(chosen("m-pro", {pro, ultra}, &policy) == unknown);
+    CHECK(chosen("m-pro", {pro, ultra, unknown}, &policy).empty());
+    // Unlisted models are never filtered.
+    CHECK(chosen("other", {}, &policy) == free);
+    // The resident account stays first while it can serve the model.
+    store.success(ultra, "m-all");
+    CHECK(chosen("m-all", {}, &policy) == ultra);
+    CHECK(chosen("m-pro", {}, &policy) == ultra);
+    store.success(free, "m-all");
+    CHECK(chosen("m-pro", {}, &policy) == pro);
+    // The preferred account outranks tiers; selecting also makes it current.
+    store.select_account(unknown);
+    CHECK(chosen("m-pro", {}, &policy) == unknown);
+    CHECK(chosen("m-pro", {unknown}, &policy) == pro);
+    // Cooldowns and auth probes respect the policy too.
+    store.failure(pro, "m-pro", "rate_limit_minute");
+    CHECK(chosen("m-pro", {unknown}, &policy) == ultra);
+
+    CHECK_FALSE(store.tier_blocked("m-pro", policy));
+    CHECK_FALSE(store.tier_blocked("m-all", policy));
+    store.update_account_metadata(unknown, {{"disabled", true}});
+    store.update_account_metadata(ultra, {{"disabled", true}});
+    store.update_account_metadata(pro, {{"disabled", true}});
+    CHECK(store.tier_blocked("m-pro", policy));
+    CHECK_FALSE(store.tier_blocked("m-all", policy));
+    CHECK_FALSE(store.tier_blocked("other", policy));
+    store.update_account_metadata(free, {{"disabled", true}});
+    CHECK_FALSE(store.tier_blocked("m-pro", policy));
+}
+
+TEST_CASE("daily use counts per Pacific quota day and keeps one week", "[quota][state]") {
+    Directory d;
+    Store store(d.path);
+    const auto id = string_or(store.import_accounts(credential())[0].as_object(), "id");
+    const auto now = unix_seconds();
+    constexpr std::int64_t day = 86400;
+    store.record_daily_use(id, "m-all", 1, 120);
+    // Clients' spelling of a model id never splits its count.
+    store.record_daily_use(id, "M-All", 1, 30);
+    store.record_daily_use(id, "other", 1, 5);
+    auto use = store.daily_use(id, "m-all");
+    CHECK(use.requests == 2);
+    CHECK(use.tokens == 150);
+    CHECK_FALSE(use.exhausted);
+    CHECK(store.daily_use(id, "M-ALL").requests == 2);
+    // Use on another Pacific day is kept apart.
+    store.record_daily_use(id, "m-all", 1, 7, now - day);
+    CHECK(store.daily_use(id, "m-all").requests == 2);
+    CHECK(store.daily_use(id, "m-all", now - day).requests == 1);
+    // A daily 429 marks only today's row of that model.
+    store.mark_daily_exhausted(id, "M-all");
+    CHECK(store.daily_use(id, "m-all").exhausted);
+    CHECK_FALSE(store.daily_use(id, "m-all", now - day).exhausted);
+    CHECK_FALSE(store.daily_use(id, "other").exhausted);
+    // The account list reports today's raw use.
+    const auto usage = store.account_status()[0].at("daily_usage").as_array();
+    REQUIRE(usage.size() == 2);
+    CHECK(usage[0].at("model") == "m-all");
+    CHECK(usage[0].at("requests").as_int64() == 2);
+    CHECK(usage[0].at("tokens").as_int64() == 150);
+    CHECK(usage[0].at("exhausted") == true);
+    CHECK(usage[1].at("model") == "other");
+    // Rows older than a week go with the next write.
+    store.record_daily_use(id, "m-all", 1, 1, now - 9 * day);
+    CHECK(store.daily_use(id, "m-all", now - 9 * day).requests == 1);
+    store.record_daily_use(id, "other", 1, 1);
+    CHECK(store.daily_use(id, "m-all", now - 9 * day).requests == 0);
+    CHECK(store.daily_use(id, "m-all", now - day).requests == 1);
+    // Clearing a cooldown keeps the estimate; resetting the account clears it.
+    store.clear_cooldown(id);
+    CHECK(store.daily_use(id, "m-all").requests == 2);
+    store.reset_account(id);
+    CHECK(store.daily_use(id, "m-all").requests == 0);
+    CHECK_FALSE(store.daily_use(id, "m-all").exhausted);
+    // Unknown accounts record nothing; removed accounts take their use along.
+    store.record_daily_use("acc_missing", "m-all", 1, 1);
+    store.mark_daily_exhausted("acc_missing", "m-all");
+    CHECK(store.daily_use("acc_missing", "m-all").requests == 0);
+    CHECK_FALSE(store.daily_use("acc_missing", "m-all").exhausted);
+    store.record_daily_use(id, "m-all", 1, 1);
+    store.remove_account(id);
+    CHECK(store.daily_use(id, "m-all").requests == 0);
+}
+
+TEST_CASE("accounts whose daily allowance is spent come last without being refused", "[quota][tier][state]") {
+    Directory d;
+    Store store(d.path);
+    const auto import = [&](std::string name) { return string_or(store.import_accounts(credential(name))[0].as_object(), "id"); };
+    const auto first = import("first"), second = import("second");
+    store.set_benefit_tier(first, "free");
+    store.set_benefit_tier(second, "free");
+    // m-all allows a free account 2 requests or 200 tokens a day.
+    const auto policy = test_tier_policy();
+    const auto chosen = [&](std::string_view model, const TierPolicy *p) {
+        auto account = store.choose(model, {}, false, p);
+        return account ? account->id : std::string();
+    };
+    CHECK(chosen("m-all", &policy) == first);
+    store.record_daily_use(first, "M-ALL", 1, 5);
+    store.record_daily_use(first, "m-all", 1, 5);
+    CHECK(chosen("m-all", &policy) == second);
+    CHECK(chosen("M-All", &policy) == second);
+    // Other models keep their order.
+    CHECK(chosen("other", &policy) == first);
+    // A spent allowance outranks even the resident account.
+    store.success(first, "m-all");
+    CHECK(chosen("m-all", &policy) == second);
+    // The token limit counts as well; with every allowance spent, the usual
+    // order applies again, since the estimate refuses nothing.
+    store.record_daily_use(second, "m-all", 1, 200);
+    CHECK(chosen("m-all", &policy) == first);
+    // Without a policy only a daily 429 mark moves an account back.
+    CHECK(chosen("other", nullptr) == first);
+    store.mark_daily_exhausted(first, "other");
+    CHECK(chosen("other", nullptr) == second);
+    CHECK(chosen("other", &policy) == second);
 }

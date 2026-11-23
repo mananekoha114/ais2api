@@ -172,6 +172,7 @@ class SpiderMonkeyGateway final : public GenerationBackend {
     json::object probe(const Account &account, std::stop_token cancel = {}) override;
     json::object diagnostics() override;
     std::string_view backend_for(const Account &) override { return "spidermonkey"; }
+    std::string benefit_tier(const Account &account) override;
     void reconfigure(const Config &config) override;
     void close() override;
     void reset_session() override;

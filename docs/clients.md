@@ -88,7 +88,7 @@ claude
 - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` 关闭遥测、自动更新等非必要请求，减少排队。
 - 这些变量也可以写进 Claude Code 设置文件（如 `~/.claude/settings.json`）的 `env` 字段。
 
-支持的功能：工具调用与工具结果、思考签名往返、图片和 PDF 输入、`/effort` 调整思考等级（`low`、`medium`、`high` 对应 Gemini 的 `LOW`、`MEDIUM`、`HIGH`，更高的档位都按 `HIGH`），以及本地计数的 `count_tokens`。
+支持的功能：工具调用与工具结果、思考签名往返、图片和 PDF 输入、`/effort` 调整思考等级（`low`、`medium`、`high` 对应 Gemini 的 `LOW`、`MEDIUM`、`HIGH`；`xhigh` 与 `max` 在 `gemini-4-hydrogen` / `gemini-4-neon` 上对应 `XHIGH`，其他模型按 `HIGH`），以及本地计数的 `count_tokens`。
 
 注意事项：
 
@@ -109,7 +109,7 @@ curl "http://127.0.0.1:18451/v1beta/models/gemini-3.1-flash-lite:streamGenerateC
 
 模型只来自两种来源：浏览器实时发现后保存在本地的清单（`saved`）和配置项 `configured_models`（`configured`）。读取列表不会访问上游；清单在导入账号后自动获取一次，之后通过管理页面或 `ais2api models list` 手动刷新。项目不内置“声称可用”的模型清单，列表中出现的模型也不保证当前账号有权限使用。
 
-列表会为每个支持生成的 Gemini、Gemma 和图片模型追加一个 `<模型>-search` 条目（来源为 `search_variant`），见下一节。
+列表会为每个支持生成的 Gemini、Gemma 和图片模型追加一个 `<模型>-search` 条目（来源为 `search_variant`），见下一节。配置了 [模型别名](configuration.md#模型别名与默认参数)（`model_aliases`）时，目标在列表中的别名也会列出（来源为 `alias`），客户端可以直接选用。
 
 ## 搜索
 
@@ -132,7 +132,8 @@ curl "http://127.0.0.1:18451/v1beta/models/gemini-3.1-flash-lite:streamGenerateC
 
 ## 思考与签名
 
-- Gemini 的 `thinkingLevel` 可用（不区分大小写）；未指定时使用官方文档中的模型默认等级（如 Gemini 4 为 `MEDIUM`），未列出的文本模型默认 `HIGH`，图片模型默认 `MINIMAL`。Gemini 4 不支持 `MINIMAL`。
+- Gemini 的 `thinkingLevel` 可用（不区分大小写，含 `gemini-4-hydrogen` / `gemini-4-neon` 支持的 `XHIGH`）；未指定时使用官方文档中的模型默认等级（如 `gemini-4-hydrogen` / `gemini-4-neon` 为 `HIGH`，其他 Gemini 4 为 `MEDIUM`），未列出的文本模型默认 `HIGH`，图片模型默认 `MINIMAL`。Gemini 4 不支持 `MINIMAL`。
+- 客户端没有思考强度设置时，可以在模型名后加后缀，例如 `gemini-4-argon(low)`、`gemini-4-hydrogen(xhigh)`、`gemini-3.8-flash-search(high)`。后缀优先于请求里的思考设置；取值与规则见 [思考强度后缀](protocol.md#思考强度后缀)。
 - 原生 Gemini 接口与官方一致，只有 `includeThoughts: true` 时才返回思考文本；未设置或为 `false` 时在网关隐藏，但模型仍会思考，签名、函数调用和 usage 保留。
 - `thinkingBudget` 与 `seed` 为兼容客户端而接受，但**不会生效**；`thinkingBudget: 0` 也不会关闭思考。例外：Gemini 4 上单独的 `thinkingBudget: 0` 映射为 `LOW`，与 `thinkingLevel` 同时提供时报错。
 - Gemini 4 每次最多输出 32,768 token（含思考），不支持官方的续写（`continuationToken`）；更大的输出上限会被压到 32768，超长回答以 `MAX_TOKENS` / `length` 截断。

@@ -57,8 +57,9 @@
 | `nonstream_keepalive_seconds` | `0` 或 1–120，`0` | 热更新 | 非流式保活：生成超过这么多秒仍未完成时，先返回 200 响应头，之后按同样间隔写换行，防止反向代理因长时间没有数据而断开；推荐 10，`0` 表示关闭。开启后错误可能出现在 200 响应的正文里，见 [非流式保活](protocol.md#非流式保活)。 |
 | `search_model_drop_functions` | 布尔，`true` | 热更新 | `*-search` 模型同时收到自定义函数时：`true` 舍弃函数、保留搜索；`false` 保留函数、不加搜索。见 [搜索模型](protocol.md#search-models)。 |
 | `continuation_retry_enabled` | 布尔，`true` | 热更新 | 续接失败自动重试开关；只控制符合条件的无生成数据 403 补试，不关闭正常续接。 |
-| `model_aliases` | 对象，`{}` | 热更新 | 模型别名，键为客户端使用的名称，值为实际模型 id，例如 `{"flash": "gemini-3.1-flash-lite"}`。 |
+| `model_aliases` | 对象，`{}` | 热更新 | 模型别名，键为客户端使用的名称，值为实际模型 id，可带[思考强度后缀](protocol.md#思考强度后缀)，例如 `{"flash": "gemini-3.1-flash-lite", "fast": "gemini-4-argon(low)"}`。目标在模型列表中时，别名也会列出。解析规则见 [模型别名](protocol.md#模型别名)。 |
 | `model_defaults` | 对象，`{}` | 热更新 | 按模型 id 设置默认请求字段（Gemini 请求格式），客户端显式传入的字段优先。例如 `{"gemini-3.1-flash-lite": {"generationConfig": {"temperature": 0.7}}}`。 |
+| `tier_quotas` | 对象，`{}` | 热更新 | 本地覆盖每日额度表，格式与额度数据文件的 `models` 相同：键为小写模型 id，值以等级（`free`、`plus`、`pro`、`ultra`）为键，每项为 `null`（该等级不能使用）或 `{"requests": 次数, "tokens": Token 数}`；按模型整条替换或补充额度表的条目。见 [订阅等级与每日额度](quotas.md#本地覆盖)。 |
 | `configured_models` | 数组，`[]` | 热更新 | 手动声明的备用模型（字符串 id 或模型对象）。没有任何账号保存的发现结果时作为 `source: "configured"` 返回，不代表真实可用。实时发现失败会报错并保留旧清单，不会把备用模型保存为发现结果。 |
 
 ### 资源限额 `limits`
@@ -99,8 +100,9 @@
 | `search_model_drop_functions` | `AIS2API_SEARCH_MODEL_DROP_FUNCTIONS` | — |
 | `continuation_retry_enabled` | `AIS2API_CONTINUATION_RETRY_ENABLED` | — |
 | `limits.max_continuation_retries` | `AIS2API_MAX_CONTINUATION_RETRIES` | — |
-| `model_aliases` | `AIS2API_MODEL_ALIASES`（JSON） | — |
+| `model_aliases` | `AIS2API_MODEL_ALIASES`（JSON，或 `别名:模型,别名:模型`） | — |
 | `model_defaults` | `AIS2API_MODEL_DEFAULTS`（JSON） | — |
+| `tier_quotas` | `AIS2API_TIER_QUOTAS`（JSON） | — |
 | `configured_models` | `AIS2API_CONFIGURED_MODELS`（JSON） | — |
 | `limits` | `AIS2API_LIMITS`（JSON 对象） | — |
 | `limits.*` 各项 | `AIS2API_REQUEST_BYTES`、`AIS2API_OBJECT_BYTES`、`AIS2API_RELAY_BYTES`、`AIS2API_QUEUE_SIZE`、`AIS2API_QUEUE_SECONDS`、`AIS2API_GENERATION_SECONDS`、`AIS2API_STREAM_IDLE_SECONDS`、`AIS2API_MAX_ATTEMPTS` | `--request-bytes`、`--object-bytes`、`--relay-bytes`、`--queue-size`、`--queue-seconds`、`--generation-seconds`、`--stream-idle-seconds`、`--max-attempts` |
@@ -108,6 +110,7 @@
 说明：
 
 - 布尔与数字类环境变量按 JSON 解析，例如 `AIS2API_HEADLESS=false`、`AIS2API_PORT=18452`。
+- `AIS2API_MODEL_ALIASES` 不以 `{` 开头时，按参考项目 `MODEL_MAPPING` 的写法解析：逗号分隔，每项按最后一个 `:` 分成别名与模型，例如 `fast:gemini-4-argon(low),web:gemini-3.8-flash-search`；同一别名写了多次时以第一项为准。
 - `api_key` 与 `cookie_import_key` 没有对应的环境变量或命令行参数，只能写在配置文件中（或通过管理 API / WebUI 修改）。
 - 控制台输出格式另由 `AIS2API_CONSOLE_FORMAT`（`auto` / `text` / `json`）和 `NO_COLOR` 控制，见 [命令行](cli.md#输出格式)。
 
@@ -166,7 +169,7 @@
 
 ```json
 {
-  "model_aliases": { "fast": "gemini-3.1-flash-lite" },
+  "model_aliases": { "fast": "gemini-3.1-flash-lite", "deep": "gemini-4-hydrogen(xhigh)" },
   "model_defaults": {
     "gemini-3.1-flash-lite": {
       "generationConfig": { "temperature": 0.5, "maxOutputTokens": 4096 }
@@ -175,7 +178,9 @@
 }
 ```
 
-通过管理 API 修改时，`model_aliases`、`model_defaults`、`configured_models` 与 `admin_origins` 会整体替换；要删除某个别名，提交不含它的完整对象即可。`limits` 则按子项合并。
+请求 `deep` 时使用 `gemini-4-hydrogen` 和 `XHIGH` 思考等级；请求 `deep(low)` 时改用 `LOW`。`model_defaults` 的键是实际模型 id，不带后缀。
+
+通过管理 API 修改时，`model_aliases`、`model_defaults`、`tier_quotas`、`configured_models` 与 `admin_origins` 会整体替换；要删除某个别名，提交不含它的完整对象即可。`limits` 则按子项合并。
 
 ## 安全提示
 

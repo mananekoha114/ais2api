@@ -10,10 +10,23 @@ import ImportAccountDialog from '../components/ImportAccountDialog.vue'
 import PageHeader from '../components/PageHeader.vue'
 import ProgressRing from '../components/ProgressRing.vue'
 import { api, describeError, enc, runOperation } from '../api/client'
-import type { Account, ProbeResult, Rotation } from '../api/types'
+import type { Account, ProbeResult, QuotaStatus, Rotation } from '../api/types'
 import { refreshStatus, service } from '../stores/service'
 import { confirm, notify, notifyError } from '../stores/ui'
-import { accountBackendSummary, accountLabel, accountState, cooldownReason, now } from '../utils/accounts'
+import {
+  accountBackendSummary,
+  accountLabel,
+  accountState,
+  cooldownReason,
+  exhaustedModels,
+  formatTokensWan,
+  now,
+  quotaCell,
+  quotaProblem,
+  quotaResetText,
+  quotaSourceText,
+  tierBadge,
+} from '../utils/accounts'
 import { formatRelative, formatTimestamp, isIndefinite } from '../utils/format'
 import { usePolling } from '../utils/media'
 
@@ -28,6 +41,25 @@ const query = ref('')
 const filter = ref<'all' | 'available' | 'unavailable'>('all')
 const importOpen = ref(false)
 const clock = ref(now())
+const quotas = ref<QuotaStatus | null>(null)
+const quotaError = ref('')
+
+async function loadQuotas() {
+  try {
+    quotas.value = await api.get<QuotaStatus>('/quotas')
+    quotaError.value = ''
+  } catch (e) {
+    quotaError.value = describeError(e)
+  }
+}
+async function refreshQuotas() {
+  try {
+    quotas.value = await api.post<QuotaStatus>('/quotas/refresh', {})
+    quotaError.value = ''
+  } catch (e) {
+    quotaError.value = describeError(e)
+  }
+}
 
 async function load() {
   try {
@@ -39,6 +71,8 @@ async function load() {
     loading.value = false
     clock.value = now()
   }
+  // The table rarely changes; poll only while a refresh runs.
+  if (!quotas.value || quotas.value.refreshing) await loadQuotas()
 }
 onMounted(load)
 usePolling(load, 15000)
@@ -209,6 +243,35 @@ function menuFor(a: Account): MenuItem[] {
         后端正在通过浏览器逐个确认账号身份，可能需要数分钟。
       </FInfoBar>
 
+      <details class="card quota">
+        <summary>
+          <strong>每日额度</strong>
+          <span class="t-caption t-secondary">{{ quotaResetText(rotation?.quota_resets_at, clock) }}</span>
+          <span v-if="quotaProblem(quotas, quotaError)" class="t-caption quota-warn">
+            <FIcon name="warning" :size="12" /> 额度数据更新失败
+          </span>
+        </summary>
+        <div class="stack" style="--gap: 8px; margin-top: 12px">
+          <FInfoBar
+            v-if="quotaProblem(quotas, quotaError)"
+            severity="warning"
+            title="额度数据更新失败，继续使用已保存的数据"
+            :message="quotaProblem(quotas, quotaError)"
+          />
+          <p class="t-caption t-secondary">{{ quotaSourceText(quotas) }}</p>
+          <p class="t-caption t-secondary">
+            AI Studio Playground 的每日额度按订阅等级区分，在太平洋时间零点重置（北京时间冬令时 16:00、夏令时 15:00），次数或 Token
+            任一项用完即当日不可用；Plus 账号的额度与 Free 相同。额度表是社区观测值，从项目仓库自动更新，可能随 Google 调整而变化。
+            换号时跳过订阅等级无法使用该模型的账号，并优先使用低等级账号；今日用量只统计经本服务发出的请求，估算用完的账号排到最后但不会被拒绝。
+          </p>
+          <div>
+            <button class="btn" :disabled="quotas?.refreshing" @click="refreshQuotas">
+              <ProgressRing v-if="quotas?.refreshing" /><FIcon v-else name="arrow_clockwise" />{{ quotas?.refreshing ? '正在检查…' : '检查额度数据更新' }}
+            </button>
+          </div>
+        </div>
+      </details>
+
       <div class="toolbar">
         <div class="input-group search">
           <span class="lead"><FIcon name="search" /></span>
@@ -244,6 +307,14 @@ function menuFor(a: Account): MenuItem[] {
                 <strong class="truncate">{{ accountLabel(account) }}</strong>
                 <span v-if="account.id === rotation?.preferred_account_id" class="badge accent"><FIcon name="star" filled />首选</span>
                 <span v-if="account.id === service.status?.active_generation_account_id" class="badge success"><FIcon name="record" filled />生成中</span>
+                <span class="badge" :class="tierBadge(account).known ? 'outline' : ''" :title="tierBadge(account).title">{{ tierBadge(account).text }}</span>
+                <span
+                  v-if="exhaustedModels(account).length"
+                  class="badge caution"
+                  :title="`今日额度已用完：${exhaustedModels(account).map((row) => row.model).join('、')}`"
+                >
+                  {{ exhaustedModels(account).length }} 个模型额度用完
+                </span>
               </div>
               <div class="meta t-caption t-secondary">
                 <span v-if="account.email" class="truncate"><FIcon name="mail" :size="12" /> {{ account.email }}</span>
@@ -282,11 +353,11 @@ function menuFor(a: Account): MenuItem[] {
                 <FIcon name="star" />设为首选
               </button>
               <button
-                v-if="account.failures?.length"
+                v-if="account.failures?.length || account.daily_usage?.length"
                 class="btn subtle icon-only"
                 :aria-expanded="!!expanded[account.id]"
-                :aria-label="expanded[account.id] ? '收起冷却详情' : '展开冷却详情'"
-                :title="expanded[account.id] ? '收起冷却详情' : '冷却详情'"
+                :aria-label="expanded[account.id] ? '收起冷却与额度详情' : '展开冷却与额度详情'"
+                :title="expanded[account.id] ? '收起详情' : '冷却与今日额度'"
                 @click="expanded[account.id] = !expanded[account.id]"
               >
                 <FIcon :name="expanded[account.id] ? 'chevron_down' : 'chevron_right'" />
@@ -332,7 +403,36 @@ function menuFor(a: Account): MenuItem[] {
               </tbody>
             </table>
             <p class="cooldown-hint t-caption t-secondary">
-              额度类限制（每分钟、每日、按模型）会持久记录：同一太平洋时间日内重复触发时冷却逐级延长，按上游重试提示最长可达一天，凭据刷新后仍然保留；清除冷却会同时清除额度计数。权限类失败不会自动解除。“需同意条款”表示 AI Studio 要求账号同意条款，ais2api 只会自动继续欢迎对话框：请用此账号在普通浏览器中登录 AI Studio 并同意，再清除冷却。
+              额度类限制（每分钟、每日、按模型）会持久记录：同一太平洋时间日内重复触发时冷却逐级延长，按上游重试提示最长可达一天，凭据刷新后仍然保留；每日额度 429 且今日用量估算也已用完时，直接冷却到额度重置。清除冷却会同时清除额度计数，但不清除今日用量。权限类失败不会自动解除。“需同意条款”表示 AI Studio 要求账号同意条款，ais2api 只会自动继续欢迎对话框：请用此账号在普通浏览器中登录 AI Studio 并同意，再清除冷却。
+            </p>
+          </div>
+
+          <div v-if="expanded[account.id] && account.daily_usage?.length" class="cooldowns">
+            <table class="table">
+              <caption class="t-body-strong">今日额度</caption>
+              <thead>
+                <tr>
+                  <th>模型</th>
+                  <th>次数</th>
+                  <th>Token</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in account.daily_usage" :key="row.model">
+                  <td class="mono break">{{ row.model }}</td>
+                  <td class="num">{{ quotaCell(row.requests, row.request_limit) }}</td>
+                  <td class="num">{{ quotaCell(row.tokens, row.token_limit, formatTokensWan) }}</td>
+                  <td>
+                    <span v-if="row.exhausted" class="badge caution">已用完</span>
+                    <span v-else-if="row.request_limit || row.token_limit" class="t-secondary">可用</span>
+                    <span v-else class="t-tertiary">无已知上限</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="cooldown-hint t-caption t-secondary">
+              用量只统计经本服务发出的请求（续写的每一轮各算一次），在其他地方使用同一账号不会计入。“重置失败与禁用状态”会清空今日用量。
             </p>
           </div>
         </li>
@@ -453,6 +553,22 @@ function menuFor(a: Account): MenuItem[] {
 }
 .probe.bad .icon {
   color: var(--caution);
+}
+.quota summary {
+  cursor: pointer;
+}
+.quota summary .t-caption {
+  margin-left: 12px;
+}
+.quota-warn {
+  color: var(--caution);
+}
+.quota {
+  padding: 12px 16px;
+}
+caption {
+  text-align: left;
+  padding: 10px 12px 4px;
 }
 .cooldown-hint {
   padding: 8px 12px 10px;

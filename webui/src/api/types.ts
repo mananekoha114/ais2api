@@ -56,9 +56,54 @@ export interface Account {
   backend_switched_until?: number
   /** Stored per-account browser identity; empty timezone/locale follow the host. */
   fingerprint?: { seed: number; timezone: string; locale: string }
+  /** Subscription tier the account's page last confirmed; empty until known. */
+  benefit_tier?: BenefitTier | ''
+  /** Unix seconds of that confirmation; 0 when unknown. */
+  benefit_tier_at?: number
+  /** Today's (Pacific quota day) estimate: the tier's limited models, then any other model used today. */
+  daily_usage?: DailyUsage[]
+}
+
+/** One model's use during the current Pacific quota day. */
+export interface DailyUsage {
+  model: string
+  requests: number
+  tokens: number
+  /** Null when the tier has no known limit for the model. */
+  request_limit: number | null
+  token_limit: number | null
+  /** A daily 429 or the estimate says the allowance is spent; such accounts are tried last. */
+  exhausted: boolean
 }
 
 export type AccountBackend = 'auto' | 'camoufox' | 'spidermonkey'
+
+/** Subscription tiers GetAiStudioBenefitTier names. */
+export type BenefitTier = 'free' | 'plus' | 'pro' | 'ultra'
+
+/** Daily Playground allowance of one tier for one model. */
+export interface TierLimit {
+  requests: number
+  tokens: number
+}
+
+/** GET /quotas and POST /quotas/refresh. */
+export interface QuotaStatus {
+  refreshing: boolean
+  error: string
+  source: {
+    url: string
+    fetched_at: number
+    attempted_at: number
+    error: string
+    published_at: string
+    models: number
+    /** Never downloaded: the build's embedded snapshot is in use. */
+    embedded: boolean
+  }
+  /** Effective table; a tier missing from `tiers` has no known limit, null cannot use the model. */
+  models: Record<string, { origin: 'catalog' | 'config'; tiers: Partial<Record<BenefitTier, TierLimit | null>> }>
+}
 
 /** GET/PATCH /accounts/{id}/fingerprint and POST .../regenerate. */
 export interface FingerprintView {
@@ -87,6 +132,8 @@ export interface Rotation {
   next_account_id?: string | null
   active_generation_account_id?: string | null
   accounts?: Account[]
+  /** Unix seconds of the next daily quota reset (midnight Pacific time). */
+  quota_resets_at?: number
 }
 
 export interface Operation<R = Record<string, unknown>> {
@@ -286,6 +333,8 @@ export interface Config {
   model_aliases?: Record<string, string>
   configured_models?: Array<string | Record<string, unknown>>
   model_defaults?: Record<string, unknown>
+  /** Per-model replacements of the tier quota catalog. */
+  tier_quotas?: Record<string, Partial<Record<BenefitTier, TierLimit | null>>>
   limits?: Limits
   admin_key?: string
   admin_origins?: string[]

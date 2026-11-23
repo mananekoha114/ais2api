@@ -222,6 +222,35 @@ TEST_CASE("HTTP model lists follow eligible models with search variants","[http]
     REQUIRE(json::parse(server.call(http::verb::get,"/v1/models",{},server.key).body()).as_object().at("data").as_array().size()==7);
 }
 
+TEST_CASE("HTTP model lists show aliases whose targets are listed","[http][models][thinking-suffix]"){
+    LiveServer server(true,{json::object{{"id","gemini-text"},{"displayName","Gemini Text"},{"inputTokenLimit",1000}},"other-model"});
+    server.config.model_aliases={{"fast","gemini-text(low)"},{"web","models/gemini-text-search"},{"other-model","gemini-text"},
+                                 {"ghost","gemini-missing"},{"odd(high)","gemini-text"}};
+    atomic_write(server.config.config_file,json::serialize(server.config.to_json()),true);
+    local_call(server.config,{{"command","config.reload"}});
+    std::vector<std::string> names;
+    const auto listing=json::parse(server.call(http::verb::get,"/v1beta/models",{},server.key).body());
+    for(const auto& value:listing.as_object().at("models").as_array())
+        names.push_back(string_or(value.as_object(),"name"));
+    // An alias named like a listed model replaces it; unlisted targets and suffixed keys stay hidden.
+    REQUIRE(names==std::vector<std::string>{"models/gemini-text","models/gemini-text-search","models/other-model","models/fast","models/web"});
+    auto detail=json::parse(server.call(http::verb::get,"/v1beta/models/fast",{},server.key).body()).as_object();
+    REQUIRE(string_or(detail,"displayName")=="fast");
+    REQUIRE(string_or(detail,"source")=="alias");
+    REQUIRE(detail.at("inputTokenLimit")==1000);
+    auto replaced=json::parse(server.call(http::verb::get,"/v1beta/models/other-model",{},server.key).body()).as_object();
+    REQUIRE(replaced.at("inputTokenLimit")==1000);
+    auto openai=json::parse(server.call(http::verb::get,"/v1/models/web",{},server.key).body()).as_object();
+    REQUIRE(openai.at("ais2api").as_object().at("source")=="alias");
+    REQUIRE(server.call(http::verb::get,"/v1/models/ghost",{},server.key).result_int()==404);
+    REQUIRE(json::parse(server.call(http::verb::get,"/v1/models",{},server.key).body()).as_object().at("data").as_array().size()==5);
+    auto anthropic=json::parse(server.call(http::verb::get,"/v1/models",{},server.key,{{"anthropic-version","2023-06-01"}}).body()).as_object();
+    bool found=false;
+    for(const auto& value:anthropic.at("data").as_array())
+        if(value.as_object().at("id")=="fast"){found=true;REQUIRE(value.as_object().at("max_input_tokens")==1000);}
+    REQUIRE(found);
+}
+
 TEST_CASE("Gemini-compatible clients accept version-prefixed model routes without rewriting resources", "[http][gemini-clients]") {
     LiveServer server;
     const std::array<std::string, 4> bases{

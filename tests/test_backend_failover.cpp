@@ -8,6 +8,7 @@
 #include "ais2api/diagnostics.hpp"
 #include "ais2api/management.hpp"
 #include "ais2api/runtime.hpp"
+#include "ais2api/tier_quota.hpp"
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -93,6 +94,8 @@ struct FailoverState {
     std::function<void(std::string_view backend, const Account &account, const Request &request, unsigned backend_call)>
         behavior;
     std::map<std::string, unsigned, std::less<>> backend_calls;
+    // The benefit tier each account's page reports.
+    std::map<std::string, std::string, std::less<>> tiers;
 };
 
 class ScriptedGateway final : public GenerationBackend {
@@ -117,6 +120,11 @@ class ScriptedGateway final : public GenerationBackend {
     json::array models(const Account &, std::stop_token) override { return {}; }
     json::object probe(const Account &, std::stop_token) override { return {{"ok", true}, {"status", "ok"}}; }
     json::object diagnostics() override { return {{"status", name_ + "_ready"}}; }
+    std::string benefit_tier(const Account &account) override {
+        std::lock_guard lock(state_->mutex);
+        const auto found = state_->tiers.find(account.id);
+        return found == state_->tiers.end() ? std::string() : found->second;
+    }
     void reconfigure(const Config &) override {}
     void close() override {
         std::lock_guard lock(state_->mutex);
@@ -754,4 +762,172 @@ TEST_CASE("Service generate fails over auto Firefox accounts for 6 hours after r
         CHECK(server.state->attempts[2].account_id == server.second_id);
     }
 #endif
+}
+
+TEST_CASE("Service skips accounts whose confirmed tier refuses the model without penalties", "[tier][failover]") {
+    FailoverServer server(3, [](std::string_view, const Config &) { return true; }, "windows-x64");
+    {
+        std::lock_guard lock(server.state->mutex);
+        server.state->tiers[server.first_id] = "free";
+        server.state->tiers[server.second_id] = "pro";
+    }
+    const auto first = server.first_id;
+    server.state->behavior = [first](std::string_view, const Account &account, const Request &, unsigned) {
+        if (account.id == first) throw Error(403, "permission_denied", "Model needs a paid tier");
+    };
+    auto response = server.generate_chat("gemini-4-argon");
+    REQUIRE(response.result_int() == 200);
+    {
+        std::lock_guard lock(server.state->mutex);
+        REQUIRE(server.state->attempts.size() == 2);
+        CHECK(server.state->attempts[0].account_id == server.first_id);
+        CHECK(server.state->attempts[1].account_id == server.second_id);
+        // No session rebuild or browser restart for a tier refusal.
+        CHECK(server.state->events.empty());
+    }
+    CHECK(server.router_store->benefit_tier(server.first_id) == "free");
+    CHECK(server.router_store->benefit_tier(server.second_id) == "pro");
+    CHECK_FALSE(server.router_store->backend_switch(server.first_id).has_value());
+    for (const auto &row : server.router_store->account_status())
+        CHECK(row.at("failures").as_array().empty());
+
+    // Known tiers route the next request straight to the account that can serve.
+    response = server.generate_chat("gemini-4-argon");
+    REQUIRE(response.result_int() == 200);
+    {
+        std::lock_guard lock(server.state->mutex);
+        REQUIRE(server.state->attempts.size() == 3);
+        CHECK(server.state->attempts[2].account_id == server.second_id);
+    }
+
+    // When no account's tier can use the model, nothing is attempted.
+    server.router_store->set_benefit_tier(server.second_id, "plus");
+    response = server.generate_chat("gemini-4-carbon");
+    CHECK(response.result_int() == 403);
+    CHECK(response.body().find("tier_insufficient") != std::string::npos);
+    std::lock_guard lock(server.state->mutex);
+    CHECK(server.state->attempts.size() == 3);
+}
+
+TEST_CASE("Daily quota 429s wait for the Pacific reset only when the estimate agrees", "[quota][failover]") {
+    FailoverServer server(3, [](std::string_view, const Config &) { return true; }, "windows-x64");
+    {
+        std::lock_guard lock(server.state->mutex);
+        server.state->tiers[server.first_id] = "free";
+        server.state->tiers[server.second_id] = "free";
+    }
+    const auto first = server.first_id, second = server.second_id;
+    server.state->behavior = [first](std::string_view, const Account &account, const Request &, unsigned) {
+        if (account.id != first) return;
+        Error error(429, "rate_limit", "Daily quota spent");
+        error.quota_scope = "day";
+        throw error;
+    };
+    const std::string model = "gemini-3.1-flash-lite";
+    auto &store = *server.router_store;
+    const auto cooldown_until = [&] {
+        for (const auto &row : store.account_status())
+            if (string_or(row.as_object(), "id") == first)
+                for (const auto &failure : row.at("failures").as_array())
+                    if (string_or(failure.as_object(), "kind") == "rate_limit_day")
+                        return failure.at("until").as_int64();
+        return std::int64_t{0};
+    };
+
+    // Below the estimate: the usual short cooldown, and the account comes
+    // last for the model until the reset.
+    auto response = server.generate_chat(model);
+    REQUIRE(response.result_int() == 200);
+    auto after = unix_seconds();
+    CHECK(cooldown_until() > 0);
+    CHECK(cooldown_until() <= after + 61);
+    CHECK(store.daily_use(first, model).exhausted);
+    CHECK(store.daily_use(first, model).requests == 0);
+    // The answering account's round counts with its own tokens.
+    CHECK(store.daily_use(second, model).requests == 1);
+    CHECK(store.daily_use(second, model).tokens == 6);
+    // Both account lists carry the tier and today's quota view.
+    for (const auto *target : {"/api/admin/v1/accounts", "/api/admin/v1/accounts/active"}) {
+        INFO(target);
+        const auto listed = server.call(target, {}, http::verb::get);
+        REQUIRE(listed.result_int() == 200);
+        const auto body = json::parse(listed.body()).as_object();
+        CHECK(body.at("quota_resets_at").as_int64() > after);
+        bool found = false;
+        for (const auto &row : body.at("accounts").as_array()) {
+            if (string_or(row.as_object(), "id") != second) continue;
+            CHECK(string_or(row.as_object(), "benefit_tier") == "free");
+            for (const auto &use : row.at("daily_usage").as_array())
+                if (use.at("model").as_string() == model) {
+                    found = true;
+                    CHECK(use.at("requests").as_int64() == 1);
+                    CHECK(use.at("request_limit").is_int64());
+                }
+        }
+        CHECK(found);
+    }
+
+    // With the estimate spent, the cooldown lasts until the Pacific midnight.
+    store.clear_cooldown(first);
+    store.record_daily_use(first, model, 1000000, 0);
+    store.update_account_metadata(second, {{"disabled", true}});
+    const auto before = unix_seconds();
+    response = server.generate_chat(model);
+    CHECK(response.result_int() == 429);
+    const auto reset = next_quota_reset(before);
+    CHECK(cooldown_until() >= reset - 2);
+    CHECK(cooldown_until() <= std::max(reset, unix_seconds() + 60) + 2);
+}
+
+TEST_CASE("Tier skips never hide another account's failure or a cooling account that could serve",
+          "[tier][failover]") {
+    // Two attempts per request keep each scenario to the accounts it names.
+    FailoverServer server(2, [](std::string_view, const Config &) { return true; }, "windows-x64");
+    auto &store = *server.router_store;
+    const auto pro = server.first_id, fresh = server.second_id;
+    const auto third = import_account(store, "third-account", "Third");
+    adopt_backends(store, server.config);
+    // The Pro account is known; the other two are free accounts whose tier
+    // the page confirms only when they are tried.
+    store.set_benefit_tier(pro, "pro");
+    {
+        std::lock_guard lock(server.state->mutex);
+        server.state->tiers[pro] = "pro";
+        server.state->tiers[fresh] = "free";
+        server.state->tiers[third] = "free";
+    }
+    server.state->behavior = [pro](std::string_view, const Account &account, const Request &, unsigned) {
+        if (account.id == pro) throw Error(429, "rate_limit", "Model quota");
+        throw Error(403, "permission_denied", "Model needs a paid tier");
+    };
+
+    // The Pro account's 429 is the answer, not a tier refusal.
+    auto response = server.generate_chat("gemini-4-argon");
+    CHECK(response.result_int() == 429);
+    CHECK(response.body().find("tier_insufficient") == std::string::npos);
+    CHECK(store.benefit_tier(fresh) == "free");
+    {
+        std::lock_guard lock(server.state->mutex);
+        REQUIRE(server.state->attempts.size() == 2);
+        CHECK(server.state->attempts[0].account_id == pro);
+        CHECK(server.state->attempts[1].account_id == fresh);
+    }
+
+    // With the Pro account cooling, a newly confirmed free account leaves no
+    // account to try, which is not a tier refusal either.
+    response = server.generate_chat("gemini-4-argon");
+    CHECK(response.result_int() == 503);
+    CHECK(response.body().find("no_account") != std::string::npos);
+    CHECK(store.benefit_tier(third) == "free");
+    {
+        std::lock_guard lock(server.state->mutex);
+        REQUIRE(server.state->attempts.size() == 3);
+        CHECK(server.state->attempts[2].account_id == third);
+    }
+
+    // Once no usable account's tier can serve, the refusal is reported.
+    store.update_account_metadata(pro, {{"disabled", true}});
+    response = server.generate_chat("gemini-4-argon");
+    CHECK(response.result_int() == 403);
+    CHECK(response.body().find("tier_insufficient") != std::string::npos);
 }

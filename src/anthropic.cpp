@@ -71,12 +71,13 @@ struct Policy {
     }
 };
 
-std::string effort_level(const json::value &value, std::string_view what) {
+std::string effort_level(const json::value &value, std::string_view what, bool allow_xhigh) {
     const auto effort = string_at(value, what);
     if (effort == "low") return "LOW";
     if (effort == "medium") return "MEDIUM";
-    // Gemini has no level above HIGH.
-    if (effort == "high" || effort == "xhigh" || effort == "max") return "HIGH";
+    if (effort == "high") return "HIGH";
+    // Only Hydrogen and Neon accept XHIGH; other models cap at HIGH.
+    if (effort == "xhigh" || effort == "max") return allow_xhigh ? "XHIGH" : "HIGH";
     invalid(std::string(what) + " must be low, medium, high, xhigh or max");
 }
 
@@ -185,7 +186,7 @@ std::string tool_reference(const json::value &value, std::string_view what) {
 
 class Lowering {
   public:
-    Lowering(Policy &policy) : policy_(policy) {}
+    Lowering(Policy &policy, bool allow_xhigh) : policy_(policy), allow_xhigh_(allow_xhigh) {}
 
     void system(const json::value &value) {
         if (value.is_string()) {
@@ -281,7 +282,7 @@ class Lowering {
             auto &config = object_at(*p, "system message.output_config");
             allow(config, {"effort"}, "system message.output_config");
             if (auto e = config.if_contains("effort"); e && !e->is_null())
-                effort = effort_level(*e, "system message.output_config.effort");
+                effort = effort_level(*e, "system message.output_config.effort", allow_xhigh_);
         }
         json::array parts;
         auto &content = required(message, "content", "system message");
@@ -442,6 +443,7 @@ class Lowering {
     }
 
     Policy &policy_;
+    bool allow_xhigh_ = false;
     std::map<std::string, std::string> names_;
     json::array pending_;
 };
@@ -515,7 +517,8 @@ bool anthropic_thinking(const json::object &input) {
     return type == "enabled" || type == "adaptive";
 }
 
-AnthropicRequest anthropic_to_gemini(const json::object &input, bool ignore_unsupported, bool count_only) {
+AnthropicRequest anthropic_to_gemini(const json::object &input, bool ignore_unsupported, bool count_only,
+                                     const Config &service_config) {
     AnthropicRequest out;
     Policy policy{ignore_unsupported, out.ignored};
     allow(input, {"model", "max_tokens", "messages", "system", "stop_sequences", "stream", "temperature", "top_p",
@@ -528,6 +531,7 @@ AnthropicRequest anthropic_to_gemini(const json::object &input, bool ignore_unsu
         if (auto p = input.if_contains(key); p && !p->is_null()) policy.unsupported(key);
     out.model = string_at(required(input, "model", "request"), "model");
     if (out.model.empty()) invalid("model cannot be empty");
+    const bool allow_xhigh = supports_xhigh_thinking(out.model, service_config);
     out.stream = flag(input, "stream", "request");
     json::object generation, thinking_config;
     if (auto p = input.if_contains("max_tokens"); (p && !p->is_null()) || !count_only) {
@@ -577,7 +581,8 @@ AnthropicRequest anthropic_to_gemini(const json::object &input, bool ignore_unsu
     if (auto p = input.if_contains("output_config"); p && !p->is_null()) {
         auto &config = object_at(*p, "output_config");
         allow(config, {"effort", "format", "task_budget"}, "output_config");
-        if (auto e = config.if_contains("effort"); e && !e->is_null()) effort = effort_level(*e, "output_config.effort");
+        if (auto e = config.if_contains("effort"); e && !e->is_null())
+            effort = effort_level(*e, "output_config.effort", allow_xhigh);
         if (auto f = config.if_contains("format"); f && !f->is_null()) format = *f;
         if (auto tb = config.if_contains("task_budget"); tb && !tb->is_null())
             policy.unsupported("output_config.task_budget");
@@ -622,7 +627,7 @@ AnthropicRequest anthropic_to_gemini(const json::object &input, bool ignore_unsu
             }
     }
 
-    Lowering lowering(policy);
+    Lowering lowering(policy, allow_xhigh);
     if (auto p = input.if_contains("tools"); p && !p->is_null())
         for (auto &item : array_at(*p, "tools")) {
             auto &tool = object_at(item, "tool");

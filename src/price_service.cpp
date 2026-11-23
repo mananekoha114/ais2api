@@ -6,7 +6,6 @@
 #include "ais2api/price_service.hpp"
 #include "ais2api/download.hpp"
 #include "ais2api/pricing.hpp"
-#include <curl/curl.h>
 #include <utility>
 
 namespace ais2api {
@@ -15,59 +14,7 @@ namespace {
 constexpr std::size_t download_limit = 4 * 1024 * 1024;
 std::string fetch_catalog(std::string_view url, const std::string &proxy,
                           std::stop_token token) {
-    ensure_curl_initialized();
-    std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
-    if (!curl)
-        throw Error(502, "price_network_init", "Cannot initialize price download");
-    const std::string address(url);
-    struct Download {
-        std::string text;
-        bool exceeded = false;
-    } data;
-    curl_easy_setopt(curl.get(), CURLOPT_URL, address.c_str());
-    curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, "ais2api/0.1");
-    curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR, "https");
-    curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 0L);
-    curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, 10L);
-    curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 30L);
-    if (!proxy.empty())
-        curl_easy_setopt(curl.get(), CURLOPT_PROXY, proxy.c_str());
-    curl_easy_setopt(
-        curl.get(), CURLOPT_WRITEFUNCTION,
-        +[](char *ptr, std::size_t size, std::size_t count, void *context) -> std::size_t {
-            auto &d = *static_cast<Download *>(context);
-            if (size && count > (download_limit - d.text.size()) / size) {
-                d.exceeded = true;
-                return 0;
-            }
-            auto bytes = size * count;
-            try {
-                d.text.append(ptr, bytes);
-            } catch (...) {
-                return 0;
-            }
-            return bytes;
-        });
-    curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &data);
-    curl_easy_setopt(curl.get(), CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(
-        curl.get(), CURLOPT_XFERINFOFUNCTION,
-        +[](void *context, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
-            return static_cast<std::stop_token *>(context)->stop_requested() ? 1 : 0;
-        });
-    curl_easy_setopt(curl.get(), CURLOPT_XFERINFODATA, &token);
-    auto code = curl_easy_perform(curl.get());
-    check_cancel(token);
-    if (data.exceeded)
-        throw Error(502, "price_catalog_too_large", "Price catalog exceeds 4 MiB");
-    if (code != CURLE_OK)
-        throw Error(502, "price_download_failed", "Price catalog download failed");
-    long status = 0;
-    curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
-    if (status != 200)
-        throw Error(502, "price_http_" + std::to_string(status), "Price source rejected download");
-    return std::move(data.text);
+    return fetch_small_https(url, proxy, token, download_limit, "price");
 }
 } // namespace
 std::string_view embedded_price_catalog() {

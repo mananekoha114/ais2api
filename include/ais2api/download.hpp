@@ -12,6 +12,12 @@
 #include <string_view>
 namespace ais2api {
 void ensure_curl_initialized();
+// One small HTTPS GET without redirects (10 s to connect, 30 s in total),
+// through `proxy` when set, cancelled by `token`. Errors are 502
+// "<prefix>_download_failed", "<prefix>_http_<status>" and
+// "<prefix>_catalog_too_large" beyond `limit` bytes.
+std::string fetch_small_https(std::string_view url, const std::string &proxy, std::stop_token token,
+                              std::size_t limit, std::string_view error_prefix);
 namespace download_detail {
 struct Options {
     unsigned connections = 4;

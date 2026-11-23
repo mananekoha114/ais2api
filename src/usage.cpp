@@ -18,11 +18,11 @@ std::int64_t now_ms() {
 std::int64_t elapsed(Clock::time_point start) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
 }
+constexpr std::string_view identifier_chars =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/:()";
+// Parentheses are kept for thinking suffixes such as "gemini-4-argon(high)".
 std::string identifier(std::string_view value, std::size_t limit = 256) {
-    if (value.size() > limit ||
-        value.find_first_not_of(
-            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/:") !=
-            std::string_view::npos)
+    if (value.size() > limit || value.find_first_not_of(identifier_chars) != std::string_view::npos)
         return {};
     return std::string(value);
 }
@@ -77,7 +77,8 @@ json::object recorded_settings(const json::object &gemini) {
         auto level = string_or(p->as_object(), "thinkingLevel");
         std::transform(level.begin(), level.end(), level.begin(),
                        [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-        if (level == "LOW" || level == "HIGH" || level == "MEDIUM" || level == "MINIMAL")
+        if (level == "EXTRA_HIGH") level = "XHIGH";
+        if (level == "LOW" || level == "HIGH" || level == "MEDIUM" || level == "MINIMAL" || level == "XHIGH")
             thinking["thinkingLevel"] = level;
         if (!thinking.empty())
             result["thinkingConfig"] = std::move(thinking);

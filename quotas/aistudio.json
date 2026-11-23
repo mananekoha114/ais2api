@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "published_at": "2026-11-23T00:00:00Z",
+  "note": "Community-observed AI Studio Playground daily quotas per subscription tier. A tier's allowance is used up when either the request or the token count runs out; counts reset at midnight America/Los_Angeles. null: the tier cannot use the model.",
+  "tier_fallback": {
+    "plus": "free"
+  },
+  "models": {
+    "gemini-4-argon": {
+      "free": null,
+      "pro": { "requests": 50, "tokens": 15000000 },
+      "ultra": { "requests": 150, "tokens": 20000000 }
+    },
+    "gemini-4-carbon": {
+      "free": null,
+      "pro": null,
+      "ultra": { "requests": 150, "tokens": 20000000 }
+    },
+    "gemini-4-neon": {
+      "free": null,
+      "pro": { "requests": 50, "tokens": 15000000 },
+      "ultra": { "requests": 150, "tokens": 20000000 }
+    },
+    "gemini-4-hydrogen": {
+      "free": { "requests": 50, "tokens": 10000000 },
+      "pro": { "requests": 100, "tokens": 25000000 },
+      "ultra": { "requests": 150, "tokens": 35000000 }
+    },
+    "gemini-3.1-pro-preview": {
+      "free": null,
+      "pro": { "requests": 50, "tokens": 13000000 },
+      "ultra": { "requests": 100, "tokens": 16000000 }
+    },
+    "gemini-3.8-flash": {
+      "free": { "requests": 50, "tokens": 5000000 },
+      "pro": { "requests": 100, "tokens": 25000000 },
+      "ultra": { "requests": 150, "tokens": 30000000 }
+    },
+    "gemini-3.6-flash": {
+      "free": { "requests": 50, "tokens": 5000000 },
+      "pro": { "requests": 100, "tokens": 25000000 },
+      "ultra": { "requests": 150, "tokens": 30000000 }
+    },
+    "gemini-3-flash-preview": {
+      "free": { "requests": 50, "tokens": 5000000 },
+      "pro": { "requests": 100, "tokens": 11000000 },
+      "ultra": { "requests": 150, "tokens": 15000000 }
+    },
+    "gemini-3.5-flash-lite": {
+      "free": { "requests": 100, "tokens": 11000000 },
+      "pro": { "requests": 100, "tokens": 25000000 },
+      "ultra": { "requests": 150, "tokens": 30000000 }
+    },
+    "gemini-3.1-flash-lite": {
+      "free": { "requests": 100, "tokens": 5000000 },
+      "pro": { "requests": 100, "tokens": 11000000 },
+      "ultra": { "requests": 150, "tokens": 15000000 }
+    }
+  }
+}

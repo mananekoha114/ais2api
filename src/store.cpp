@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/store.hpp"
+#include "ais2api/tier_quota.hpp"
 #include "ais2api/backend_router.hpp"
 #include "ais2api/console.hpp"
 #include "ais2api/pricing.hpp"
@@ -13,6 +14,7 @@
 #include "ais2api/usage.hpp"
 #include "../browser/rate_policy.hpp"
 #include <algorithm>
+#include <tuple>
 #include <condition_variable>
 #include <deque>
 #include <future>
@@ -502,6 +504,13 @@ void init_state(sqlite3 *db) {
     { Statement columns(db, "PRAGMA table_info(fingerprints)");
       while (columns.row()) account_backend |= columns.str(1) == "backend"; }
     if (!account_backend) exec(db, "ALTER TABLE fingerprints ADD COLUMN backend TEXT NOT NULL DEFAULT ''");
+    // The benefit tier each account's page last confirmed.
+    exec(db, "CREATE TABLE IF NOT EXISTS account_tiers(account TEXT PRIMARY KEY REFERENCES "
+             "accounts(id) ON DELETE CASCADE,tier TEXT NOT NULL,checked_at INTEGER NOT NULL)");
+    // Daily quota estimate: use per account, model and Pacific quota day.
+    exec(db, "CREATE TABLE IF NOT EXISTS daily_usage(account TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,"
+             "model TEXT NOT NULL,day INTEGER NOT NULL,requests INTEGER NOT NULL DEFAULT 0,"
+             "tokens INTEGER NOT NULL DEFAULT 0,exhausted INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(account,model,day))");
     exec(db, "CREATE TABLE IF NOT EXISTS account_backend_switches("
              "account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,"
              "backend TEXT NOT NULL,until INTEGER NOT NULL)");
@@ -806,6 +815,8 @@ void Store::reset_account(std::string_view id) {
             f.row();
             Statement quota(impl_->db, "DELETE FROM quota_counters WHERE account=?");
             quota.text(1, id); quota.row();
+            Statement daily(impl_->db, "DELETE FROM daily_usage WHERE account=?");
+            daily.text(1, id); daily.row();
             Statement switched(impl_->db, "DELETE FROM account_backend_switches WHERE account_id=?");
             switched.text(1, id); switched.row();
             exec(impl_->db, "COMMIT");
@@ -815,45 +826,73 @@ void Store::reset_account(std::string_view id) {
         }
     });
 }
-std::optional<Account> Store::choose(std::string_view model,
-                                     const std::vector<std::string> &excluded, bool auth_probe) {
+std::optional<Account> Store::choose(std::string_view model, const std::vector<std::string> &excluded,
+                                     bool auth_probe, const TierPolicy *policy) {
     return impl_->run([&]() -> std::optional<Account> {
         const auto now = unix_seconds();
-        // Stay on the account that last completed a generation (the browser's
-        // resident session) while it can serve the model; switching rebuilds
-        // the page and may restart the browser for another fingerprint. Then
-        // the preferred account, then the account that last served the model.
-        constexpr std::string_view preference =
-            " ORDER BY (a.id=(SELECT v FROM settings WHERE k='current')) DESC,(a.id=(SELECT v FROM "
-            "settings WHERE k='selected')) DESC,(a.id=(SELECT account FROM sticky WHERE model=?3)) DESC,a.rowid";
+        // Accounts whose daily allowance for the model is spent come last.
+        // Otherwise stay on the account that last completed a generation (the
+        // browser's resident session) while it can serve the model; switching
+        // rebuilds the page and may restart the browser for another
+        // fingerprint. Then the preferred account. With a tier policy, lower
+        // tiers come next, keeping higher tiers' allowance for the models only
+        // they can use; then the account that last served the model, then
+        // import order. A policy also leaves out accounts whose known tier
+        // cannot use the model.
+        struct Candidate {
+            Account account;
+            bool exhausted, current, selected, sticky;
+            int rank;
+        };
         auto pick = [&](std::string_view filter) -> std::optional<Account> {
-            Statement s(impl_->db, (std::string(filter) + std::string(preference)).c_str());
+            Statement s(impl_->db,
+                        ("SELECT a.id,a.name,a.email,a.auth_user,a.state,a.disabled,"
+                         "a.id=(SELECT v FROM settings WHERE k='current'),a.id=(SELECT v FROM settings WHERE k='selected'),"
+                         "a.id=(SELECT account FROM sticky WHERE model=?3),"
+                         "COALESCE((SELECT tier FROM account_tiers t WHERE t.account=a.id),''),"
+                         "COALESCE(u.requests,0),COALESCE(u.tokens,0),COALESCE(u.exhausted,0) FROM accounts a "
+                         "LEFT JOIN daily_usage u ON u.account=a.id AND u.model=lower(?3) AND u.day=?4 WHERE " +
+                         std::string(filter) + " ORDER BY a.rowid")
+                            .c_str());
             s.text(1, model);
             s.integer(2, now);
             s.text(3, model);
+            s.integer(4, browser_detail::pacific_quota_day(now));
+            std::vector<Candidate> candidates;
             while (s.row()) {
                 auto a = decode(s);
                 if (std::find(excluded.begin(), excluded.end(), a.id) != excluded.end())
                     continue;
-                return a;
+                const auto tier = s.str(9);
+                if (policy && policy->excludes(model, tier))
+                    continue;
+                const bool exhausted =
+                    sqlite3_column_int(s.p, 12) != 0 ||
+                    (policy && policy->exhausted(model, tier, sqlite3_column_int64(s.p, 10), sqlite3_column_int64(s.p, 11)));
+                candidates.push_back({std::move(a), exhausted, sqlite3_column_int(s.p, 6) != 0,
+                                      sqlite3_column_int(s.p, 7) != 0, sqlite3_column_int(s.p, 8) != 0,
+                                      policy ? tier_rank(tier) : 0});
             }
-            return {};
+            // The first of the best keeps import order among equals.
+            const auto key = [](const Candidate &c) {
+                return std::tuple(c.exhausted, !c.current, !c.selected, c.rank, !c.sticky);
+            };
+            const auto best = std::min_element(candidates.begin(), candidates.end(),
+                                               [&](const Candidate &x, const Candidate &y) { return key(x) < key(y); });
+            if (best == candidates.end()) return {};
+            return std::move(best->account);
         };
-        if (auto a = pick("SELECT a.id,a.name,a.email,a.auth_user,a.state,a.disabled FROM "
-                          "accounts a WHERE a.disabled=0 AND a.expired=0 AND NOT EXISTS(SELECT 1 "
-                          "FROM failures f WHERE f.account=a.id AND (f.model=?1 OR f.model='*') "
-                          "AND f.until>?2)"))
+        if (auto a = pick("a.disabled=0 AND a.expired=0 AND NOT EXISTS(SELECT 1 FROM failures f WHERE f.account=a.id AND "
+                          "(f.model=?1 OR f.model='*') AND f.until>?2)"))
             return a;
         if (!auth_probe) return {};
         // Every account is cooling down. An auth cooldown alone may be stale
         // (the session problem resolved itself), so admit one account blocked
         // only by it for a single attempt per cooldown; quota, permission,
         // expiry and disabled states are never bypassed.
-        auto a = pick("SELECT a.id,a.name,a.email,a.auth_user,a.state,a.disabled FROM "
-                      "accounts a WHERE a.disabled=0 AND a.expired=0 AND EXISTS(SELECT 1 FROM "
-                      "failures f WHERE f.account=a.id AND f.model='*' AND f.kind='auth' AND "
-                      "f.probed=0 AND f.until>?2) AND NOT EXISTS(SELECT 1 FROM failures f WHERE "
-                      "f.account=a.id AND (f.model=?1 OR f.model='*') AND f.until>?2 AND NOT "
+        auto a = pick("a.disabled=0 AND a.expired=0 AND EXISTS(SELECT 1 FROM failures f WHERE f.account=a.id AND "
+                      "f.model='*' AND f.kind='auth' AND f.probed=0 AND f.until>?2) AND NOT EXISTS(SELECT 1 FROM failures f "
+                      "WHERE f.account=a.id AND (f.model=?1 OR f.model='*') AND f.until>?2 AND NOT "
                       "(f.model='*' AND f.kind='auth' AND f.probed=0))");
         if (a) {
             Statement probed(impl_->db, "UPDATE failures SET probed=1 WHERE account=? AND model='*' AND kind='auth'");
@@ -861,6 +900,18 @@ std::optional<Account> Store::choose(std::string_view model,
             probed.row();
         }
         return a;
+    });
+}
+bool Store::tier_blocked(std::string_view model, const TierPolicy &policy) {
+    return impl_->run([&] {
+        Statement s(impl_->db, "SELECT COALESCE(t.tier,'') FROM accounts a LEFT JOIN account_tiers t ON t.account=a.id "
+                               "WHERE a.disabled=0 AND a.expired=0");
+        bool any = false;
+        while (s.row()) {
+            any = true;
+            if (!policy.excludes(model, s.str(0))) return false;
+        }
+        return any;
     });
 }
 ModelCatalog Store::model_catalog() {
@@ -1025,7 +1076,7 @@ json::object Store::backend_events() {
     });
 }
 void Store::failure(std::string_view id, std::string_view model, std::string_view kind,
-                    unsigned retry) {
+                    unsigned retry, std::int64_t until_at) {
     impl_->run([&] {
         exec(impl_->db, "BEGIN IMMEDIATE");
         try {
@@ -1073,7 +1124,7 @@ void Store::failure(std::string_view id, std::string_view model, std::string_vie
                 const auto delay = std::max(base_delay, std::min(retry, 86400u));
                 auto until =
                     (kind == "permission" || kind == "403") ? INT64_MAX : current_time + delay;
-                until = std::max(until, quota_deadline);
+                until = std::max({until, quota_deadline, until_at});
                 if (quota_error) {
                     Statement save_quota(impl_->db, "INSERT INTO quota_counters(account,model,count,day,cooldown_until) VALUES(?,?,?,?,?) ON CONFLICT(account,model) DO UPDATE SET count=excluded.count,day=excluded.day,cooldown_until=excluded.cooldown_until");
                     save_quota.text(1, id); save_quota.text(2, m);
@@ -1132,6 +1183,64 @@ void Store::success(std::string_view id, std::string_view model) {
             exec(impl_->db, "ROLLBACK");
             throw;
         }
+    });
+}
+namespace {
+// Days of daily_usage kept before the current one. Its model ids are stored
+// lowercase, since quota matching ignores case and clients' spelling varies.
+constexpr std::int64_t daily_usage_days = 7;
+} // namespace
+void Store::record_daily_use(std::string_view id, std::string_view model, std::int64_t requests,
+                             std::int64_t tokens, std::int64_t at) {
+    const auto day = browser_detail::pacific_quota_day(at ? at : unix_seconds());
+    impl_->run([&] {
+        exec(impl_->db, "BEGIN IMMEDIATE");
+        try {
+            // An account removed meanwhile has nothing to record.
+            Statement add(impl_->db, "INSERT INTO daily_usage(account,model,day,requests,tokens) SELECT id,lower(?),?,?,? "
+                                     "FROM accounts WHERE id=? ON CONFLICT(account,model,day) DO UPDATE SET "
+                                     "requests=requests+excluded.requests,tokens=tokens+excluded.tokens");
+            add.text(1, model);
+            add.integer(2, day);
+            add.integer(3, std::max<std::int64_t>(requests, 0));
+            add.integer(4, std::max<std::int64_t>(tokens, 0));
+            add.text(5, id);
+            add.row();
+            Statement prune(impl_->db, "DELETE FROM daily_usage WHERE day<?");
+            prune.integer(1, day - daily_usage_days);
+            prune.row();
+            exec(impl_->db, "COMMIT");
+        } catch (...) {
+            exec(impl_->db, "ROLLBACK");
+            throw;
+        }
+    });
+}
+void Store::mark_daily_exhausted(std::string_view id, std::string_view model) {
+    const auto day = browser_detail::pacific_quota_day(unix_seconds());
+    impl_->run([&] {
+        Statement s(impl_->db, "INSERT INTO daily_usage(account,model,day,exhausted) SELECT id,lower(?),?,1 FROM accounts "
+                               "WHERE id=? ON CONFLICT(account,model,day) DO UPDATE SET exhausted=1");
+        s.text(1, model);
+        s.integer(2, day);
+        s.text(3, id);
+        s.row();
+    });
+}
+DailyUse Store::daily_use(std::string_view id, std::string_view model, std::int64_t at) {
+    const auto day = browser_detail::pacific_quota_day(at ? at : unix_seconds());
+    return impl_->run([&] {
+        Statement s(impl_->db, "SELECT requests,tokens,exhausted FROM daily_usage WHERE account=? AND model=lower(?) AND day=?");
+        s.text(1, id);
+        s.text(2, model);
+        s.integer(3, day);
+        DailyUse use;
+        if (s.row()) {
+            use.requests = sqlite3_column_int64(s.p, 0);
+            use.tokens = sqlite3_column_int64(s.p, 1);
+            use.exhausted = sqlite3_column_int(s.p, 2) != 0;
+        }
+        return use;
     });
 }
 namespace {
@@ -1856,6 +1965,22 @@ json::array Store::account_status(const std::optional<Config> &config) {
             sw.integer(1, now);
             while (sw.row()) switches.emplace(sw.str(0), BackendSwitch{sw.str(1), sqlite3_column_int64(sw.p, 2)});
         }
+        std::map<std::string, std::pair<std::string, std::int64_t>, std::less<>> tiers;
+        {
+            Statement t(impl_->db, "SELECT account,tier,checked_at FROM account_tiers");
+            while (t.row()) tiers.emplace(t.str(0), std::pair{t.str(1), sqlite3_column_int64(t.p, 2)});
+        }
+        std::map<std::string, json::array, std::less<>> usage;
+        {
+            Statement u(impl_->db, "SELECT account,model,requests,tokens,exhausted FROM daily_usage WHERE day=? "
+                                   "ORDER BY account,model");
+            u.integer(1, browser_detail::pacific_quota_day(now));
+            while (u.row())
+                usage[u.str(0)].push_back(json::object{{"model", u.str(1)},
+                                                       {"requests", sqlite3_column_int64(u.p, 2)},
+                                                       {"tokens", sqlite3_column_int64(u.p, 3)},
+                                                       {"exhausted", sqlite3_column_int(u.p, 4) != 0}});
+        }
         json::array rows;
         Statement s(impl_->db, "SELECT id,name,email,auth_user,state,disabled,expired FROM "
                                "accounts ORDER BY rowid");
@@ -1863,6 +1988,15 @@ json::array Store::account_status(const std::optional<Config> &config) {
             const auto id = s.str(0);
             auto o = summary(decode(s));
             o["expired"] = sqlite3_column_int(s.p, 6) != 0;
+            if (const auto tier = tiers.find(id); tier != tiers.end()) {
+                o["benefit_tier"] = tier->second.first;
+                o["benefit_tier_at"] = tier->second.second;
+            } else {
+                o["benefit_tier"] = "";
+                o["benefit_tier_at"] = 0;
+            }
+            const auto used = usage.find(id);
+            o["daily_usage"] = used != usage.end() ? used->second : json::array{};
             json::array failures;
             Statement f(impl_->db, "SELECT model,until,count,kind FROM failures WHERE account=?");
             f.text(1, id);
@@ -1905,6 +2039,25 @@ json::array Store::account_status(const std::optional<Config> &config) {
             rows.push_back(o);
         }
         return rows;
+    });
+}
+void Store::set_benefit_tier(std::string_view id, std::string_view tier) {
+    if (!known_tier(tier)) return;
+    impl_->run([&] {
+        // An account removed meanwhile has nothing to record.
+        Statement s(impl_->db, "INSERT INTO account_tiers(account,tier,checked_at) SELECT id,?,? FROM accounts WHERE id=? "
+                               "ON CONFLICT(account) DO UPDATE SET tier=excluded.tier,checked_at=excluded.checked_at");
+        s.text(1, tier);
+        s.integer(2, unix_seconds());
+        s.text(3, id);
+        s.row();
+    });
+}
+std::string Store::benefit_tier(std::string_view id) {
+    return impl_->run([&] {
+        Statement s(impl_->db, "SELECT tier FROM account_tiers WHERE account=?");
+        s.text(1, id);
+        return s.row() ? s.str(0) : std::string();
     });
 }
 json::object Store::create_key(std::string name) {

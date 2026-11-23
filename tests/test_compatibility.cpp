@@ -30,6 +30,15 @@ TEST_CASE("Unsupported Chat controls require opt-in and never reach the upstream
         REQUIRE(accepted.gemini.at("contents").as_array()[0].as_object().at("parts").as_array()[0].as_object().at("text") == "hello");
         REQUIRE_NOTHROW(encode_request(accepted, {}, "snapshot"));
     }
+    auto argon = chat_request();
+    argon["model"] = "gemini-4-argon";
+    argon["reasoning_effort"] = "xhigh";
+    config.ignore_unsupported_parameters = false;
+    REQUIRE_THROWS_AS(normalize_openai(argon, config), Error);
+    config.ignore_unsupported_parameters = true;
+    auto argon_accepted = normalize_openai(argon, config);
+    REQUIRE(argon_accepted.ignored_parameters == json::array{"reasoning_effort"});
+    REQUIRE(encode_request(argon_accepted, {}, "snapshot")[3].as_array()[16].as_array()[3] == 2);
 }
 
 TEST_CASE("Strict schemas and unsupported root forms degrade only when opted in", "[protocol][compat]") {

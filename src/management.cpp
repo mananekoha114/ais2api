@@ -8,6 +8,7 @@
 #include "ais2api/backend_router.hpp"
 #include "ais2api/diagnostics.hpp"
 #include "ais2api/log_sources.hpp"
+#include "ais2api/quota_service.hpp"
 #include "ais2api/region.hpp"
 #include "ais2api/runtime.hpp"
 #include <algorithm>
@@ -24,7 +25,8 @@ std::string identifier(const json::object& command) {
 json::object account_summary(const json::object& input) {
     json::object output;
     for (auto key : {"id", "name", "email", "auth_user", "disabled", "expired", "failures", "fingerprint",
-                     "firefox_identity", "backend", "effective_backend", "backend_switched_until"}) {
+                     "firefox_identity", "backend", "effective_backend", "backend_switched_until",
+                     "benefit_tier", "benefit_tier_at", "daily_usage"}) {
         if (auto value = input.if_contains(key)) output[key] = *value;
     }
     return output;
@@ -169,7 +171,10 @@ json::object manage(Store& store, Config& config, const json::object& command) {
     if (name == "accounts.list") {
         json::array accounts;
         for (auto& item : store.account_status(config)) accounts.push_back(account_summary(item.as_object()));
-        return {{"accounts", accounts}};
+        // The same quota view whether the service answers or the command runs
+        // offline (see annotate_quota).
+        annotate_quota(accounts, stored_tier_policy(store, config));
+        return {{"accounts", accounts}, {"quota_resets_at", next_quota_reset(unix_seconds())}};
     }
     if (name == "accounts.import") {
         auto input = command.if_contains("input");

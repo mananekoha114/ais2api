@@ -65,6 +65,9 @@ struct Config {
     json::object model_aliases;
     json::array configured_models;
     json::object model_defaults;
+    // Per-model replacements of the tier quota catalog (see tier_quota.hpp):
+    // {model: {free|plus|pro|ultra: null | {requests, tokens}}}.
+    json::object tier_quotas;
     static fs::path default_directory();
     static Config load(const fs::path& file, const json::object& overrides = {});
     json::object to_json(bool portable_paths = false) const;

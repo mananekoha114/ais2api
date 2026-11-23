@@ -19,4 +19,14 @@ inline std::int64_t pacific_quota_day(std::int64_t timestamp) {
     const auto offset = instant >= spring && instant < autumn ? hours{7} : hours{8};
     return floor<days>(instant - offset).time_since_epoch().count();
 }
+// Unix seconds of the next midnight America/Los_Angeles after `timestamp`,
+// when Playground daily quotas reset. DST changes at 02:00 local, so the
+// midnight that starts a changeover day still has the previous offset.
+inline std::int64_t next_pacific_reset(std::int64_t timestamp) {
+    using namespace std::chrono;
+    const auto day = pacific_quota_day(timestamp) + 1;
+    const sys_seconds daylight = sys_days{days{day}} + hours{7};
+    const auto midnight = pacific_quota_day(daylight.time_since_epoch().count()) == day ? daylight : daylight + hours{1};
+    return midnight.time_since_epoch().count();
+}
 } // namespace ais2api::browser_detail

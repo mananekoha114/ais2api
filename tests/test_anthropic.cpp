@@ -125,9 +125,46 @@ TEST_CASE("Claude Code's default request shape is accepted without the compatibi
         copy["output_config"] = json::object{{"effort", effort}};
         CHECK(anthropic_to_gemini(copy, false).gemini.at("generationConfig").at("thinkingConfig").at("thinkingLevel") == level);
     }
+    config.model_aliases["opus"] = "models/gemini-4-hydrogen-search";
+    for (auto model_id : {"gemini-4-hydrogen", "gemini-4-neon", "opus"}) {
+        for (auto effort : {"xhigh", "max"}) {
+            auto copy = input;
+            copy["model"] = model_id;
+            copy["output_config"] = json::object{{"effort", effort}};
+            auto xhigh_lowered = anthropic_to_gemini(copy, false, false, config);
+            CHECK(xhigh_lowered.gemini.at("generationConfig").at("thinkingConfig").at("thinkingLevel") == "XHIGH");
+            auto normalized = normalize_gemini(xhigh_lowered.model, xhigh_lowered.gemini, true, config);
+            CHECK(encode_request(normalized, {}, "s")[3].as_array()[16].as_array()[3] == 6);
+        }
+    }
+    auto argon = input;
+    argon["model"] = "gemini-4-argon";
+    argon["output_config"] = json::object{{"effort", "xhigh"}};
+    CHECK(anthropic_to_gemini(argon, false, false, config).gemini.at("generationConfig").at("thinkingConfig").at("thinkingLevel") == "HIGH");
     auto summarized = input;
     summarized["thinking"] = json::object{{"type", "adaptive"}};
     CHECK(anthropic_to_gemini(summarized, false).gemini.at("generationConfig").at("thinkingConfig").at("includeThoughts") == true);
+}
+
+TEST_CASE("Anthropic model names with thinking suffixes replace the requested effort", "[anthropic][thinking-suffix]") {
+    Config config;
+    config.model_aliases["opus"] = "gemini-4-hydrogen(max)";
+    auto input = parse(R"j({"model":"gemini-4-argon(low)","max_tokens":64,"thinking":{"type":"adaptive"},
+        "output_config":{"effort":"xhigh"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]})j");
+    auto level = [&](std::string_view model) {
+        auto copy = input;
+        copy["model"] = model;
+        auto lowered = anthropic_to_gemini(copy, false, false, config);
+        auto normalized = normalize_gemini(lowered.model, lowered.gemini, true, config);
+        CHECK(normalized.include_thoughts);
+        return std::pair{normalized.model, encode_request(normalized, {}, "s")[3].as_array()[16].as_array()[3]};
+    };
+    CHECK(level("gemini-4-argon(low)") == std::pair{std::string("gemini-4-argon"), json::value(1)});
+    CHECK(level("opus") == std::pair{std::string("gemini-4-hydrogen"), json::value(6)});
+    CHECK(level("opus(medium)") == std::pair{std::string("gemini-4-hydrogen"), json::value(2)});
+    CHECK(level("gemini-4-hydrogen(auto)") == std::pair{std::string("gemini-4-hydrogen"), json::value(3)});
+    // Local counting accepts suffixed names without touching the effort.
+    CHECK(anthropic_input_tokens(anthropic_to_gemini(input, false, true, config).gemini) > 0);
 }
 
 TEST_CASE("Thinking signatures and tool calls round-trip through Anthropic messages", "[anthropic]") {
@@ -272,6 +309,10 @@ TEST_CASE("Mid-conversation system messages place text and change tools in order
         {"text":"note"},{"text":"more"},{"text":"last"}]})");
     CHECK(parts_of(lowered.gemini, 2) == expected.at("p"));
     CHECK(lowered.gemini.at("generationConfig").at("thinkingConfig").at("thinkingLevel") == "LOW");
+    auto neon_turn = input;
+    neon_turn["model"] = "gemini-4-neon";
+    neon_turn.at("messages").as_array().back().as_object()["output_config"] = json::object{{"effort", "xhigh"}};
+    CHECK(anthropic_to_gemini(neon_turn, false).gemini.at("generationConfig").at("thinkingConfig").at("thinkingLevel") == "XHIGH");
     auto unknown = input;
     unknown.at("messages").as_array()[3].as_object()["content"] =
         parse(R"({"c":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"Z"}}]})").at("c");

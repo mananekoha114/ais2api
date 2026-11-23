@@ -1064,9 +1064,19 @@ json::object SpiderMonkeyGateway::probe(const Account &account, std::stop_token 
     std::lock_guard lock(impl_->mutex);
     auto &impl = *impl_;
     impl.ensure_page(account, {}, cancel);
+    impl.refresh_tier(cancel);
     const auto &email = impl.page->email;
     return {{"accountId", account.id}, {"email", email}, {"ready", true}, {"login", false}, {"identityReady", !email.empty()},
-            {"identityAmbiguous", false}, {"status", email.empty() ? "identity_unverified" : "ready"}, {"generationVerified", false}};
+            {"identityAmbiguous", false}, {"status", email.empty() ? "identity_unverified" : "ready"}, {"generationVerified", false},
+            {"benefitTier", impl.fresh_tier()}};
+}
+
+std::string SpiderMonkeyGateway::benefit_tier(const Account &account) {
+    std::lock_guard lock(impl_->mutex);
+    auto &impl = *impl_;
+    if (impl.account_id != account.id || !impl.page) return {};
+    const auto tier = impl.fresh_tier();
+    return tier == "unknown" ? std::string() : tier;
 }
 
 json::object SpiderMonkeyGateway::diagnostics() {

@@ -132,6 +132,44 @@
     "model_defaults": {
       "type": "object"
     },
+    "tier_quotas": {
+      "type": "object",
+      "description": "Overrides of the daily quota table per lowercase model id; each entry replaces the catalog's entry for that model.",
+      "propertyNames": {
+        "pattern": "^[a-z0-9._-]{1,256}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "minProperties": 1,
+        "propertyNames": {
+          "enum": ["free", "plus", "pro", "ultra"]
+        },
+        "additionalProperties": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["requests", "tokens"],
+              "properties": {
+                "requests": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000000
+                },
+                "tokens": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000000000000
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
     "limits": {
       "type": "object",
       "additionalProperties": false,

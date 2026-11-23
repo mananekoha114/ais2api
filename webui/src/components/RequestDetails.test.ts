@@ -15,6 +15,9 @@ it('formats recorded settings without losing zero, false or small numeric values
   expect(settings.map(item => [item.label, item.value])).toEqual([
     ['最大输出 Tokens', '65,535'], ['温度', '0.00001'], ['随机种子', '0'], ['显示思考', '关闭'], ['思考等级', '高'],
   ])
+  expect(generationSettings({ thinkingConfig: { thinkingLevel: 'XHIGH' } }).map(item => [item.label, item.value])).toEqual([
+    ['思考等级', '超高'],
+  ])
 })
 it('shows a failed generation independently of its known cost and completed delivery', () => {
   const cost = { status: 'unpriced' as const, reason: 'incomplete_attempts', currency: 'USD' as const,
