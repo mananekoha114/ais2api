@@ -851,7 +851,7 @@ std::optional<Account> Store::choose(std::string_view model, const std::vector<s
                          "a.id=(SELECT account FROM sticky WHERE model=?3),"
                          "COALESCE((SELECT tier FROM account_tiers t WHERE t.account=a.id),''),"
                          "COALESCE(u.requests,0),COALESCE(u.tokens,0),COALESCE(u.exhausted,0) FROM accounts a "
-                         "LEFT JOIN daily_usage u ON u.account=a.id AND u.model=?3 AND u.day=?4 WHERE " +
+                         "LEFT JOIN daily_usage u ON u.account=a.id AND u.model=lower(?3) AND u.day=?4 WHERE " +
                          std::string(filter) + " ORDER BY a.rowid")
                             .c_str());
             s.text(1, model);
@@ -1186,7 +1186,8 @@ void Store::success(std::string_view id, std::string_view model) {
     });
 }
 namespace {
-// Days of daily_usage kept before the current one.
+// Days of daily_usage kept before the current one. Its model ids are stored
+// lowercase, since quota matching ignores case and clients' spelling varies.
 constexpr std::int64_t daily_usage_days = 7;
 } // namespace
 void Store::record_daily_use(std::string_view id, std::string_view model, std::int64_t requests,
@@ -1196,7 +1197,7 @@ void Store::record_daily_use(std::string_view id, std::string_view model, std::i
         exec(impl_->db, "BEGIN IMMEDIATE");
         try {
             // An account removed meanwhile has nothing to record.
-            Statement add(impl_->db, "INSERT INTO daily_usage(account,model,day,requests,tokens) SELECT id,?,?,?,? "
+            Statement add(impl_->db, "INSERT INTO daily_usage(account,model,day,requests,tokens) SELECT id,lower(?),?,?,? "
                                      "FROM accounts WHERE id=? ON CONFLICT(account,model,day) DO UPDATE SET "
                                      "requests=requests+excluded.requests,tokens=tokens+excluded.tokens");
             add.text(1, model);
@@ -1218,7 +1219,7 @@ void Store::record_daily_use(std::string_view id, std::string_view model, std::i
 void Store::mark_daily_exhausted(std::string_view id, std::string_view model) {
     const auto day = browser_detail::pacific_quota_day(unix_seconds());
     impl_->run([&] {
-        Statement s(impl_->db, "INSERT INTO daily_usage(account,model,day,exhausted) SELECT id,?,?,1 FROM accounts "
+        Statement s(impl_->db, "INSERT INTO daily_usage(account,model,day,exhausted) SELECT id,lower(?),?,1 FROM accounts "
                                "WHERE id=? ON CONFLICT(account,model,day) DO UPDATE SET exhausted=1");
         s.text(1, model);
         s.integer(2, day);
@@ -1229,7 +1230,7 @@ void Store::mark_daily_exhausted(std::string_view id, std::string_view model) {
 DailyUse Store::daily_use(std::string_view id, std::string_view model, std::int64_t at) {
     const auto day = browser_detail::pacific_quota_day(at ? at : unix_seconds());
     return impl_->run([&] {
-        Statement s(impl_->db, "SELECT requests,tokens,exhausted FROM daily_usage WHERE account=? AND model=? AND day=?");
+        Statement s(impl_->db, "SELECT requests,tokens,exhausted FROM daily_usage WHERE account=? AND model=lower(?) AND day=?");
         s.text(1, id);
         s.text(2, model);
         s.integer(3, day);

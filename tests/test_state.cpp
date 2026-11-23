@@ -823,18 +823,20 @@ TEST_CASE("daily use counts per Pacific quota day and keeps one week", "[quota][
     const auto now = unix_seconds();
     constexpr std::int64_t day = 86400;
     store.record_daily_use(id, "m-all", 1, 120);
-    store.record_daily_use(id, "m-all", 1, 30);
+    // Clients' spelling of a model id never splits its count.
+    store.record_daily_use(id, "M-All", 1, 30);
     store.record_daily_use(id, "other", 1, 5);
     auto use = store.daily_use(id, "m-all");
     CHECK(use.requests == 2);
     CHECK(use.tokens == 150);
     CHECK_FALSE(use.exhausted);
+    CHECK(store.daily_use(id, "M-ALL").requests == 2);
     // Use on another Pacific day is kept apart.
     store.record_daily_use(id, "m-all", 1, 7, now - day);
     CHECK(store.daily_use(id, "m-all").requests == 2);
     CHECK(store.daily_use(id, "m-all", now - day).requests == 1);
     // A daily 429 marks only today's row of that model.
-    store.mark_daily_exhausted(id, "m-all");
+    store.mark_daily_exhausted(id, "M-all");
     CHECK(store.daily_use(id, "m-all").exhausted);
     CHECK_FALSE(store.daily_use(id, "m-all", now - day).exhausted);
     CHECK_FALSE(store.daily_use(id, "other").exhausted);
@@ -882,8 +884,10 @@ TEST_CASE("accounts whose daily allowance is spent come last without being refus
         return account ? account->id : std::string();
     };
     CHECK(chosen("m-all", &policy) == first);
-    store.record_daily_use(first, "m-all", 2, 10);
+    store.record_daily_use(first, "M-ALL", 1, 5);
+    store.record_daily_use(first, "m-all", 1, 5);
     CHECK(chosen("m-all", &policy) == second);
+    CHECK(chosen("M-All", &policy) == second);
     // Other models keep their order.
     CHECK(chosen("other", &policy) == first);
     // A spent allowance outranks even the resident account.

@@ -145,8 +145,9 @@ public:
     // refuses for `model` (and there is at least one such account).
     bool tier_blocked(std::string_view model, const TierPolicy& policy);
     void failure(std::string_view account, std::string_view model, std::string_view kind, unsigned retry_seconds = 0);
-    // Daily quota estimate per account and model, kept for the Pacific quota
-    // day of `at` (0: now) and pruned after a week. reset_account() clears it;
+    // Daily quota estimate per account and model (ignoring case, stored
+    // lowercase), kept for the Pacific quota day of `at` (0: now) and pruned
+    // after a week. reset_account() clears it;
     // clearing a cooldown does not, since the upstream allowance stays spent.
     void record_daily_use(std::string_view account, std::string_view model, std::int64_t requests,
                           std::int64_t tokens, std::int64_t at = 0);
