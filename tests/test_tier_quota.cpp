@@ -3,6 +3,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#include "ais2api/management.hpp"
 #include "ais2api/quota_service.hpp"
 #include "ais2api/tier_quota.hpp"
 #include <catch2/catch_test_macros.hpp>
@@ -271,4 +272,29 @@ TEST_CASE("Account quota views list the tier's limits and today's use", "[quota]
     CHECK(rows[0].at("exhausted") == false);
 
     CHECK(next_quota_reset(0) == 8 * 3600);
+}
+
+TEST_CASE("The offline account list shows the same quota view as the service", "[quota][tier]") {
+    Directory d;
+    auto cfg = Config::load(d.path / "config.json");
+    cfg.data_dir = d.path;
+    cfg.tier_quotas = {{"m-test", json::object{{"free", json::object{{"requests", 3}, {"tokens", 30}}}}}};
+    Store store(d.path);
+    const auto id = string_or(store.import_accounts(json::value("SAPISID=synthetic-offline"))[0].as_object(), "id");
+    store.set_benefit_tier(id, "free");
+    store.record_daily_use(id, "m-test", 3, 5);
+    // No QuotaService has run: the embedded snapshot and the overrides apply.
+    const auto listed = manage(store, cfg, {{"command", "accounts.list"}});
+    CHECK(listed.at("quota_resets_at").as_int64() > unix_seconds());
+    const auto &account = listed.at("accounts").at(0).as_object();
+    CHECK(string_or(account, "benefit_tier") == "free");
+    const json::object *row = nullptr;
+    for (const auto &use : account.at("daily_usage").as_array())
+        if (use.at("model") == "m-test") row = &use.as_object();
+    REQUIRE(row);
+    CHECK(row->at("requests").as_int64() == 3);
+    CHECK(row->at("request_limit").as_int64() == 3);
+    CHECK(row->at("token_limit").as_int64() == 30);
+    CHECK(row->at("exhausted") == true);
+    CHECK(account.at("daily_usage").as_array().size() > 1);
 }

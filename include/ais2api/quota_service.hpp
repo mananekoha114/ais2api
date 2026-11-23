@@ -19,6 +19,10 @@ inline constexpr std::int64_t quota_refresh_seconds = 6 * 3600;
 inline constexpr std::int64_t quota_retry_seconds = 3600;
 // The catalog snapshot embedded at build time from quotas/aistudio.json.
 std::string_view embedded_quota_catalog();
+// The effective table without a running QuotaService, for offline commands:
+// the stored catalog, or the embedded snapshot when it is newer or nothing is
+// stored, with `config`'s tier_quotas. Writes nothing.
+TierPolicy stored_tier_policy(Store &store, const Config &config);
 // Keeps the newest of the downloaded catalog, the stored copy (the
 // price_sources row quota_source) and the embedded snapshot, and combines it
 // with the configuration's tier_quotas.

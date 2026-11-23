@@ -386,7 +386,6 @@ class Service {
         auto result = manage(store_, cfg, command);
         if (action == "accounts.import")
             discover_models_after_import(result.at("accounts").as_array());
-        if (action == "accounts.list") return with_quota(std::move(result));
         return result;
     }
     json::object diagnostics_report() {

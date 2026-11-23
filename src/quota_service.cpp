@@ -27,6 +27,26 @@ std::string_view embedded_quota_catalog() {
     return {reinterpret_cast<const char *>(embedded_quota_bytes), sizeof embedded_quota_bytes};
 }
 
+TierPolicy stored_tier_policy(Store &store, const Config &config) {
+    json::object catalog;
+    if (auto row = stored(store))
+        catalog = row->at("catalog").as_object();
+    // As QuotaService::seed(), without storing the snapshot.
+    try {
+        auto snapshot = parse_quota_catalog(json::parse(embedded_quota_catalog()), 0);
+        if (quota_catalog_published(catalog) < quota_catalog_published(snapshot))
+            catalog = std::move(snapshot);
+    } catch (const std::exception &) {
+    }
+    json::object overrides;
+    // Config::validate() already rejected malformed overrides.
+    try {
+        overrides = parse_quota_overrides(config.tier_quotas);
+    } catch (const Error &) {
+    }
+    return TierPolicy(catalog, overrides);
+}
+
 QuotaService::QuotaService(Store &store, std::function<Config()> config, bool automatic, Fetch fetch)
     : store_(store), config_(std::move(config)), fetch_(fetch ? std::move(fetch) : fetch_catalog),
       automatic_(automatic) {
