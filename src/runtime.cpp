@@ -37,7 +37,8 @@ std::map<std::string, std::string> child_overrides(const Config &effective) {
                       {"limits", "AIS2API_LIMITS"},
                       {"model_aliases", "AIS2API_MODEL_ALIASES"},
                       {"configured_models", "AIS2API_CONFIGURED_MODELS"},
-                      {"model_defaults", "AIS2API_MODEL_DEFAULTS"}}) {
+                      {"model_defaults", "AIS2API_MODEL_DEFAULTS"},
+                      {"tier_quotas", "AIS2API_TIER_QUOTAS"}}) {
         auto &value = actual.at(pair.first);
         if (value != base.at(pair.first))
             result[pair.second] =

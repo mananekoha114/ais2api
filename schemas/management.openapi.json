@@ -3658,8 +3658,12 @@
           "tier_quotas": {
             "type": "object",
             "description": "Per-model replacements of the tier quota catalog; keys are lowercase model ids.",
+            "propertyNames": {
+              "pattern": "^[a-z0-9._-]{1,256}$"
+            },
             "additionalProperties": {
               "type": "object",
+              "minProperties": 1,
               "propertyNames": {
                 "enum": [
                   "free",
