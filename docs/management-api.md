@@ -56,8 +56,8 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/accounts` | 不含凭据的账号摘要（含保存的 `backend`、当前生效的 `effective_backend`，以及自动切换生效期间的 `backend_switched_until`） |
-| GET | `/accounts/active` | 首选账号与 `active_generation_account_id`（首选账号不等于正在生成的账号） |
+| GET | `/accounts` | 不含凭据的账号摘要（含保存的 `backend`、当前生效的 `effective_backend`，以及自动切换生效期间的 `backend_switched_until`；订阅等级与今日额度见下文） |
+| GET | `/accounts/active` | 首选账号与 `active_generation_account_id`（首选账号不等于正在生成的账号），以及完整账号列表 |
 | POST | `/accounts/import` | 导入账号，正文 `{"input": ..., "name": "可选"}` |
 | POST | `/accounts/probe-import` | 先验证再保存，使用 [Cookie 导入](userscript.md) 的输入格式 |
 | PATCH | `/accounts/{id}` | 修改 `name`（字符串）和/或 `disabled`（布尔） |
@@ -114,6 +114,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 | GET | `/usage/summary` | 累计或筛选范围的请求用量与估算费用 |
 | GET | `/usage/requests`、`/usage/requests/{id}` | 分页请求列表与单条详情 |
 | GET、POST | `/pricing`、`/pricing/refresh` | 价格来源状态、后台更新参考价格 |
+| GET、POST | `/quotas`、`/quotas/refresh` | 每日额度表的来源状态与生效表、后台检查更新 |
 | GET、DELETE | `/operations/{id}` | 读取异步操作结果，或处理后释放 |
 | GET | `/logs/sources`、`/logs`、`/logs/stream` | 日志来源、历史与实时流，见下文 |
 | GET | `/diagnostics` | 管理员查看的完整诊断（隐藏密钥，但含本机路径和账号状态） |
@@ -148,6 +149,20 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 `POST /pricing/refresh` 不带参数或提交空对象，返回 202 和当前刷新状态。价格更新在独立后台线程中运行，不占生成队列。唯一来源是本项目仓库的 GitHub Actions 每 6 小时从 [Google 官方价格页](https://aistudio.google.com/docs/pricing) 抓取、发布在 `pricing-data` 分支的 [gemini.json](https://raw.githubusercontent.com/mananekoha114/ais2api/pricing-data/gemini.json)，只在价格变化时提交；页面结构无法识别时抓取失败，不会发布残缺目录。下载使用配置代理，不发送请求正文或凭据。每个版本内置构建时的快照（源码 `pricing/gemini.json`），从未联网成功时也能估算；联网后保留发布时间较新的一份，落后的下载不会覆盖较新的价格。目录缺失或超过 24 小时自动更新，失败保留旧有效版本并显示错误，最早一小时后自动重试。单次下载最多 4 MiB、30 秒，停止服务可取消。
 
 `GET /pricing` 的 `sources` 只有一项 `google`：`url` 为下载地址，`published_at` 为该价格目录的抓取时间（ISO 8601 UTC），`embedded` 为 `true` 表示仍在使用内置快照，`fetched_at` / `attempted_at` 为最近一次成功和尝试的下载时间（Unix 秒），`error` 为最近一次失败的代码。
+
+## 订阅等级与每日额度
+
+`/accounts` 与 `/accounts/active`（以及 `/rotation`）的每个账号带有：
+
+- `benefit_tier`：页面最近确认的订阅等级（`free`、`plus`、`pro`、`ultra`），为空表示尚未确认；`benefit_tier_at` 为确认时间（Unix 秒，未知时为 0）。
+- `daily_usage`：当前太平洋时间日的用量，先列出该等级有每日上限的模型（按额度表顺序），再列出当天用过的其他模型。每项为 `{model, requests, tokens, request_limit, token_limit, exhausted}`；上限未知时为 `null`，`exhausted` 表示收到过每日额度 429 或估算已达上限，选号时排在最后。
+
+响应顶层的 `quota_resets_at` 是下一次额度重置的时间（太平洋时间零点，Unix 秒）。
+
+`GET /quotas` 返回 `refreshing`、`error`、`source` 与 `models`。`source` 的 `url` 为下载地址，`published_at` 为额度表的发布时间（ISO 8601 UTC），`models` 为模型数，`embedded` 为 `true` 表示仍在使用内置快照，`fetched_at` / `attempted_at` 为最近一次成功和尝试的下载时间（Unix 秒），`error` 为最近一次失败的代码（例如 `quota_http_404`）。`models` 是合并配置项 `tier_quotas` 之后的生效表：`{模型: {origin: "catalog" | "config", tiers: {等级: null | {requests, tokens}}}}`，等级已按 `tier_fallback` 展开，缺少的等级表示没有已知上限。
+
+`POST /quotas/refresh` 不带参数或提交空对象，返回 202 和当前状态，下载在后台进行。数据来自本项目仓库 `main` 分支的 `quotas/aistudio.json`，每 6 小时检查一次，失败至少 1 小时后重试；发布时间较旧的下载不会覆盖已有数据。格式、校验与更新流程见 [订阅等级与每日额度](quotas.md)。
+
 
 ## 配置保存与重启
 

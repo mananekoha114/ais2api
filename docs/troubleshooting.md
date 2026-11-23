@@ -76,6 +76,7 @@
 | reason | 原因与处理 |
 |---|---|
 | `no_account` / `no_available_account`（503） | 没有导入账号，或所有账号都处于冷却、禁用或过期状态。在 WebUI“账号”页查看冷却原因，必要时清除冷却或重新导入。 |
+| `tier_insufficient`（403） | 所有可用账号的订阅等级按额度表都不能使用该模型（例如只有免费号时请求 Pro 专属模型）。换用其他模型、导入更高等级的账号，或在 `tier_quotas` 中覆盖额度表，见 [订阅等级与每日额度](quotas.md)。 |
 | `session_expired`（401） | Cookie 已失效，页面跳转到登录页。在浏览器重新登录 AI Studio 后重新导入。 |
 | `missing_cookies`（401） | 账号没有可用 Cookie。重新导入。 |
 | `identity_mismatch`（401） | Cookie 对应的 Google 账号与记录不一致，账号会进入 5 分钟冷却。检查是否导错账号或账号索引（`authuser`）。 |

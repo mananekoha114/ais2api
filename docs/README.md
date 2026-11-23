@@ -22,6 +22,7 @@
 | [真 role 与思考签名](true-role.md) | 消息边界保真与签名往返 |
 | [管理 API](management-api.md) | 管理接口的鉴权、路由、配置保存规则与日志流 |
 | [浏览器网关](browser.md) | 浏览器驱动原理、指纹、Cookie 写回、重试冷却与账号调度 |
+| [订阅等级与每日额度](quotas.md) | 按订阅等级选号、每日用量估算、额度表的格式与更新流程 |
 
 机器可读的定义：[config.schema.json](../schemas/config.schema.json)、[management.openapi.json](../schemas/management.openapi.json)、[protocol-extensions.schema.json](../schemas/protocol-extensions.schema.json)。
 

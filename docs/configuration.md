@@ -59,6 +59,7 @@
 | `continuation_retry_enabled` | 布尔，`true` | 热更新 | 续接失败自动重试开关；只控制符合条件的无生成数据 403 补试，不关闭正常续接。 |
 | `model_aliases` | 对象，`{}` | 热更新 | 模型别名，键为客户端使用的名称，值为实际模型 id，可带[思考强度后缀](protocol.md#思考强度后缀)，例如 `{"flash": "gemini-3.1-flash-lite", "fast": "gemini-4-argon(low)"}`。目标在模型列表中时，别名也会列出。解析规则见 [模型别名](protocol.md#模型别名)。 |
 | `model_defaults` | 对象，`{}` | 热更新 | 按模型 id 设置默认请求字段（Gemini 请求格式），客户端显式传入的字段优先。例如 `{"gemini-3.1-flash-lite": {"generationConfig": {"temperature": 0.7}}}`。 |
+| `tier_quotas` | 对象，`{}` | 热更新 | 本地覆盖每日额度表，格式与额度数据文件的 `models` 相同：键为小写模型 id，值以等级（`free`、`plus`、`pro`、`ultra`）为键，每项为 `null`（该等级不能使用）或 `{"requests": 次数, "tokens": Token 数}`；按模型整条替换或补充额度表的条目。见 [订阅等级与每日额度](quotas.md#本地覆盖)。 |
 | `configured_models` | 数组，`[]` | 热更新 | 手动声明的备用模型（字符串 id 或模型对象）。没有任何账号保存的发现结果时作为 `source: "configured"` 返回，不代表真实可用。实时发现失败会报错并保留旧清单，不会把备用模型保存为发现结果。 |
 
 ### 资源限额 `limits`
@@ -101,6 +102,7 @@
 | `limits.max_continuation_retries` | `AIS2API_MAX_CONTINUATION_RETRIES` | — |
 | `model_aliases` | `AIS2API_MODEL_ALIASES`（JSON，或 `别名:模型,别名:模型`） | — |
 | `model_defaults` | `AIS2API_MODEL_DEFAULTS`（JSON） | — |
+| `tier_quotas` | `AIS2API_TIER_QUOTAS`（JSON） | — |
 | `configured_models` | `AIS2API_CONFIGURED_MODELS`（JSON） | — |
 | `limits` | `AIS2API_LIMITS`（JSON 对象） | — |
 | `limits.*` 各项 | `AIS2API_REQUEST_BYTES`、`AIS2API_OBJECT_BYTES`、`AIS2API_RELAY_BYTES`、`AIS2API_QUEUE_SIZE`、`AIS2API_QUEUE_SECONDS`、`AIS2API_GENERATION_SECONDS`、`AIS2API_STREAM_IDLE_SECONDS`、`AIS2API_MAX_ATTEMPTS` | `--request-bytes`、`--object-bytes`、`--relay-bytes`、`--queue-size`、`--queue-seconds`、`--generation-seconds`、`--stream-idle-seconds`、`--max-attempts` |
@@ -178,7 +180,7 @@
 
 请求 `deep` 时使用 `gemini-4-hydrogen` 和 `XHIGH` 思考等级；请求 `deep(low)` 时改用 `LOW`。`model_defaults` 的键是实际模型 id，不带后缀。
 
-通过管理 API 修改时，`model_aliases`、`model_defaults`、`configured_models` 与 `admin_origins` 会整体替换；要删除某个别名，提交不含它的完整对象即可。`limits` 则按子项合并。
+通过管理 API 修改时，`model_aliases`、`model_defaults`、`tier_quotas`、`configured_models` 与 `admin_origins` 会整体替换；要删除某个别名，提交不含它的完整对象即可。`limits` 则按子项合并。
 
 ## 安全提示
 
