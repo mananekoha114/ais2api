@@ -56,6 +56,10 @@ export interface Account {
   backend_switched_until?: number
   /** Stored per-account browser identity; empty timezone/locale follow the host. */
   fingerprint?: { seed: number; timezone: string; locale: string }
+  /** Subscription tier the account's page last confirmed; empty until known. */
+  benefit_tier?: BenefitTier | ''
+  /** Unix seconds of that confirmation; 0 when unknown. */
+  benefit_tier_at?: number
 }
 
 export type AccountBackend = 'auto' | 'camoufox' | 'spidermonkey'

@@ -615,6 +615,8 @@ class Service {
                                  const auto email = string_or(value, "email");
                                  if (!email.empty() && bool_or(value, "ready") && !bool_or(value, "identityAmbiguous"))
                                      store_.update_email(a.id, email);
+                                 if (bool_or(value, "ready") && !bool_or(value, "identityAmbiguous"))
+                                     store_.set_benefit_tier(a.id, string_or(value, "benefitTier"));
                                  value["account_id"] = a.id;
                                  results.push_back(std::move(value));
                              } catch (const Error &e) {
@@ -821,6 +823,17 @@ class Service {
                 }
                 work->usage->begin_attempt(account->id);
                 const std::string backend(gateway_->backend_for(*account));
+                // The tier the page confirmed for this attempt, kept for
+                // scheduling and the account list.
+                const auto remember_tier = [&]() -> std::string {
+                    try {
+                        auto tier = gateway_->benefit_tier(*account);
+                        store_.set_benefit_tier(account->id, tier);
+                        return tier;
+                    } catch (const std::exception &) {
+                        return {};
+                    }
+                };
                 { std::lock_guard lock(queue_mutex_); active_account_id_ = account->id; }
                 log({{"event", "generation_attempt"}, {"request_id", work->usage->id()},
                     {"account_id", account->id}, {"attempt", attempt+1}});
@@ -915,6 +928,7 @@ class Service {
                     if (!completed)
                         throw Error(502, "incomplete_upstream", "Upstream response ended without a finish reason");
                     store_.success(account->id, request.model);
+                    remember_tier();
                     work->usage->end_attempt();
                     work->usage->producer_done();
                     work->pipe->finish();
@@ -922,6 +936,7 @@ class Service {
                 } catch (const Error &e) {
                     work->usage->end_attempt(e.code);
                     count_error(backend, e.code);
+                    remember_tier();
                     if (token.stop_requested() || delivered || continuing)
                         throw;
                     const bool last = attempt + 1 >= max_attempts;

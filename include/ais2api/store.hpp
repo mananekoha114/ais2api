@@ -74,6 +74,12 @@ public:
     std::optional<json::object> refresh_cookies(std::string_view id, const json::object& expected,
                                                 const json::array& cookies);
     void update_email(std::string_view id, std::string_view email);
+    // Records the benefit tier a page confirmed for the account; anything but
+    // "free", "plus", "pro" or "ultra" (such as "unknown") is ignored, so a
+    // failed lookup never erases a known tier.
+    void set_benefit_tier(std::string_view id, std::string_view tier);
+    // The account's last recorded tier, empty when none was confirmed.
+    std::string benefit_tier(std::string_view id);
     void update_account_metadata(std::string_view id, const json::object& patch);
     void remove_account(std::string_view id);
     void select_account(std::string_view id);

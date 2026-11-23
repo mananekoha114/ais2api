@@ -65,6 +65,8 @@ class BackendRouter final : public GenerationBackend {
     // An account the store does not know (one being imported) uses the
     // default backend.
     std::string_view backend_for(const Account &) override;
+    // The tier the gateway serving `account` reports.
+    std::string benefit_tier(const Account &account) override;
     // For an "auto" account, returns the alternate Firefox backend
     // ("camoufox" <-> "spidermonkey") when compiled in and ready on this host.
     std::optional<std::string_view> alternate_firefox_backend(const Account &account);

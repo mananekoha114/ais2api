@@ -849,6 +849,32 @@ test('a cancelled generation stops waiting on a shared discovery tier query', as
   release(new Response('[1]')); await discovery; h.bridge.dispose();
 });
 
+test('benefitTier reports the cached tier through the captured endpoint', async () => {
+  let queried;
+  const h = harness({ tierFetch: (url, init) => { queried = { url, init }; return new Response('[2]'); } });
+  captureModelsXHR(h);
+  assert.equal(await h.bridge.benefitTier('0', 'SAPISIDHASH native'), 'ultra');
+  assert.match(queried.url, /MakerSuiteService\/GetAiStudioBenefitTier$/);
+  assert.equal(queried.init.headers.authorization, 'SAPISIDHASH native');
+  // The cached answer serves later lookups and requests.
+  assert.equal(await h.bridge.benefitTier('0'), 'ultra');
+  await h.bridge.discoverModels('0');
+  assert.equal(h.tierFetches(), 1);
+  await assert.rejects(h.bridge.benefitTier('1'), /identity_mismatch/);
+  await assert.rejects(h.bridge.benefitTier('../0'), /invalid benefit auth_user/);
+  h.bridge.dispose();
+});
+
+test('benefitTier stays unknown without a captured RPC or after a failed lookup', async () => {
+  const empty = harness({ fastDiscoveryWait: true });
+  assert.equal(await empty.bridge.benefitTier('0'), 'unknown');
+  assert.equal(empty.tierFetches(), 0); empty.bridge.dispose();
+  const failed = harness({ tierFetch: () => new Response('nope', { status: 500 }) });
+  await failed.capture();
+  assert.equal(await failed.bridge.benefitTier('0'), 'unknown');
+  assert.equal(failed.tierFetches(), 1); failed.bridge.dispose();
+});
+
 test('relay records benefit tier at send time even after cache expiry or refresh', async () => {
   let now = 1000, code = 1;
   const h = harness({ now: () => now, tierFetch: () => new Response(JSON.stringify([code])) });

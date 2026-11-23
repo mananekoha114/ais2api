@@ -160,6 +160,12 @@ json::object BackendRouter::probe(const Account &account, std::stop_token token)
 json::object BackendRouter::probe_import(Account &account, std::stop_token token) {
     return serve(account).probe_import(account, std::move(token));
 }
+std::string BackendRouter::benefit_tier(const Account &account) {
+    // Only the running gateway can hold the account's page; asking never
+    // switches backends.
+    auto *target = current();
+    return target ? target->benefit_tier(account) : std::string();
+}
 json::object BackendRouter::diagnostics() {
     GenerationBackend *target = nullptr;
     std::string backend, fallback;

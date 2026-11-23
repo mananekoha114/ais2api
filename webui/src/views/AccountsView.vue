@@ -13,7 +13,7 @@ import { api, describeError, enc, runOperation } from '../api/client'
 import type { Account, ProbeResult, Rotation } from '../api/types'
 import { refreshStatus, service } from '../stores/service'
 import { confirm, notify, notifyError } from '../stores/ui'
-import { accountBackendSummary, accountLabel, accountState, cooldownReason, now } from '../utils/accounts'
+import { accountBackendSummary, accountLabel, accountState, cooldownReason, now, tierBadge } from '../utils/accounts'
 import { formatRelative, formatTimestamp, isIndefinite } from '../utils/format'
 import { usePolling } from '../utils/media'
 
@@ -244,6 +244,7 @@ function menuFor(a: Account): MenuItem[] {
                 <strong class="truncate">{{ accountLabel(account) }}</strong>
                 <span v-if="account.id === rotation?.preferred_account_id" class="badge accent"><FIcon name="star" filled />首选</span>
                 <span v-if="account.id === service.status?.active_generation_account_id" class="badge success"><FIcon name="record" filled />生成中</span>
+                <span class="badge" :class="tierBadge(account).known ? 'outline' : ''" :title="tierBadge(account).title">{{ tierBadge(account).text }}</span>
               </div>
               <div class="meta t-caption t-secondary">
                 <span v-if="account.email" class="truncate"><FIcon name="mail" :size="12" /> {{ account.email }}</span>

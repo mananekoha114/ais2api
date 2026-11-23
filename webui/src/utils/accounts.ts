@@ -1,4 +1,4 @@
-import type { Account } from '../api/types'
+import type { Account, BenefitTier } from '../api/types'
 import type { IconName } from '../icons'
 import { isIndefinite } from './format'
 
@@ -69,6 +69,16 @@ export function accountBackendSummary(account: Account, at = now()): { text: str
     }
   }
   return { text: `${stored}（${active}）`, title: `浏览器后端：${stored}，当前生效：${active}` }
+}
+
+const tierNames: Record<BenefitTier, string> = { free: 'Free', plus: 'Plus', pro: 'Pro', ultra: 'Ultra' }
+
+/** Subscription tier badge of an account row; unknown until a page confirms the tier. */
+export function tierBadge(account: Account): { text: string; known: boolean; title: string } {
+  const tier = account.benefit_tier
+  if (!tier || !(tier in tierNames)) return { text: '等级未知', known: false, title: '订阅等级尚未确认：账号被使用或检测一次后显示' }
+  const note = tier === 'plus' ? '；额度与 Free 相同' : ''
+  return { text: tierNames[tier], known: true, title: `Google AI 订阅等级：${tierNames[tier]}${note}` }
 }
 
 /** Human-readable reason of a stored cooldown kind. */

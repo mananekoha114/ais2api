@@ -447,6 +447,18 @@
     if (tierHeader && Date.now() < benefit.expires) headers['x-aistudio-g1-tier'] = tierHeader;
     return headers;
   }
+  // The account's benefit tier through the same bounded, cached lookup the
+  // requests use; 'unknown' when the page has not captured an RPC to derive
+  // the endpoint from or the lookup failed.
+  async function benefitTier(expectedAuthUser, authorization) {
+    if (typeof expectedAuthUser !== 'string' || !/^\d+$/.test(expectedAuthUser)) fail('browser_incompatible: invalid benefit auth_user');
+    for (let attempt = 0; !state.discoveryRequest && !state.template && attempt < 20; ++attempt)
+      await new Promise(resolve => setTimeout(resolve, 100));
+    const captured = state.discoveryRequest || state.template;
+    if (!captured) return 'unknown';
+    await benefitHeaders(captured, expectedAuthUser, authorization);
+    return Date.now() < benefit.expires ? benefit.tier : 'unknown';
+  }
   async function discoverModels(expectedAuthUser, authorization) {
     if (typeof expectedAuthUser !== 'string' || !/^\d+$/.test(expectedAuthUser)) fail('browser_incompatible: invalid discovery auth_user');
     for (let attempt = 0; !state.discoveryRequest && attempt < 20; ++attempt)
@@ -610,7 +622,7 @@
     return true;
   }
   const bridge = {
-    identity, bootstrap, finishBootstrap, run, snapshot, append, start, ack, next, abort, discoverModels,
+    identity, bootstrap, finishBootstrap, run, snapshot, append, start, ack, next, abort, discoverModels, benefitTier,
     poll: () => relayState(state.transfer),
     capability: () => ({ benefitTier: Date.now() < benefit.expires ? benefit.tier : 'unknown', template: state.template ? { body: state.template.body } : null, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', snapshot: !!state.snapshotCall, discovery: !!state.discoveryRequest, templateTransport: state.templateTransport, snapshotCandidates: state.snapshotCandidates, snapshotHooked: state.snapshotHooked }),
     experimentContext: () => state.template ? { url: state.template.url, body: state.template.body, apiKey: state.template.headers['x-goog-api-key'] || '', visitId: state.template.headers['x-aistudio-visit-id'] || '', extension: state.template.headers['x-goog-ext-519733851-bin'] || '', tier: Date.now() < benefit.expires ? benefit.tier : 'unknown', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' } : null,

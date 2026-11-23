@@ -716,3 +716,28 @@ TEST_CASE("Alternating models stay on the current account until it cannot serve 
     CHECK(store.choose("y")->id == a);
     CHECK(string_or(store.rotation_status(), "next_account_id") == a);
 }
+
+TEST_CASE("account tiers persist, ignore unknown answers and leave with the account", "[tier][state]") {
+    Directory d;
+    Store store(d.path);
+    const auto id = string_or(store.import_accounts(credential())[0].as_object(), "id");
+    auto row = [&] { return store.account_status()[0].as_object(); };
+    CHECK(store.benefit_tier(id).empty());
+    CHECK(string_or(row(), "benefit_tier").empty());
+    CHECK(row().at("benefit_tier_at").as_int64() == 0);
+    store.set_benefit_tier(id, "pro");
+    CHECK(store.benefit_tier(id) == "pro");
+    CHECK(row().at("benefit_tier_at").as_int64() > 0);
+    // A failed lookup never erases a known tier.
+    store.set_benefit_tier(id, "unknown");
+    store.set_benefit_tier(id, "");
+    store.set_benefit_tier(id, "gold");
+    CHECK(store.benefit_tier(id) == "pro");
+    store.set_benefit_tier(id, "plus");
+    CHECK(string_or(row(), "benefit_tier") == "plus");
+    // Unknown accounts gain nothing; removed accounts take their tier along.
+    store.set_benefit_tier("acc_missing", "ultra");
+    CHECK(store.benefit_tier("acc_missing").empty());
+    store.remove_account(id);
+    CHECK(store.benefit_tier(id).empty());
+}

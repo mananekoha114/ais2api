@@ -23,6 +23,10 @@ class GenerationBackend {
     virtual json::object diagnostics() = 0;
     // The browser backend that serves `account`, as diagnostics count it.
     virtual std::string_view backend_for(const Account &) { return "custom"; }
+    // The benefit tier ("free", "plus", "pro" or "ultra") the resident page
+    // last confirmed for `account` and still holds as current; empty when
+    // the account is not resident or its tier is unknown.
+    virtual std::string benefit_tier(const Account &) { return {}; }
     virtual void reconfigure(const Config &) {}
     virtual void close() = 0;
     // Discard the resident account's page and BotGuard session so the next

@@ -3113,6 +3113,22 @@
           },
           "firefox_identity": {
             "type": "boolean"
+          },
+          "benefit_tier": {
+            "enum": [
+              "",
+              "free",
+              "plus",
+              "pro",
+              "ultra"
+            ],
+            "description": "Subscription tier the account page last confirmed; empty until known."
+          },
+          "benefit_tier_at": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "Unix seconds of that confirmation; 0 when unknown."
           }
         },
         "additionalProperties": true

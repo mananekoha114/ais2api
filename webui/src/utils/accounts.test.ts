@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { accountBackendSummary, accountState, cooldownReason } from './accounts'
+import { accountBackendSummary, accountState, cooldownReason, tierBadge } from './accounts'
 import { formatRelative, formatTime, formatTimestamp } from './format'
 
 // The backend stores INT64_MAX as the deadline of permission cooldowns; after
@@ -55,5 +55,18 @@ describe('accountBackendSummary', () => {
         NOW,
       ).text,
     ).toBe('自动（Firefox）（Camoufox）')
+  })
+})
+
+describe('subscription tier badge', () => {
+  it('names confirmed tiers and notes the plus allowance', () => {
+    expect(tierBadge({ id: 'a', benefit_tier: 'ultra' })).toMatchObject({ text: 'Ultra', known: true })
+    expect(tierBadge({ id: 'a', benefit_tier: 'plus' }).title).toContain('额度与 Free 相同')
+    expect(tierBadge({ id: 'a', benefit_tier: 'free' }).text).toBe('Free')
+  })
+
+  it('stays unknown until a page confirms the tier', () => {
+    expect(tierBadge({ id: 'a' })).toMatchObject({ text: '等级未知', known: false })
+    expect(tierBadge({ id: 'a', benefit_tier: '' }).known).toBe(false)
   })
 })

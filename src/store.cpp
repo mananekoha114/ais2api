@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/store.hpp"
+#include "ais2api/tier_quota.hpp"
 #include "ais2api/backend_router.hpp"
 #include "ais2api/console.hpp"
 #include "ais2api/pricing.hpp"
@@ -502,6 +503,9 @@ void init_state(sqlite3 *db) {
     { Statement columns(db, "PRAGMA table_info(fingerprints)");
       while (columns.row()) account_backend |= columns.str(1) == "backend"; }
     if (!account_backend) exec(db, "ALTER TABLE fingerprints ADD COLUMN backend TEXT NOT NULL DEFAULT ''");
+    // The benefit tier each account's page last confirmed.
+    exec(db, "CREATE TABLE IF NOT EXISTS account_tiers(account TEXT PRIMARY KEY REFERENCES "
+             "accounts(id) ON DELETE CASCADE,tier TEXT NOT NULL,checked_at INTEGER NOT NULL)");
     exec(db, "CREATE TABLE IF NOT EXISTS account_backend_switches("
              "account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,"
              "backend TEXT NOT NULL,until INTEGER NOT NULL)");
@@ -1856,6 +1860,11 @@ json::array Store::account_status(const std::optional<Config> &config) {
             sw.integer(1, now);
             while (sw.row()) switches.emplace(sw.str(0), BackendSwitch{sw.str(1), sqlite3_column_int64(sw.p, 2)});
         }
+        std::map<std::string, std::pair<std::string, std::int64_t>, std::less<>> tiers;
+        {
+            Statement t(impl_->db, "SELECT account,tier,checked_at FROM account_tiers");
+            while (t.row()) tiers.emplace(t.str(0), std::pair{t.str(1), sqlite3_column_int64(t.p, 2)});
+        }
         json::array rows;
         Statement s(impl_->db, "SELECT id,name,email,auth_user,state,disabled,expired FROM "
                                "accounts ORDER BY rowid");
@@ -1863,6 +1872,13 @@ json::array Store::account_status(const std::optional<Config> &config) {
             const auto id = s.str(0);
             auto o = summary(decode(s));
             o["expired"] = sqlite3_column_int(s.p, 6) != 0;
+            if (const auto tier = tiers.find(id); tier != tiers.end()) {
+                o["benefit_tier"] = tier->second.first;
+                o["benefit_tier_at"] = tier->second.second;
+            } else {
+                o["benefit_tier"] = "";
+                o["benefit_tier_at"] = 0;
+            }
             json::array failures;
             Statement f(impl_->db, "SELECT model,until,count,kind FROM failures WHERE account=?");
             f.text(1, id);
@@ -1905,6 +1921,25 @@ json::array Store::account_status(const std::optional<Config> &config) {
             rows.push_back(o);
         }
         return rows;
+    });
+}
+void Store::set_benefit_tier(std::string_view id, std::string_view tier) {
+    if (!known_tier(tier)) return;
+    impl_->run([&] {
+        // An account removed meanwhile has nothing to record.
+        Statement s(impl_->db, "INSERT INTO account_tiers(account,tier,checked_at) SELECT id,?,? FROM accounts WHERE id=? "
+                               "ON CONFLICT(account) DO UPDATE SET tier=excluded.tier,checked_at=excluded.checked_at");
+        s.text(1, tier);
+        s.integer(2, unix_seconds());
+        s.text(3, id);
+        s.row();
+    });
+}
+std::string Store::benefit_tier(std::string_view id) {
+    return impl_->run([&] {
+        Statement s(impl_->db, "SELECT tier FROM account_tiers WHERE account=?");
+        s.text(1, id);
+        return s.row() ? s.str(0) : std::string();
     });
 }
 json::object Store::create_key(std::string name) {
