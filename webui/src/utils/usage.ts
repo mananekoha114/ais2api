@@ -46,7 +46,7 @@ const settingNames: Record<string, string> = {
   seed: '随机种子', presencePenalty: '存在惩罚', frequencyPenalty: '频率惩罚', responseMimeType: '输出格式',
   thinkingBudget: '思考预算 Tokens', includeThoughts: '显示思考', thinkingLevel: '思考等级',
 }
-const settingValues: Record<string, string> = { LOW: '低', MEDIUM: '中', HIGH: '高', MINIMAL: '最低', 'text/plain': '文本', 'application/json': 'JSON' }
+const settingValues: Record<string, string> = { LOW: '低', MEDIUM: '中', HIGH: '高', XHIGH: '超高', MINIMAL: '最低', 'text/plain': '文本', 'application/json': 'JSON' }
 export function generationSettings(settings: RequestDetail['settings']) {
   const number = new Intl.NumberFormat(undefined, { maximumFractionDigits: 20 })
   return Object.entries(settings).flatMap(([key, value]) => {

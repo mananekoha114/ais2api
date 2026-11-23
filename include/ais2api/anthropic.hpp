@@ -21,7 +21,7 @@ struct AnthropicRequest {
 };
 // `count_only` accepts the /v1/messages/count_tokens body (no max_tokens).
 AnthropicRequest anthropic_to_gemini(const json::object &input, bool ignore_unsupported,
-                                     bool count_only = false);
+                                     bool count_only = false, const Config &config = {});
 // The client's thinking setting, read before the request is queued.
 bool anthropic_thinking(const json::object &input);
 

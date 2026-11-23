@@ -77,7 +77,8 @@ json::object recorded_settings(const json::object &gemini) {
         auto level = string_or(p->as_object(), "thinkingLevel");
         std::transform(level.begin(), level.end(), level.begin(),
                        [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-        if (level == "LOW" || level == "HIGH" || level == "MEDIUM" || level == "MINIMAL")
+        if (level == "EXTRA_HIGH") level = "XHIGH";
+        if (level == "LOW" || level == "HIGH" || level == "MEDIUM" || level == "MINIMAL" || level == "XHIGH")
             thinking["thinkingLevel"] = level;
         if (!thinking.empty())
             result["thinkingConfig"] = std::move(thinking);

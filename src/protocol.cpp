@@ -528,7 +528,7 @@ json::array generation_wire(const json::object &g) {
             invalid("thinkingBudget must be an integer greater than or equal to -1");
         if (auto b = t.if_contains("thinkingLevel")) {
             static const std::map<std::string, int> m{
-                {"LOW", 1}, {"MEDIUM", 2}, {"HIGH", 3}, {"MINIMAL", 4}};
+                {"LOW", 1}, {"MEDIUM", 2}, {"HIGH", 3}, {"MINIMAL", 4}, {"XHIGH", 6}, {"EXTRA_HIGH", 6}};
             auto it = m.find(upper(str(*b)));
             if (it == m.end())
                 invalid("Invalid thinkingLevel");
@@ -1151,9 +1151,14 @@ const json::object *thinking_config(const json::object &request) {
     auto thinking = generation->as_object().if_contains("thinkingConfig");
     return thinking && thinking->is_object() ? &thinking->as_object() : nullptr;
 }
+bool supports_xhigh(std::string_view family, bool image) {
+    return !image && (family.starts_with("gemini-4-hydrogen") || family.starts_with("gemini-4-neon"));
+}
 // The level a model uses without thinkingConfig, per the published Gemini
 // thinking guide. Unlisted text models keep HIGH like the reference client.
 std::string default_thinking_level(std::string_view family, bool image) {
+    if (supports_xhigh(family, image))
+        return "HIGH";
     if (family.starts_with("gemini-4"))
         return "MEDIUM";
     if (image || family.starts_with("gemini-3.1-flash-lite") || family.starts_with("gemini-3.5-flash-lite"))
@@ -1277,8 +1282,12 @@ Request normalize_native(std::string model, const json::object &input, bool stre
                 r.include_thoughts = include->as_bool();
             if (thinking.if_contains("thinkingBudget") && !budget_mapped)
                 r.ignored_parameters.push_back("generationConfig.thinkingConfig.thinkingBudget");
-            if (gemini4 && upper(string_or(thinking, "thinkingLevel")) == "MINIMAL")
+            const auto effective_level = upper(string_or(thinking, "thinkingLevel"));
+            if (gemini4 && effective_level == "MINIMAL")
                 invalid("thinkingLevel MINIMAL is not supported by Gemini 4 models");
+            if ((effective_level == "XHIGH" || effective_level == "EXTRA_HIGH") &&
+                !supports_xhigh(family, image))
+                invalid("thinkingLevel XHIGH is only supported by Gemini 4 Hydrogen and Neon models");
         }
     }
     const json::object *tc = nullptr;
@@ -1305,6 +1314,16 @@ Request normalize_native(std::string model, const json::object &input, bool stre
 Request normalize_gemini(std::string model, const json::object &input, bool stream,
                          const Config &config) {
     return normalize_native(std::move(model), input, stream, config, false, false);
+}
+
+bool supports_xhigh_thinking(std::string_view raw_model, const Config &config) {
+    std::string model(raw_model);
+    if (auto p = config.model_aliases.if_contains(model); p && p->is_string())
+        model = std::string(p->as_string());
+    if (model.starts_with("models/")) model.erase(0, 7);
+    strip_search_suffix(model);
+    const bool image = image_model(model);
+    return supports_xhigh(model_family(std::move(model)), image);
 }
 
 bool lists_search_variant(std::string_view id, const json::object &entry) {
@@ -2035,8 +2054,6 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
             discard_parameter(input, "store", discarded, "store");
         if (auto parallel = input.if_contains("parallel_tool_calls"); parallel && !parallel->is_null() && parallel->is_bool() && !parallel->as_bool())
             discard_parameter(input, "parallel_tool_calls", discarded, "parallel_tool_calls");
-        if (auto effort = input.if_contains("reasoning_effort"); effort && !effort->is_null() && (*effort == "none" || *effort == "xhigh"))
-            discard_parameter(input, "reasoning_effort", discarded, "reasoning_effort");
     }
     keys(input,
          {"model",
@@ -2065,6 +2082,13 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
           "ais2api"},
          "OpenAI request");
     auto model = model_name(required_string(input, "model"), config);
+    if (config.ignore_unsupported_parameters) {
+        if (auto effort = input.if_contains("reasoning_effort"); effort && effort->is_string()) {
+            const auto level = upper(std::string(effort->as_string()));
+            if (level == "NONE" || (level == "XHIGH" && !supports_xhigh_thinking(model)))
+                discard_parameter(input, "reasoning_effort", discarded, "reasoning_effort");
+        }
+    }
     auto m = input.if_contains("messages");
     if (!m)
         invalid("messages is required");

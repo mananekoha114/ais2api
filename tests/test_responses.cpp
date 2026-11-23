@@ -234,6 +234,24 @@ TEST_CASE("Responses opt-in sanitizer discards known optional features", "[respo
     REQUIRE(input.at("input") == "hello");
     REQUIRE_NOTHROW(responses_to_chat(input));
     REQUIRE_FALSE(responses_options(input).contains("tool_choice"));
+
+    auto unsupported_xhigh = read(R"({"model":"gemini-4-argon","input":"hello","reasoning":{"effort":"xhigh"}})");
+    json::array ignored_xhigh;
+    discard_unsupported_responses(unsupported_xhigh, ignored_xhigh);
+    REQUIRE(ignored_xhigh == json::array{"reasoning.effort"});
+    REQUIRE_FALSE(responses_options(unsupported_xhigh).contains("reasoning"));
+
+    Config cfg;
+    cfg.ignore_unsupported_parameters = true;
+    cfg.model_aliases["neon"] = "gemini-4-neon";
+    auto supported_xhigh = read(R"({"model":"neon","input":"hello","reasoning":{"effort":"xhigh"}})");
+    json::array kept_ignored;
+    discard_unsupported_responses(supported_xhigh, kept_ignored, cfg);
+    REQUIRE(kept_ignored.empty());
+    REQUIRE(responses_options(supported_xhigh).at("reasoning").as_object().at("effort") == "xhigh");
+    auto lowered_xhigh = normalize_openai(responses_to_chat(supported_xhigh), cfg);
+    REQUIRE(lowered_xhigh.ignored_parameters.empty());
+    REQUIRE(encode_request(lowered_xhigh, {}, "s")[3].as_array()[16].as_array()[3] == 6);
 }
 TEST_CASE("Responses sanitizer preserves malformed and unknown fields", "[responses]") {
     for (auto field : {R"("store":"true")", R"("previous_response_id":4)",

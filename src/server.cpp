@@ -765,13 +765,13 @@ class Service {
                 throw Error(504, "queue_timeout", "Queue wait exceeded limit");
             json::array ignored_responses;
             if (work->anthropic) {
-                auto lowered = anthropic_to_gemini(work->body, cfg.ignore_unsupported_parameters);
+                auto lowered = anthropic_to_gemini(work->body, cfg.ignore_unsupported_parameters, false, cfg);
                 work->body = std::move(lowered.gemini);
                 ignored_responses = std::move(lowered.ignored);
             }
             if (work->responses) {
                 if (cfg.ignore_unsupported_parameters)
-                    discard_unsupported_responses(work->body, ignored_responses);
+                    discard_unsupported_responses(work->body, ignored_responses, cfg);
                 work->response_options = responses_options(work->body);
                 work->body = responses_to_chat(work->body);
             }
@@ -2016,11 +2016,11 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         // Counted locally with the Gemma 4 tokenizer: no queue, no upstream
         // and no request record.
         auto body = std::make_shared<json::object>(std::move(value.as_object()));
-        const bool discard = cfg.ignore_unsupported_parameters;
         auto tokens = co_await net::co_spawn(
             service.count_executor(),
-            [body, discard]() -> net::awaitable<std::size_t> {
-                co_return anthropic_input_tokens(anthropic_to_gemini(*body, discard, true).gemini);
+            [body, cfg]() -> net::awaitable<std::size_t> {
+                co_return anthropic_input_tokens(
+                    anthropic_to_gemini(*body, cfg.ignore_unsupported_parameters, true, cfg).gemini);
             },
             net::use_awaitable);
         co_await send_json(stream, 200, {{"input_tokens", tokens}});

@@ -688,18 +688,52 @@ TEST_CASE("Default thinking levels and Gemini 4 thinking controls follow the pub
         auto request = normalize_gemini(std::move(model), body, false, Config{});
         return std::pair{encode_request(request, {}, "s")[3].as_array()[16].as_array()[3], request.ignored_parameters};
     };
-    for (auto [model, wire] : {std::pair{"gemini-4-argon", 2}, {"Gemini-4-Argon-search", 2}, {"gemini-3.8-flash", 2},
-                               {"gemini-3.6-flash", 2}, {"gemini-3.1-flash-lite", 4}, {"gemini-3.5-flash-lite", 4},
-                               {"gemini-3-flash", 3}, {"gemini-2.5-pro", 3}, {"gemini-3.1-flash-lite-image", 4}})
+    for (auto [model, wire] : {std::pair{"gemini-4-argon", 2}, {"Gemini-4-Argon-search", 2}, {"gemini-4-carbon", 2},
+                               {"gemini-4-hydrogen", 3}, {"gemini-4-neon", 3}, {"Gemini-4-Neon-search", 3},
+                               {"gemini-3.8-flash", 2}, {"gemini-3.6-flash", 2}, {"gemini-3.1-flash-lite", 4},
+                               {"gemini-3.5-flash-lite", 4}, {"gemini-3-flash", 3}, {"gemini-2.5-pro", 3},
+                               {"gemini-3.1-flash-lite-image", 4}})
         REQUIRE(level(model, "").first == wire);
-    REQUIRE(level("gemini-4-argon", R"({"thinkingBudget":0})") == std::pair{json::value(1), json::array{}});
-    REQUIRE(level("gemini-4-argon", R"({"thinkingBudget":1024})") ==
+    constexpr std::string_view zero_budget_json = R"({"thinkingBudget":0})";
+    constexpr std::string_view k_budget_json = R"({"thinkingBudget":1024})";
+    constexpr std::string_view high_json = R"({"thinkingLevel":"high"})";
+    constexpr std::string_view xhigh_lower_json = R"({"thinkingLevel":"xhigh"})";
+    constexpr std::string_view xhigh_upper_json = R"({"thinkingLevel":"XHIGH"})";
+    constexpr std::string_view extra_high_json = R"({"thinkingLevel":"EXTRA_HIGH"})";
+    REQUIRE(level("gemini-4-argon", zero_budget_json) == std::pair{json::value(1), json::array{}});
+    REQUIRE(level("gemini-4-hydrogen", zero_budget_json) == std::pair{json::value(1), json::array{}});
+    REQUIRE(level("gemini-4-argon", k_budget_json) ==
             std::pair{json::value(2), json::array{"generationConfig.thinkingConfig.thinkingBudget"}});
-    REQUIRE(level("gemini-4-argon", R"({"thinkingLevel":"high"})").first == 3);
+    REQUIRE(level("gemini-4-hydrogen", k_budget_json) ==
+            std::pair{json::value(3), json::array{"generationConfig.thinkingConfig.thinkingBudget"}});
+    REQUIRE(level("gemini-4-argon", high_json).first == 3);
+    for (auto xhigh_json : {xhigh_lower_json, xhigh_upper_json, extra_high_json}) {
+        REQUIRE(level("gemini-4-hydrogen", xhigh_json).first == 6);
+        REQUIRE(level("gemini-4-neon", xhigh_json).first == 6);
+        REQUIRE(level("Gemini-4-Hydrogen-search", xhigh_json).first == 6);
+    }
     // Older families keep ignoring budgets and accept both fields.
-    REQUIRE(level("gemini-3-flash", R"({"thinkingBudget":0,"thinkingLevel":"minimal"})").first == 4);
-    for (auto bad : {R"({"thinkingBudget":0,"thinkingLevel":"low"})", R"({"thinkingLevel":"MINIMAL"})"})
+    constexpr std::string_view flash_both_json = R"({"thinkingBudget":0,"thinkingLevel":"minimal"})";
+    REQUIRE(level("gemini-3-flash", flash_both_json).first == 4);
+    for (auto bad : {R"({"thinkingBudget":0,"thinkingLevel":"low"})", R"({"thinkingLevel":"MINIMAL"})"}) {
         REQUIRE_THROWS_AS(level("gemini-4-argon", bad), Error);
+        REQUIRE_THROWS_AS(level("gemini-4-hydrogen", bad), Error);
+    }
+    for (auto non_xhigh_model : {"gemini-4-argon", "gemini-4-carbon", "gemini-4-image", "gemini-3-flash"})
+        REQUIRE_THROWS_AS(level(non_xhigh_model, xhigh_upper_json), Error);
+
+    Config chat_cfg;
+    chat_cfg.model_aliases["neon-alias"] = "models/gemini-4-neon-search";
+    for (auto ignore : {false, true}) {
+        chat_cfg.ignore_unsupported_parameters = ignore;
+        for (auto model_id : {"gemini-4-hydrogen", "neon-alias"}) {
+            auto chat_body = obj(R"({"messages":[{"role":"user","content":"x"}],"reasoning_effort":"xhigh"})");
+            chat_body["model"] = model_id;
+            auto normalized = normalize_openai(chat_body, chat_cfg);
+            REQUIRE(normalized.ignored_parameters.empty());
+            REQUIRE(encode_request(normalized, {}, "s")[3].as_array()[16].as_array()[3] == 6);
+        }
+    }
 }
 
 TEST_CASE("Gemini 4 retains the total budget and caps only the first wire request",

@@ -143,6 +143,17 @@ TEST_CASE("Recorded thinking levels ignore request case", "[usage]") {
     usage.producer_done();
     usage.http_done(200, "", true);
     REQUIRE(store.request("levels").at("settings").at("thinkingConfig").at("thinkingLevel") == "LOW");
+
+    for (auto [id, raw_level] : {std::pair{"xhigh-level", "xhigh"}, {"extra-high-level", "extra_high"}}) {
+        RequestUsage xhigh_usage(store, id, "gemini");
+        xhigh_usage.configure("gemini-4-hydrogen", false);
+        REQUIRE(xhigh_usage.start());
+        json::object settings{{"generationConfig", json::object{{"thinkingConfig", json::object{{"thinkingLevel", raw_level}}}}}};
+        xhigh_usage.normalized("gemini-4-hydrogen", settings);
+        xhigh_usage.producer_done();
+        xhigh_usage.http_done(200, "", true);
+        REQUIRE(store.request(id).at("settings").at("thinkingConfig").at("thinkingLevel") == "XHIGH");
+    }
 }
 TEST_CASE("Request history excludes arbitrary settings text and payloads", "[usage]") {
     Directory d;

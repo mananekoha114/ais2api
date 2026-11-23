@@ -36,6 +36,8 @@ struct GenerationEvent {
 using EventSink = std::function<void(GenerationEvent)>;
 inline constexpr std::int64_t studio_round_tokens = 32768;
 Request normalize_gemini(std::string model, const json::object& body, bool stream, const Config& config);
+// Whether this model (after aliases, `models/` and `-search`) supports XHIGH.
+bool supports_xhigh_thinking(std::string_view model, const Config& config = {});
 // Whether model listings add a "<id>-search" variant (Google Search on by
 // default) for this discovered or configured model entry.
 bool lists_search_variant(std::string_view id, const json::object& entry);

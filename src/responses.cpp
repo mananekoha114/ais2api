@@ -207,7 +207,7 @@ void append_assistant_message(json::array &messages, json::object next) {
     }
 }
 } // namespace
-void discard_unsupported_responses(json::object &in, json::array &ignored) {
+void discard_unsupported_responses(json::object &in, json::array &ignored, const Config &config) {
     auto drop = [&](std::string_view key, bool discard) {
         if (discard) {
             in.erase(key);
@@ -248,6 +248,18 @@ void discard_unsupported_responses(json::object &in, json::array &ignored) {
         if (auto summary = r.if_contains("summary"); summary && one_of(*summary, {"auto", "concise", "detailed"})) {
             r.erase("summary");
             ignored.push_back("reasoning.summary");
+        }
+        if (auto effort = r.if_contains("effort"); effort && effort->is_string()) {
+            std::string level(effort->as_string());
+            std::transform(level.begin(), level.end(), level.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+            const auto model = in.if_contains("model") && in.at("model").is_string()
+                                   ? std::string_view(in.at("model").as_string())
+                                   : std::string_view{};
+            if (level == "NONE" || (level == "XHIGH" && !supports_xhigh_thinking(model, config))) {
+                r.erase("effort");
+                ignored.push_back("reasoning.effort");
+            }
         }
     }
     auto discard_strict = [&](json::object &o, std::string_view path) {

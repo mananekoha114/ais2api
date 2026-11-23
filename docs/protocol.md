@@ -46,9 +46,9 @@
 
 ### 思考
 
-- `thinkingLevel` 不区分大小写。未指定时按官方思考指南的模型默认值补全：`gemini-4*`、`gemini-3.6-flash*`、`gemini-3.8-flash*` 为 `MEDIUM`；`gemini-3.1-flash-lite*`、`gemini-3.5-flash-lite*` 与 id 中含 `image` 的模型为 `MINIMAL`；其他文本模型为 `HIGH`（与参考项目一致）。判断使用解析别名并去掉 `-search` 后缀的模型 id，不区分大小写。
+- `thinkingLevel` 不区分大小写。未指定时按官方思考指南的模型默认值补全：非图片的 `gemini-4-hydrogen*` 与 `gemini-4-neon*` 为 `HIGH`；其他 `gemini-4*`、`gemini-3.6-flash*`、`gemini-3.8-flash*` 为 `MEDIUM`；`gemini-3.1-flash-lite*`、`gemini-3.5-flash-lite*` 与 id 中含 `image` 的模型为 `MINIMAL`；其他文本模型为 `HIGH`（与参考项目一致）。判断使用解析别名并去掉 `-search` 后缀的模型 id，不区分大小写。
 - `includeThoughts` 接受布尔值，与官方一致默认为 `false`：原生 Gemini 接口只在请求或 `model_defaults` 设为 `true` 时返回思考文本。被隐藏的思考在聚合或 SSE 输出前移除，带签名的思考部件变为官方使用的空文本签名部件 `{"text":"","thoughtSignature":...}`，函数调用和 usage 保留；它不会关闭模型推理。Chat Completions 与 Responses 默认仍输出思考（`reasoning_content` / reasoning 项）。
-- Gemini 4（`gemini-4*`）与官方规则一致：拒绝 `thinkingLevel: MINIMAL`；请求同时提供 `thinkingLevel` 与 `thinkingBudget` 时返回 400；只提供 `thinkingBudget: 0` 时映射为 `LOW`（无法关闭思考，取最接近的等级）。官方没有公开其他预算值到等级的阈值，因此其他单独的预算值保持模型默认等级。
+- Gemini 4（`gemini-4*`）与官方规则一致：拒绝 `thinkingLevel: MINIMAL`；`thinkingLevel: XHIGH`（及别名 `EXTRA_HIGH`）仅支持非图片的 `gemini-4-hydrogen*` 与 `gemini-4-neon*`，其他模型返回 400；请求同时提供 `thinkingLevel` 与 `thinkingBudget` 时返回 400；只提供 `thinkingBudget: 0` 时映射为 `LOW`（无法关闭思考，取最接近的等级）。官方没有公开其他预算值到等级的阈值，因此其他单独的预算值保持模型默认等级。
 - 除上述 Gemini 4 映射外，`thinkingBudget`（≥ -1 的整数）与 `seed`（整数）为兼容原生 Gemini 客户端而接受，但**被忽略**：私有上游没有经过验证的对应字段。字段名（不含值）记录在 `generation_parameters_ignored` 日志中。`thinkingBudget: 0` 在其他模型上不会关闭推理，也不会取消默认等级。
 
 ### 总输出预算与自动续接
@@ -154,9 +154,9 @@ Chat Completions 的 `web_search_options` 对所请求的模型应用同样的�
 
 开启后，已知不支持的可选参数会在编码前移除，字段名（不含值）记录在 `generation_parameters_ignored` 中：
 
-- **Chat**：strict 函数/JSON 标志、强制或指定的 `tool_choice`、`parallel_tool_calls: false`、`n > 1`、`store: true`、`seed`、`logit_bias`、`service_tier`，以及无法映射的 `none` / `xhigh` 推理强度。其余工具与受支持的 schema 约束保留。
+- **Chat**：strict 函数/JSON 标志、强制或指定的 `tool_choice`、`parallel_tool_calls: false`、`n > 1`、`store: true`、`seed`、`logit_bias`、`service_tier`，以及无法映射的 `none` 推理强度（与不支持 `XHIGH` 模型上的 `xhigh`）。其余工具与受支持的 schema 约束保留。
 - **Gemini**：`candidateCount > 1`、`ANY` / `VALIDATED` 函数调用模式、`cachedContent`、不支持的音频输出/语音/路由/模型选择选项、不支持的内置工具选项、与模型不兼容的代码/地图/URL 工具，以及启用的已废弃 civic-integrity 过滤。受支持的工具、内容与历史保留。不支持的选项对象整体舍弃；会检查对象形状，但不会校验其内部字段。
-- **Responses**：存储/后台/续接控制、额外的 include 数据、自动截断、service tier、摘要请求、并行限制、强制工具选择、strict 标志，以及已识别的不支持内置工具。请求仍只使用本次提交的完整历史同步执行，不保存响应。响应中的选项字段反映被移除的顶层控制和 strict 标志。
+- **Responses**：存储/后台/续接控制、额外的 include 数据、自动截断、service tier、摘要请求、无法映射的 `reasoning.effort`（`none` 与不支持 `XHIGH` 模型上的 `xhigh`）、并行限制、强制工具选择、strict 标志，以及已识别的不支持内置工具。请求仍只使用本次提交的完整历史同步执行，不保存响应。响应中的选项字段反映被移除的顶层控制和 strict 标志。
 - **Anthropic Messages**：服务端工具、强制或指定的 `tool_choice`、`disable_parallel_tool_use`、strict 工具、`input_examples`、`allowed_callers`、`output_config.task_budget`、文档引用、`clear_thinking_20251015` 以外的 `context_management` 编辑，以及 `service_tier`、`container`、`mcp_servers`、`inference_geo`、`speed`、`fallbacks`、`diagnostics`。详见 [Anthropic Messages](#anthropic-messages)。
 - **Schema**：在结构校验之后，逐个移除已知不支持的 JSON Schema 约束（如 `multipleOf`、`patternProperties`、元组前缀/contains/uniqueItems、条件/依赖/unevaluated 约束、content 注解、读写标志）。如果一个合法的可选 schema 完全无法表示（远程/递归引用、布尔/元组/多类型形式、根位置无类型），则移除整个根 schema：被移除的输出 schema 保留 application/json MIME 模式，被移除的函数 schema 保留函数名与描述。
 
@@ -217,7 +217,7 @@ Chat Completions 的 `web_search_options` 对所请求的模型应用同样的�
 | `temperature`、`top_p`、`top_k`、`stop_sequences` | `temperature`、`topP`、`topK`、`stopSequences` |
 | `thinking`：`enabled`、`adaptive` | 返回思考块。`display` 为默认的 `summarized` 时 `includeThoughts: true`；为 `omitted` 或 `updates` 时不返回思考文本 |
 | `thinking`：`disabled`、`between_tools` 或省略 | `includeThoughts: false` |
-| `output_config.effort`：`low`、`medium`、`high`、`xhigh`、`max` | `thinkingLevel`：`LOW`、`MEDIUM`、`HIGH`、`HIGH`、`HIGH`；未提供时按模型默认等级 |
+| `output_config.effort`：`low`、`medium`、`high`、`xhigh`、`max` | `thinkingLevel`：`LOW`、`MEDIUM`、`HIGH`；`xhigh` 与 `max` 在 `gemini-4-hydrogen*` / `gemini-4-neon*` 上为 `XHIGH`，其他模型为 `HIGH`；未提供时按模型默认等级 |
 | `output_config.format` 或 `output_format`（`json_schema`） | `responseMimeType: application/json` 与 `responseSchema` |
 | `tools`：自定义工具（`name`、`description`、`input_schema`） | `functionDeclarations`，`input_schema` 经过 [JSON Schema](#json-schema) 适配 |
 | `tool_choice`：`auto`、`none` | 默认、`NONE` |

@@ -125,6 +125,22 @@ TEST_CASE("Claude Code's default request shape is accepted without the compatibi
         copy["output_config"] = json::object{{"effort", effort}};
         CHECK(anthropic_to_gemini(copy, false).gemini.at("generationConfig").at("thinkingConfig").at("thinkingLevel") == level);
     }
+    config.model_aliases["opus"] = "models/gemini-4-hydrogen-search";
+    for (auto model_id : {"gemini-4-hydrogen", "gemini-4-neon", "opus"}) {
+        for (auto effort : {"xhigh", "max"}) {
+            auto copy = input;
+            copy["model"] = model_id;
+            copy["output_config"] = json::object{{"effort", effort}};
+            auto xhigh_lowered = anthropic_to_gemini(copy, false, false, config);
+            CHECK(xhigh_lowered.gemini.at("generationConfig").at("thinkingConfig").at("thinkingLevel") == "XHIGH");
+            auto normalized = normalize_gemini(xhigh_lowered.model, xhigh_lowered.gemini, true, config);
+            CHECK(encode_request(normalized, {}, "s")[3].as_array()[16].as_array()[3] == 6);
+        }
+    }
+    auto argon = input;
+    argon["model"] = "gemini-4-argon";
+    argon["output_config"] = json::object{{"effort", "xhigh"}};
+    CHECK(anthropic_to_gemini(argon, false, false, config).gemini.at("generationConfig").at("thinkingConfig").at("thinkingLevel") == "HIGH");
     auto summarized = input;
     summarized["thinking"] = json::object{{"type", "adaptive"}};
     CHECK(anthropic_to_gemini(summarized, false).gemini.at("generationConfig").at("thinkingConfig").at("includeThoughts") == true);
@@ -272,6 +288,10 @@ TEST_CASE("Mid-conversation system messages place text and change tools in order
         {"text":"note"},{"text":"more"},{"text":"last"}]})");
     CHECK(parts_of(lowered.gemini, 2) == expected.at("p"));
     CHECK(lowered.gemini.at("generationConfig").at("thinkingConfig").at("thinkingLevel") == "LOW");
+    auto neon_turn = input;
+    neon_turn["model"] = "gemini-4-neon";
+    neon_turn.at("messages").as_array().back().as_object()["output_config"] = json::object{{"effort", "xhigh"}};
+    CHECK(anthropic_to_gemini(neon_turn, false).gemini.at("generationConfig").at("thinkingConfig").at("thinkingLevel") == "XHIGH");
     auto unknown = input;
     unknown.at("messages").as_array()[3].as_object()["content"] =
         parse(R"({"c":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"Z"}}]})").at("c");

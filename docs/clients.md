@@ -88,7 +88,7 @@ claude
 - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` 关闭遥测、自动更新等非必要请求，减少排队。
 - 这些变量也可以写进 Claude Code 设置文件（如 `~/.claude/settings.json`）的 `env` 字段。
 
-支持的功能：工具调用与工具结果、思考签名往返、图片和 PDF 输入、`/effort` 调整思考等级（`low`、`medium`、`high` 对应 Gemini 的 `LOW`、`MEDIUM`、`HIGH`，更高的档位都按 `HIGH`），以及本地计数的 `count_tokens`。
+支持的功能：工具调用与工具结果、思考签名往返、图片和 PDF 输入、`/effort` 调整思考等级（`low`、`medium`、`high` 对应 Gemini 的 `LOW`、`MEDIUM`、`HIGH`；`xhigh` 与 `max` 在 `gemini-4-hydrogen` / `gemini-4-neon` 上对应 `XHIGH`，其他模型按 `HIGH`），以及本地计数的 `count_tokens`。
 
 注意事项：
 
@@ -132,7 +132,7 @@ curl "http://127.0.0.1:18451/v1beta/models/gemini-3.1-flash-lite:streamGenerateC
 
 ## 思考与签名
 
-- Gemini 的 `thinkingLevel` 可用（不区分大小写）；未指定时使用官方文档中的模型默认等级（如 Gemini 4 为 `MEDIUM`），未列出的文本模型默认 `HIGH`，图片模型默认 `MINIMAL`。Gemini 4 不支持 `MINIMAL`。
+- Gemini 的 `thinkingLevel` 可用（不区分大小写，含 `gemini-4-hydrogen` / `gemini-4-neon` 支持的 `XHIGH`）；未指定时使用官方文档中的模型默认等级（如 `gemini-4-hydrogen` / `gemini-4-neon` 为 `HIGH`，其他 Gemini 4 为 `MEDIUM`），未列出的文本模型默认 `HIGH`，图片模型默认 `MINIMAL`。Gemini 4 不支持 `MINIMAL`。
 - 原生 Gemini 接口与官方一致，只有 `includeThoughts: true` 时才返回思考文本；未设置或为 `false` 时在网关隐藏，但模型仍会思考，签名、函数调用和 usage 保留。
 - `thinkingBudget` 与 `seed` 为兼容客户端而接受，但**不会生效**；`thinkingBudget: 0` 也不会关闭思考。例外：Gemini 4 上单独的 `thinkingBudget: 0` 映射为 `LOW`，与 `thinkingLevel` 同时提供时报错。
 - Gemini 4 每次最多输出 32,768 token（含思考），不支持官方的续写（`continuationToken`）；更大的输出上限会被压到 32768，超长回答以 `MAX_TOKENS` / `length` 截断。

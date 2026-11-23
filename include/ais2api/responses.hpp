@@ -6,7 +6,7 @@
 #pragma once
 #include "protocol.hpp"
 namespace ais2api {
-void discard_unsupported_responses(json::object &input, json::array &ignored);
+void discard_unsupported_responses(json::object &input, json::array &ignored, const Config &config = {});
 json::object responses_to_chat(const json::object &input);
 json::object responses_options(const json::object &input);
 json::object responses_response(const json::object &gemini, std::string_view model,
