@@ -12,7 +12,7 @@
 
 新创建的配置（执行 `init`，或首次启动时没有配置文件）使用默认管理密码 `admin`，并受以下限制：
 
-- 只接受来自回环、RFC 1918 私有地址、链路本地和 IPv6 ULA 的连接；其他来源返回 `403 admin_default_password_remote`。
+- 只接受来自回环、RFC 1918 私有地址、链路本地和 IPv6 ULA 的直连请求，且 `Host` 必须为 `localhost`、上述本地字面 IP 或显式非通配符监听地址（携带 `X-Forwarded-For`、`Forwarded`、`X-Real-IP` 的转发请求也会被拒绝）；其他来源返回 `403 admin_default_password_remote`。
 - 除 `GET /auth/check` 与 `POST /auth/password` 外，所有路由都返回 `403 admin_password_change_required`。`GET /auth/check` 会返回 `password_change_required`。
 
 使用 `POST /auth/password` 提交 `{"password": "..."}` 修改密码：新密码为 8–4096 个可见 ASCII 字符，不能是 `admin`，也不能与当前值相同（否则返回 `400 admin_password_invalid`）。修改立即生效并写入 `config.json`，旧密码立刻失效；即使存在待重启的配置也一样。
@@ -27,7 +27,7 @@
 
 ### 跨域访问
 
-`admin_origins` 是允许访问的精确 HTTP(S) 来源数组，例如 `http://localhost:5173`。默认为空，只允许同源。来源不能包含路径、查询、片段、凭据或通配符。CORS 预检支持 `Authorization`、`Content-Type` 与 `Last-Event-ID`。来源检查是 Bearer 鉴权之外的附加限制。
+`admin_origins` 是允许跨源访问的精确 HTTP(S) 来源数组，例如 `http://localhost:5173`。默认为空，此时只允许同源请求（含公网 IP、域名或 HTTP(S) 同源反向代理下的内置控制台访问），且仅对 `admin_origins` 中列出的跨源来源下发 `Access-Control-Allow-Origin`。来源不能包含路径、查询、片段、凭据或通配符。CORS 预检支持 `Authorization`、`Content-Type` 与 `Last-Event-ID`。来源检查是 Bearer 鉴权之外的附加限制。
 
 ```sh
 export AIS2API_ADMIN_KEY='your-admin-key'

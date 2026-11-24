@@ -499,31 +499,55 @@ TEST_CASE("management HTTP reports the CMake project version", "[http][admin]") 
     REQUIRE(report.result_int() == 200);
     CHECK(string_or(object(report), "version") == expected);
 }
-TEST_CASE("management origin blocks DNS rebinding and default password rejects forwarding headers",
+TEST_CASE("management origin allows same-origin deployments and blocks cross-origin or default-key rebinding",
           "[http][admin][security]") {
     AdminServer server;
     const auto port_str = std::to_string(server.config.port);
-    for (const auto& bad_host : {std::string("evil.example:") + port_str,
-                                 std::string("evil.example"),
-                                 std::string("localhost:99999"),
+
+    for (const auto& bad_host : {std::string("localhost:99999"),
                                  std::string("[127.0.0.1]:") + port_str,
                                  std::string("[::1]junk")}) {
-        auto res = server.call(http::verb::get, "/api/admin/v1/status", {}, server.admin,
-                               "http://" + bad_host, bad_host);
+        auto res = server.call(http::verb::post, "/api/admin/v1/config/validate", "{}",
+                               server.admin, "http://" + bad_host, bad_host);
         INFO(bad_host);
         CHECK(res.result_int() == 403);
         CHECK(res.body().find("admin_origin") != std::string::npos);
     }
     for (const auto& ok_host : {std::string("127.0.0.1:") + port_str,
                                 std::string("LOCALHOST:") + port_str,
-                                std::string("[::1]:") + port_str}) {
-        auto res = server.call(http::verb::get, "/api/admin/v1/status", {}, server.admin,
-                               "http://" + ok_host, ok_host);
+                                std::string("[::1]:") + port_str,
+                                std::string("203.0.113.10:") + port_str,
+                                std::string("100.88.1.2:") + port_str,
+                                std::string("console.example:") + port_str}) {
+        auto res = server.call(http::verb::post, "/api/admin/v1/config/validate", "{}",
+                               server.admin, "http://" + ok_host, ok_host);
         INFO(ok_host);
         CHECK(res.result_int() == 200);
+        CHECK(res[http::field::access_control_allow_origin].empty());
     }
-    CHECK(server.call(http::verb::get, "/api/admin/v1/status", {}, server.admin,
-                      "https://allowed.example", "evil.example").result_int() == 200);
+    CHECK(server.call(http::verb::post, "/api/admin/v1/config/validate", "{}", server.admin,
+                      "http://console.example:" + port_str, "CONSOLE.EXAMPLE:" + port_str)
+              .result_int() == 200);
+    CHECK(server.call(http::verb::post, "/api/admin/v1/config/validate", "{}", server.admin,
+                      "https://console.example", "console.example")
+              .result_int() == 200);
+    CHECK(server.call(http::verb::post, "/api/admin/v1/config/validate", "{}", server.admin,
+                      "https://console.example", "127.0.0.1:" + port_str,
+                      {{"Sec-Fetch-Site", "same-origin"}})
+              .result_int() == 200);
+    CHECK(server.call(http::verb::post, "/api/admin/v1/config/validate", "{}", server.admin,
+                      "http://console.example", "console.example",
+                      {{"Sec-Fetch-Site", "cross-site"}})
+              .result_int() == 403);
+    CHECK(server.call(http::verb::post, "/api/admin/v1/config/validate", "{}", server.admin,
+                      "http://console.example:8080", "127.0.0.1:" + port_str,
+                      {{"Sec-Fetch-Site", "same-site"}})
+              .result_int() == 403);
+    auto cors_ok = server.call(http::verb::get, "/api/admin/v1/status", {}, server.admin,
+                               "https://allowed.example", "console.example",
+                               {{"Sec-Fetch-Site", "cross-site"}});
+    CHECK(cors_ok.result_int() == 200);
+    CHECK(cors_ok[http::field::access_control_allow_origin] == "https://allowed.example");
 
     const std::string short_patch = R"({"admin_key":"short"})";
     auto short_res = server.call(http::verb::patch, "/api/admin/v1/config", short_patch, server.admin);
@@ -534,6 +558,23 @@ TEST_CASE("management origin blocks DNS rebinding and default password rejects f
     atomic_write(server.config.config_file, json::serialize(server.config.to_json(true)), true);
     local_call(server.config, {{"command", "config.reload"}});
     const std::string initial(default_admin_key);
+    const std::string pw_body = R"({"password":"new-strong-password"})";
+    CHECK(server.call(http::verb::get, "/api/admin/v1/auth/check", {}, initial).result_int() == 200);
+    for (const auto& rebind_host : {std::string("evil.example:") + port_str,
+                                    std::string("evil.example"),
+                                    std::string("203.0.113.10:") + port_str}) {
+        auto get_rebind = server.call(http::verb::get, "/api/admin/v1/auth/check", {}, initial,
+                                      {}, rebind_host);
+        INFO(rebind_host);
+        CHECK(get_rebind.result_int() == 403);
+        CHECK(get_rebind.body().find("admin_default_password_remote") != std::string::npos);
+
+        auto post_rebind = server.call(http::verb::post, "/api/admin/v1/auth/password", pw_body,
+                                       initial, "http://" + rebind_host, rebind_host,
+                                       {{"Sec-Fetch-Site", "same-origin"}});
+        CHECK(post_rebind.result_int() == 403);
+        CHECK(post_rebind.body().find("admin_origin") != std::string::npos);
+    }
     for (const auto* header : {"X-Forwarded-For", "Forwarded", "X-Real-IP"}) {
         auto forwarded = server.call(http::verb::get, "/api/admin/v1/auth/check", {}, initial,
                                      {}, {}, {{header, "1.2.3.4"}});
@@ -541,7 +582,6 @@ TEST_CASE("management origin blocks DNS rebinding and default password rejects f
         CHECK(forwarded.result_int() == 403);
         CHECK(forwarded.body().find("admin_default_password_remote") != std::string::npos);
     }
-    const std::string pw_body = R"({"password":"new-strong-password"})";
     auto forwarded_pw = server.call(http::verb::post, "/api/admin/v1/auth/password", pw_body, initial,
                                     {}, {}, {{"X-Forwarded-For", "127.0.0.1"}});
     CHECK(forwarded_pw.result_int() == 403);

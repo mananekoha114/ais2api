@@ -1354,34 +1354,56 @@ bool valid_host_port(std::string_view port) {
     }
     return value >= 1 && value <= 65535;
 }
-bool allowed_self_host(const Config& config, std::string_view host) {
+std::optional<std::string_view> parse_host_hostname(std::string_view host) {
     if (host.empty() || host.find_first_of("/?#@\\ \t\r\n") != std::string_view::npos)
-        return false;
+        return std::nullopt;
     for (unsigned char ch : host)
-        if (ch <= 32 || ch >= 127) return false;
-    std::string_view hostname;
+        if (ch <= 32 || ch >= 127) return std::nullopt;
     if (host.front() == '[') {
         const auto end = host.find(']');
-        if (end == std::string_view::npos || end <= 1) return false;
-        hostname = host.substr(1, end - 1);
+        if (end == std::string_view::npos || end <= 1) return std::nullopt;
+        const auto hostname = host.substr(1, end - 1);
         boost::system::error_code ec;
         const auto addr = net::ip::make_address(std::string(hostname), ec);
         if (ec || !addr.is_v6() || hostname.find('%') != std::string_view::npos)
-            return false;
+            return std::nullopt;
         const auto rest = host.substr(end + 1);
         if (!rest.empty() && (rest.front() != ':' || !valid_host_port(rest.substr(1))))
-            return false;
-    } else {
-        if (host.find('[') != std::string_view::npos || host.find(']') != std::string_view::npos)
-            return false;
-        const auto colon = host.find(':');
-        hostname = host.substr(0, colon);
-        if (colon != std::string_view::npos &&
-            (host.find(':', colon + 1) != std::string_view::npos ||
-             !valid_host_port(host.substr(colon + 1))))
-            return false;
-        if (hostname.empty()) return false;
+            return std::nullopt;
+        return hostname;
     }
+    if (host.find('[') != std::string_view::npos || host.find(']') != std::string_view::npos)
+        return std::nullopt;
+    const auto colon = host.find(':');
+    const auto hostname = host.substr(0, colon);
+    if (colon != std::string_view::npos &&
+        (host.find(':', colon + 1) != std::string_view::npos ||
+         !valid_host_port(host.substr(colon + 1))))
+        return std::nullopt;
+    if (hostname.empty()) return std::nullopt;
+    return hostname;
+}
+bool valid_http_origin(std::string_view origin) {
+    if (origin.size() > 8 && ascii_equal(origin.substr(0, 8), "https://"))
+        return parse_host_hostname(origin.substr(8)).has_value();
+    if (origin.size() > 7 && ascii_equal(origin.substr(0, 7), "http://"))
+        return parse_host_hostname(origin.substr(7)).has_value();
+    return false;
+}
+bool same_host_origin(std::string_view origin, std::string_view host, bool allow_https) {
+    if (!parse_host_hostname(host)) return false;
+    if (origin.size() == 7 + host.size() && ascii_equal(origin.substr(0, 7), "http://") &&
+        ascii_equal(origin.substr(7), host))
+        return true;
+    if (allow_https && origin.size() == 8 + host.size() &&
+        ascii_equal(origin.substr(0, 8), "https://") && ascii_equal(origin.substr(8), host))
+        return true;
+    return false;
+}
+bool allowed_self_host(const Config& config, std::string_view host) {
+    const auto parsed = parse_host_hostname(host);
+    if (!parsed) return false;
+    const auto hostname = *parsed;
     if (ascii_equal(hostname, "localhost") || local_network_address(hostname))
         return true;
     boost::system::error_code bind_ec;
@@ -1398,14 +1420,30 @@ void admin_origin(const Config& config, const http::request_header<>& request,
                   ConnectionState& state) {
     auto origin = std::string(request[http::field::origin]);
     if (origin.empty()) return;
-    const auto host = request[http::field::host];
-    bool allowed = request.count(http::field::host) == 1 &&
-                   allowed_self_host(config, std::string_view(host.data(), host.size())) &&
-                   origin == "http://" + std::string(host);
+    bool configured = false;
     for (const auto& value : config.admin_origins)
-        allowed = allowed || (value.is_string() && value.as_string() == origin);
-    if (!allowed) throw Error(403, "admin_origin", "Management origin is not allowed");
-    state.origin = std::move(origin);
+        configured = configured || (value.is_string() && value.as_string() == origin);
+    if (configured) {
+        state.origin = std::move(origin);
+        return;
+    }
+    const bool single_host = request.count(http::field::host) == 1;
+    const auto host = single_host
+        ? std::string_view(request[http::field::host].data(), request[http::field::host].size())
+        : std::string_view{};
+    bool same_origin = false;
+    if (config.admin_key_is_default()) {
+        same_origin = single_host && allowed_self_host(config, host) &&
+                      same_host_origin(origin, host, false);
+    } else if (const auto fetch_site = request["Sec-Fetch-Site"]; !fetch_site.empty()) {
+        same_origin = request.count("Sec-Fetch-Site") == 1 &&
+                      ascii_equal(std::string_view(fetch_site.data(), fetch_site.size()),
+                                  "same-origin") &&
+                      valid_http_origin(origin);
+    } else {
+        same_origin = single_host && same_host_origin(origin, host, true);
+    }
+    if (!same_origin) throw Error(403, "admin_origin", "Management origin is not allowed");
 }
 // Admission limits total live request bytes before reading bodies. Browser/JSON
 // objects have separate bounds, and the scheduler admits one generation at once.
@@ -1443,12 +1481,15 @@ struct Admission {
         bytes = 0;
     }
 };
-void check_default_admin_access(const beast::tcp_stream &stream,
+void check_default_admin_access(const Config &config, const beast::tcp_stream &stream,
                                 const http::request_header<> &request,
                                 std::string_view admin_path) {
     boost::system::error_code peer_error;
     const auto peer = stream.socket().remote_endpoint(peer_error);
+    const auto host = request[http::field::host];
     if (peer_error || !local_network_address(peer.address().to_string()) ||
+        request.count(http::field::host) != 1 ||
+        !allowed_self_host(config, std::string_view(host.data(), host.size())) ||
         request.find("X-Forwarded-For") != request.end() ||
         request.find("Forwarded") != request.end() ||
         request.find("X-Real-IP") != request.end())
@@ -1483,7 +1524,7 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
     auto method = request.method();
     const bool get = method == http::verb::get, post = method == http::verb::post;
     if (cfg.admin_key_is_default())
-        check_default_admin_access(stream, request, path);
+        check_default_admin_access(cfg, stream, request, path);
     auto query = query_parameters(std::string_view(request.target()));
     auto parameter = [&](const char* key, std::string fallback = {}) {
         auto it = query.find(key); return it == query.end() ? fallback : it->second;
@@ -1795,7 +1836,7 @@ void preflight_large_request(const beast::tcp_stream &stream, Service &service, 
             throw Error(401, "admin_authentication", "A valid management Bearer key is required");
         const auto admin_path = std::string_view(path).substr(13);
         if (cfg.admin_key_is_default())
-            check_default_admin_access(stream, head, admin_path);
+            check_default_admin_access(cfg, stream, head, admin_path);
         if (!is_admin_body_route(method, admin_path)) {
             if (method == http::verb::get || method == http::verb::head ||
                 method == http::verb::delete_ || method == http::verb::options)
