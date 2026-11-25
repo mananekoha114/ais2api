@@ -584,7 +584,7 @@ std::shared_ptr<Transfer> HttpSession::Impl::prepare(HttpRequest request, std::c
     curl_easy_setopt(easy, CURLOPT_NOPROXY, "");
     curl_easy_setopt(easy, CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L);
     curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT, 20L);
+    curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT, 30L);
     if (total.count() > 0) curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, static_cast<long>(total.count()));
     if (!options.ca_file.empty()) curl_easy_setopt(easy, CURLOPT_CAINFO, options.ca_file.string().c_str());
     curl_easy_setopt(easy, CURLOPT_ERRORBUFFER, transfer->error);
