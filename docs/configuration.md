@@ -73,8 +73,9 @@
 | `relay_bytes` | 1048576（1 MiB） | 重启 | 浏览器到服务的转发窗口，不能大于 `object_bytes`。 |
 | `queue_size` | 8（1–4096） | 热更新 | 等待中的生成请求数上限，超出返回 `429 queue_full`。 |
 | `queue_seconds` | 30 | 热更新 | 请求最多排队多少秒，超时返回 `504 queue_timeout`。 |
-| `generation_seconds` | 240 | 重启 | 非流式生成的总时限，从首轮请求发出后开始计时，自动续接不重置。 |
-| `stream_idle_seconds` | 240 | 重启 | 流式生成两次收到数据之间的最长间隔；只要数据持续到达，流式请求可以超过 `generation_seconds`。 |
+| `response_header_seconds` | 120（1–4294967295） | 热更新 | 等待上游 `GenerateContent` 返回响应头的最长时间（秒），对 SpiderMonkey 与 Camoufox 均生效，超时返回 `504 upstream_timeout`；保存后对下一次生成请求立即生效。 |
+| `generation_seconds` | 240 | 重启 | 非流式生成的总时限（秒），从首轮收到上游响应头后开始计时（后续续接轮次的响应头等待也受此总时限约束），自动续接与补试不重置，不受 `stream_idle_seconds` 截断；超时返回 `504 generation_timeout`。 |
+| `stream_idle_seconds` | 240 | 重启 | 仅对流式请求生效：收到上游响应头后，两次收到流数据之间的最长间隔（秒）；只要数据持续到达，流式请求可以超过 `response_header_seconds` 与 `generation_seconds`；超时返回 `504 stream_idle_timeout`。 |
 | `max_attempts` | 3（1–16） | 热更新 | 单个请求在没有输出任何内容前的最大尝试次数。 |
 | `max_continuation_retries` | 1（1–16） | 热更新 | 整条回答共用的续接额外补试次数，由 `continuation_retry_enabled` 控制是否启用。 |
 
@@ -105,7 +106,7 @@
 | `tier_quotas` | `AIS2API_TIER_QUOTAS`（JSON） | — |
 | `configured_models` | `AIS2API_CONFIGURED_MODELS`（JSON） | — |
 | `limits` | `AIS2API_LIMITS`（JSON 对象） | — |
-| `limits.*` 各项 | `AIS2API_REQUEST_BYTES`、`AIS2API_OBJECT_BYTES`、`AIS2API_RELAY_BYTES`、`AIS2API_QUEUE_SIZE`、`AIS2API_QUEUE_SECONDS`、`AIS2API_GENERATION_SECONDS`、`AIS2API_STREAM_IDLE_SECONDS`、`AIS2API_MAX_ATTEMPTS` | `--request-bytes`、`--object-bytes`、`--relay-bytes`、`--queue-size`、`--queue-seconds`、`--generation-seconds`、`--stream-idle-seconds`、`--max-attempts` |
+| `limits.*` 各项 | `AIS2API_REQUEST_BYTES`、`AIS2API_OBJECT_BYTES`、`AIS2API_RELAY_BYTES`、`AIS2API_QUEUE_SIZE`、`AIS2API_QUEUE_SECONDS`、`AIS2API_RESPONSE_HEADER_SECONDS`、`AIS2API_GENERATION_SECONDS`、`AIS2API_STREAM_IDLE_SECONDS`、`AIS2API_MAX_ATTEMPTS` | `--request-bytes`、`--object-bytes`、`--relay-bytes`、`--queue-size`、`--queue-seconds`、`--response-header-seconds`、`--generation-seconds`、`--stream-idle-seconds`、`--max-attempts` |
 
 说明：
 

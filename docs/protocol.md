@@ -76,7 +76,7 @@ Gemini 4（`gemini-4*`）的 `maxOutputTokens` 表示整次回答的输出预算
 
 各轮属于同一次客户端调用，正文即时传递，响应 ID 保持一致；只有最终结束原因对客户端可见。正常停止、工具调用完成、内容拦截或总预算耗尽时结束。续接检查点只在本次生成的内存中使用，不进入客户端、日志或请求数据库；记录保留轮次类型与用量。不提供跨请求的手动恢复接口，客户端请求中的 `continuationToken` 仍按未知字段拒绝。
 
-达到单轮上限但总预算尚有余额时，缺少检查点、缺少可信用量、重复检查点或无 token 进展均返回明确错误。仅思考有 token 进展也可以续接。最多执行 32 轮，以限制异常短检查点造成的循环；达到该界限返回 `continuation_limit`。取消、对象大小限制和背压贯穿所有轮次。非流式 `generation_seconds` 从首轮请求发出后开始计时，鉴权与首轮上传不计入，也不因续接或补试重置；长生成可采用流式接口，或明确调整非流式总时限。最后一轮上游报告的输出超过剩余预算时，已经送出的回答照常以上游结束原因结束，网关记录一次 `output_budget_exceeded` 警告日志（含预算与累计输出），不把回答改为错误。
+达到单轮上限但总预算尚有余额时，缺少检查点、缺少可信用量、重复检查点或无 token 进展均返回明确错误。仅思考有 token 进展也可以续接。最多执行 32 轮，以限制异常短检查点造成的循环；达到该界限返回 `continuation_limit`。取消、对象大小限制和背压贯穿所有轮次。每轮等待上游 `GenerateContent` 响应头的时间受 `limits.response_header_seconds`（默认 120 秒，热更新）约束，超时返回 `504 upstream_timeout`；非流式 `limits.generation_seconds` 从首轮收到上游响应头后开始计时（鉴权、首轮上传与首轮等待响应头不计入，但后续续接轮次的响应头等待仍受该总时限约束），不因续接或补试重置，也不受 `limits.stream_idle_seconds` 截断；长生成可采用流式接口（收到响应头后仅受 `limits.stream_idle_seconds` 空闲时限约束），或明确调整非流式总时限。最后一轮上游报告的输出超过剩余预算时，已经送出的回答照常以上游结束原因结束，网关记录一次 `output_budget_exceeded` 警告日志（含预算与累计输出），不把回答改为错误。
 
 内部错误保留原错误，不再根据输出量推测为 `MAX_TOKENS`。续接失败后不换号重写已经开始的回答；无输出前的既有失败重试规则不变，续接不消耗 `max_attempts` 的重试次数。
 
@@ -109,8 +109,29 @@ HTTP 错误体不算生成流；任何生成流字节都排除补试，包括未
 
 - 未知槽位，以及格式异常的非函数载荷（文本、内联数据、代码、执行结果、签名）会被跳过，而不是让整个生成失败。
 - 格式异常的函数调用或函数结果仍以 `invalid_upstream` 失败。
-- 被跳过的位置（如 `part[9]`、`candidate[9]`，不含内容）每个请求记录一次 `upstream_fields_ignored` 日志。
+- 被跳过的位置（如 `part[9]`、`candidate[9]`、`candidate[1]`、`chunk[1]`、`promptFeedback[0]`，不含内容）每个请求记录一次 `upstream_fields_ignored` 日志。
 - 代码部件按 `[languageCode, source]`、执行结果按 `[outcomeCode, output]` 解析，枚举值原样保留。
+
+<a id="prompt-feedback"></a>
+
+### 输入反馈（PromptFeedback）与内容拦截
+
+上游线路帧的最外层索引 `1`（`chunk[1]`）对应 `PromptFeedback` 数组，按以下规则解码：
+
+- `chunk[1][0]`（`block_reason`）：`0` 或 `null` 表示未拦截（不写入 `blockReason`）；`1` → `SAFETY`、`2` → `OTHER`、`3` → `BLOCKLIST`、`4` → `PROHIBITED_CONTENT`、`5` → `IMAGE_SAFETY`；未知正整数（`> 5`）兜底映射为 `OTHER` 并记入 `upstream_fields_ignored`（`promptFeedback[0]`）；负数或非数字记入 `promptFeedback[0]` 且不生成 `blockReason`。
+- `chunk[1][1]`（`safety_ratings`）：非空数组保存为 `promptFeedback.ais2api.wireSafetyRatings`（与候选级的 `candidate.ais2api.wireSafetyRatings` 一致）。
+- `chunk[1][2]`（`block_reason_message`）：非空字符串保存为 `promptFeedback.blockReasonMessage`。
+- 非数组的 `chunk[1]`、类型不符的槽位或索引 `> 2` 的非空槽位均记入 `upstream_fields_ignored`。同一响应多个数据块均带 `promptFeedback` 时逐键合并，避免后续 `blockReason` 覆盖前序帧的 `ais2api` 元数据。
+
+终态判定与四套协议的拦截返回行为：
+
+- **未拦截的 `promptFeedback`**：不含有效 `blockReason`（为空或 `BLOCK_REASON_UNSPECIFIED`，例如只带 `ais2api.wireSafetyRatings`）时原样透传，**不视为终态**；若整条响应也未收到有效的候选 `finishReason`，仍以 `502 incomplete_upstream` 失败。
+- **有效拦截（含 `blockReason`）**：视为上游已给出明确终态，禁止自动续接，**不触发重试，也不惩罚或冷却账号**；四套接口均以 HTTP `200` 返回结构化过滤终态：
+  - **Gemini 原生**（`:generateContent` / `:streamGenerateContent`）：输出 `promptFeedback`（含 `blockReason` 及可选的 `blockReasonMessage`、`ais2api.wireSafetyRatings`，以及可能存在的 `usageMetadata`、`responseId`）。在产生任何候选之前被拦截时省略 `candidates`；流中途已有候选内容后再被拦截时，保留已输出内容，并在终态帧同时提供补全了拦截 `finishReason`（及可选 `finishMessage`）的 `candidates[0]` 与 `promptFeedback`。
+  - **OpenAI Chat Completions**：返回 `finish_reason: "content_filter"`（即使 `blockReason` 为 `OTHER`）。无候选即被拦截时，非流式返回单条空内容选择（`index: 0`、`message: {"role": "assistant", "content": ""}`、`finish_reason: "content_filter"`、`logprobs: null`），流式发出带 `finish_reason: "content_filter"`（及 `ais2api.gemini_delta`）的增量块；流中途被拦截时保留已有内容并以 `finish_reason: "content_filter"` 结束。
+  - **OpenAI Responses**：返回 `status: "incomplete"`、`incomplete_details: {"reason": "content_filter"}`。无候选即被拦截时，非流式 `output` 为 `[]`，流式依次发出 `response.created` → `response.in_progress` → `response.incomplete`；流中途被拦截时将已有输出项标为 `incomplete` 并以 `response.incomplete` 结束。
+  - **Anthropic Messages**：流式与非流式统一以 `stop_reason: "refusal"` 结束；流中途被拦截时保留已输出内容块。
+- **请求历史**：输入级与候选级内容拦截统一记为 `status: "failed"`、`error: "content_filter"`、`attempts[].completed: true`（候选结束原因为空时写入对应拦截枚举名）。
 
 ## JSON Schema
 
@@ -211,7 +232,7 @@ Chat Completions 的 `web_search_options` 对所请求的模型应用同样的�
 
 ### 输出
 
-- 输出包含 content、tool_calls、finish_reason 与 token usage。
+- 输出包含 content、tool_calls、finish_reason 与 token usage；候选或输入级（`promptFeedback`）内容拦截均映射为 `finish_reason: "content_filter"`（详见 [输入反馈与内容拦截](#prompt-feedback)）。
 - 为兼容客户端，消息和 delta 额外提供 `reasoning_content` 与 `thought_signature`。输入的 assistant 消息接受 `reasoning_content`、`thought_signature` 或其别名 `signature`。文本签名成为独立的空文本部件；函数签名保留在对应的 functionCall 上。这些扁平字段无法表示交错的原生部件。
 - 富内容的 assistant 输出同时附带原生 Gemini 内容，以便精确往返；流式 delta 附带归一化后的原生数据块。原生内容与兼容字段同时提供时必须一致。
 - 思考文本不会混入可见 content；图片和代码部件保留在原生扩展中。
@@ -224,7 +245,7 @@ Chat Completions 的 `web_search_options` 对所请求的模型应用同样的�
 
 - 接口是无状态的：客户端提交完整输入历史并保留函数 `call_id`。字符串输入、instructions、消息内容、函数调用与结果、扁平函数声明、兼容的采样/token/推理控制以及非 strict 文本格式都映射到现有编解码器。data URL 图片直接归一化；HTTPS 图片使用与 Chat 相同的受限公网媒体加载器。存储、后台任务、引用和其他内置工具明确报错。
 - reasoning 与 message 输出项可以携带 `ais2api.gemini_content` 和兼容的文本签名。保留这些字段即可重放原生部件；由于 Responses 把推理、可见/原生内容和函数调用分到不同输出项，这种表示不保证原始的跨项部件交错顺序。函数调用 ID 与 Chat 使用同样的签名格式。参数完全相同的重复显式 ID 视为一次调用，参数冲突时报错；无 ID 的调用保留各自的序号。
-- JSON 结果为带类型输出项和 Responses usage 的 Response 对象。命名 SSE 记录的 `event` 与 JSON 的 `type` 一致，带递增的 `sequence_number`；依次输出响应创建/进行中、输出项与内容部件生命周期、文本/推理/函数参数增量事件，最后是 completed 或 incomplete。token 用尽映射为 `incomplete_details.reason=max_output_tokens`，过滤映射为 `content_filter`。中途失败输出 `response.failed`，已发送的内容不会重试。不追加 Chat 的 `[DONE]`。流状态受对象限额约束，超出则响应失败。以上遵循 [OpenAI Responses 事件参考](https://developers.openai.com/api/reference/resources/responses/streaming-events)。
+- JSON 结果为带类型输出项和 Responses usage 的 Response 对象。命名 SSE 记录的 `event` 与 JSON 的 `type` 一致，带递增的 `sequence_number`；依次输出响应创建/进行中、输出项与内容部件生命周期、文本/推理/函数参数增量事件，最后是 completed 或 incomplete。token 用尽映射为 `incomplete_details.reason=max_output_tokens`，过滤（含输入级 `promptFeedback` 拦截）映射为 `content_filter`。中途失败输出 `response.failed`，已发送的内容不会重试。不追加 Chat 的 `[DONE]`。流状态受对象限额约束，超出则响应失败。以上遵循 [OpenAI Responses 事件参考](https://developers.openai.com/api/reference/resources/responses/streaming-events)。
 
 ## Anthropic Messages
 
@@ -284,7 +305,7 @@ Chat Completions 的 `web_search_options` 对所请求的模型应用同样的�
 
 - 非流式返回 message 对象：`id`（`msg_` 开头，与请求记录相同）、`content`、`stop_reason`、`stop_sequence: null`、`usage`。
 - 部件按顺序转换：思考 → `thinking` 块，可见文本 → `text` 块，函数调用 → `tool_use` 块。图片、代码执行等没有对应块的部件被丢弃，数量记录在 `anthropic_parts_dropped` 日志。
-- `stop_reason`：有工具调用为 `tool_use`；`MAX_TOKENS` 为 `max_tokens`；安全、复述等内容拦截为 `refusal`；其他为 `end_turn`。
+- `stop_reason`：有工具调用为 `tool_use`；`MAX_TOKENS` 为 `max_tokens`；安全、复述及输入级 `promptFeedback` 内容拦截为 `refusal`；其他为 `end_turn`。
 - `usage`：`input_tokens` 为输入减去缓存读取，`cache_read_input_tokens` 为缓存读取，`cache_creation_input_tokens` 为 0，`output_tokens` 含思考。
 - 流式输出命名 SSE 事件，`event` 与 JSON 的 `type` 一致：
   - `message_start`；
@@ -354,7 +375,7 @@ OpenAI 流式数据块在 `choices[].delta.ais2api.gemini_delta` 中携带完整
 - 上游帧格式为可选的 `)]}'` XSSI 前缀，后接外层数组，内含若干批响应数据块数组。有界解析器每解析出一个深度为 3 的数据块就输出并丢弃其字节，然后才读取下一个。
 - 网络分块位置、UTF-8 码元、JSON 转义以及包含括号的字符串可以出现在任何位置。无效前缀、无效的数据块 JSON/UTF-8、嵌套过深、数据块过大、外层分隔符错误以及末尾截断都会明确失败。解析器只缓存当前数据块和两个字节的外层状态，不缓存完整响应；只有外层数组完整闭合，`finish()` 才算成功。
 - 聚合按序列化后的字节数设限。思考标志相同的相邻普通文本部件可以拼接；带签名的部件和其他原生载荷保持独立。聚合器按最新 usage 快照替换；续接流程在送入聚合器前，已把已结束轮次的用量与当前轮最新快照相加。大小检查失败时保留之前的聚合结果不变。内容判定忽略响应 ID、usage 和仅含 finish 的元数据，从而区分元数据与第一个可见内容或模型动作。
-- 结束原因覆盖全部已知上游代码。OpenAI 把 token 用尽映射为 `length`，安全/复述拦截映射为 `content_filter`，函数调用完成映射为 `tool_calls`，其他完成映射为 `stop`。内部归一结果中 `candidatesTokenCount` 包含可见输出与思考 token，`thoughtsTokenCount` 单独提供；原生 Gemini 响应按官方口径输出，`candidatesTokenCount` 不含思考 token，为 0 的 `thoughtsTokenCount` 与 `cachedContentTokenCount` 省略。上游结束码按公开 proto 的 `FinishReason` 编号解码，未知编号记为 `FINISH_REASON_UNSPECIFIED`。OpenAI 输出 `reasoning_tokens` 与 `cached_tokens` 明细。HTTP/gRPC 错误分类与重试由运行时和传输层负责，不在编解码器内。
+- 结束原因覆盖全部已知上游代码（含 `18` → `MISSING_THOUGHT_SIGNATURE`、`19` → `MALFORMED_RESPONSE`）。OpenAI 把 token 用尽映射为 `length`，安全/复述及输入级 `promptFeedback` 拦截映射为 `content_filter`，函数调用完成映射为 `tool_calls`，其他完成映射为 `stop`。内部归一结果中 `candidatesTokenCount` 包含可见输出与思考 token，`thoughtsTokenCount` 单独提供；原生 Gemini 响应按官方口径输出，`candidatesTokenCount` 不含思考 token，为 0 的 `thoughtsTokenCount` 与 `cachedContentTokenCount` 省略。上游结束码按公开 proto 的 `FinishReason` 编号解码：`0` 为 `FINISH_REASON_UNSPECIFIED`，未知正整数（`>= 20`）兜底映射为 `OTHER` 并在 `upstream_fields_ignored` 中记录 `candidate[1]`，负数或非法值记录 `candidate[1]` 且不产生有效 `finishReason`。OpenAI 输出 `reasoning_tokens` 与 `cached_tokens` 明细。HTTP/gRPC 错误分类与重试由运行时和传输层负责，不在编解码器内。
 
 ## HTTP 细节
 
@@ -380,7 +401,7 @@ OpenAI 流式数据块在 `choices[].delta.ais2api.gemini_delta` 中携带完整
 
 价格取自 Google 官方价格页 Standard 付费档的文本 token 单价（输入、含思考的输出、缓存读取），按解析别名和 search 后缀后的真实模型精确匹配；页面上公布的调价（如“through … / starting …”）按请求时的 UTC 日期选用对应价格。音频、图片输出、按次搜索、存储等其他维度不在目录中。单价以皮美元/token、金额以纳美元保存，每个分项四舍五入到纳美元再相加；上下文阶梯按单次尝试的完整输入量判断。执行时选定的来源、获取时间、单价和金额随请求保存，后续更新不改写历史费用。需要独立计费的搜索、非文本模态或其他无法可靠还原的维度保持未完整计价；估算不是实际账单。
 
-主请求数归属最终执行账号，已确认用量按各尝试的执行账号归集。完整费用字段只计全部尝试均完整计价的请求；已知小计另行纳入所有已确认尝试的金额，并按实际尝试账号归集，所以账号用量行可能有消耗而没有最终归属请求。`PROHIBITED_CONTENT` 等内容拦截属于生成失败，传输完成和收到上游终态不改变失败分类；已返回的正文与可确认用量仍保留。Chat Completions 使用 `content_filter`，Gemini 保留原始 `finishReason`，Responses 使用 `incomplete` / `response.incomplete`。明细到期后保留累计，旧统计单列原口径，详见[管理 API](management-api.md#请求记录与估算费用)。
+主请求数归属最终执行账号，已确认用量按各尝试的执行账号归集。完整费用字段只计全部尝试均完整计价的请求；已知小计另行纳入所有已确认尝试的金额，并按实际尝试账号归集，所以账号用量行可能有消耗而没有最终归属请求。`PROHIBITED_CONTENT` 等候选级内容拦截与输入级 `promptFeedback` 拦截均属于生成失败（`status: "failed"`、`error: "content_filter"`），不触发重试也不冷却账号，传输完成和收到上游终态不改变失败分类；已返回的正文与可确认用量仍保留。Chat Completions 使用 `content_filter`，Gemini 保留原始 `finishReason` / `promptFeedback`（无候选时省略 `candidates`），Responses 使用 `incomplete` / `response.incomplete`（`reason: "content_filter"`），Anthropic Messages 使用 `stop_reason: "refusal"`。明细到期后保留累计，旧统计单列原口径，详见[管理 API](management-api.md#请求记录与估算费用)。
 
 ## 验证范围
 
