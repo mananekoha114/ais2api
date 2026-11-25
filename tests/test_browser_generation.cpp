@@ -6,6 +6,8 @@
 #include "browser_generation_fixture.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 
 using namespace ais2api;
@@ -399,4 +401,229 @@ TEST_CASE("Continuation retry honors a longer Retry-After without changing the b
     REQUIRE(script.sent_at.size() == 3);
     CHECK(script.sent_at[2] - script.sent_at[1] >= 2900ms);
     CHECK(script.bodies[1] == script.bodies[2]);
+}
+
+TEST_CASE("Response header timeout bounds header wait independently of body deadlines",
+          "[browser][timeout]") {
+    const auto waiting = [] {
+        return json::object{{"pending", nullptr},
+                            {"done", false},
+                            {"status", 0},
+                            {"error", ""},
+                            {"benefitTier", "pro"}};
+    };
+    const auto headers_only = [] {
+        return json::object{{"pending", nullptr},
+                            {"done", false},
+                            {"status", 200},
+                            {"error", ""},
+                            {"benefitTier", "pro"}};
+    };
+    const auto finished_chunk = gf::stream(gf::reply("ok", 2, 1));
+
+    SECTION("delayed headers within response_header_seconds succeed") {
+        for (bool streaming : {false, true}) {
+            INFO("streaming=" << streaming);
+            gf::Script script;
+            script.attempts = {{waiting(), waiting(), gf::pending(finished_chunk), gf::done()}};
+            script.before_next = [](std::size_t, std::size_t pos) {
+                if (pos < 2)
+                    std::this_thread::sleep_for(150ms);
+            };
+            Limits limits;
+            limits.response_header_seconds = 2;
+            std::vector<GenerationEvent> events;
+            CHECK(run(script, request(streaming), events, limits).empty());
+        }
+    }
+
+    SECTION("delayed headers exceeding response_header_seconds fail with upstream_timeout") {
+        for (bool streaming : {false, true}) {
+            INFO("streaming=" << streaming);
+            const auto r = request(streaming);
+            Limits limits;
+            limits.response_header_seconds = 1;
+            limits.generation_seconds = 10;
+            limits.stream_idle_seconds = 10;
+            browser_detail::GenerationIO io;
+            io.encode = [&](std::string_view checkpoint) {
+                return json::serialize(
+                    encode_request(r, {}, "!synthetic-snapshot", "UTC", checkpoint));
+            };
+            io.start = [](std::string_view, const std::function<void()> &check) { check(); };
+            io.next = [&](std::uint64_t) -> json::value {
+                std::this_thread::sleep_for(250ms);
+                return waiting();
+            };
+            int status = 0;
+            std::string code;
+            try {
+                browser_detail::run_generation(r, limits, true, io, [](GenerationEvent) {}, {});
+            } catch (const Error &error) {
+                status = error.status;
+                code = error.code;
+            }
+            CHECK(status == 504);
+            CHECK(code == "upstream_timeout");
+        }
+    }
+
+    SECTION("body duration exceeding response_header_seconds succeeds for unary and stream") {
+        for (bool streaming : {false, true}) {
+            INFO("streaming=" << streaming);
+            const auto part1 =
+                std::string(")]}'\n[[") + json::serialize(gf::reply("part1 ", 2, 0)) + ",";
+            const auto part2 = json::serialize(gf::reply("part2", 2, 1)) + "]]";
+            gf::Script script;
+            script.attempts = {{headers_only(), gf::pending(part1, 1), gf::pending(part2, 2),
+                                gf::done()}};
+            script.before_next = [](std::size_t, std::size_t pos) {
+                if (pos == 1 || pos == 2)
+                    std::this_thread::sleep_for(700ms);
+            };
+            Limits limits;
+            limits.response_header_seconds = 1;
+            limits.generation_seconds = 5;
+            limits.stream_idle_seconds = 5;
+            std::vector<GenerationEvent> events;
+            CHECK(run(script, request(streaming), events, limits).empty());
+        }
+    }
+
+    SECTION("unary requests are governed by generation_seconds and ignore smaller stream_idle_seconds") {
+        gf::Script script;
+        script.attempts = {{headers_only(), gf::pending(finished_chunk, 1), gf::done()}};
+        script.before_next = [](std::size_t, std::size_t pos) {
+            if (pos == 1)
+                std::this_thread::sleep_for(1300ms);
+        };
+        Limits limits;
+        limits.response_header_seconds = 5;
+        limits.stream_idle_seconds = 1;
+        limits.generation_seconds = 5;
+        std::vector<GenerationEvent> events;
+        CHECK(run(script, request(false), events, limits).empty());
+
+        gf::Script too_slow;
+        too_slow.attempts = {{headers_only(), headers_only(), headers_only(), headers_only(),
+                              headers_only(), headers_only(), gf::pending(finished_chunk, 1),
+                              gf::done()}};
+        too_slow.before_next = [](std::size_t, std::size_t pos) {
+            if (pos > 0)
+                std::this_thread::sleep_for(250ms);
+        };
+        limits.generation_seconds = 1;
+        limits.stream_idle_seconds = 10;
+        events.clear();
+        CHECK(run(too_slow, request(false), events, limits) == "generation_timeout");
+    }
+
+    SECTION("streaming requests still enforce stream_idle_seconds after headers arrive") {
+        const auto r = request(true);
+        Limits limits;
+        limits.response_header_seconds = 5;
+        limits.stream_idle_seconds = 1;
+        limits.generation_seconds = 10;
+        bool sent_headers = false;
+        browser_detail::GenerationIO io;
+        io.encode = [&](std::string_view checkpoint) {
+            return json::serialize(
+                encode_request(r, {}, "!synthetic-snapshot", "UTC", checkpoint));
+        };
+        io.start = [](std::string_view, const std::function<void()> &check) { check(); };
+        io.next = [&](std::uint64_t) -> json::value {
+            if (!sent_headers) {
+                sent_headers = true;
+                return headers_only();
+            }
+            std::this_thread::sleep_for(250ms);
+            return headers_only();
+        };
+        int status = 0;
+        std::string code;
+        try {
+            browser_detail::run_generation(r, limits, true, io, [](GenerationEvent) {}, {});
+        } catch (const Error &error) {
+            status = error.status;
+            code = error.code;
+        }
+        CHECK(status == 504);
+        CHECK(code == "stream_idle_timeout");
+    }
+
+    SECTION("cancellation during header wait ends promptly with 499 cancelled") {
+        for (bool streaming : {false, true}) {
+            INFO("streaming=" << streaming);
+            const auto r = request(streaming);
+            Limits limits;
+            limits.response_header_seconds = 10;
+            std::stop_source stop;
+            browser_detail::GenerationIO io;
+            io.encode = [&](std::string_view checkpoint) {
+                return json::serialize(
+                    encode_request(r, {}, "!synthetic-snapshot", "UTC", checkpoint));
+            };
+            io.start = [](std::string_view, const std::function<void()> &check) { check(); };
+            io.next = [&](std::uint64_t) -> json::value {
+                std::mutex wait_mutex;
+                std::condition_variable_any wake;
+                std::unique_lock lock(wait_mutex);
+                wake.wait_for(lock, stop.get_token(), 250ms, [] { return false; });
+                return waiting();
+            };
+            std::jthread canceller([&] {
+                std::this_thread::sleep_for(100ms);
+                stop.request_stop();
+            });
+            const auto started = Clock::now();
+            int status = 0;
+            std::string code;
+            try {
+                browser_detail::run_generation(r, limits, true, io, [](GenerationEvent) {},
+                                               stop.get_token());
+            } catch (const Error &error) {
+                status = error.status;
+                code = error.code;
+            }
+            CHECK(status == 499);
+            CHECK(code == "cancelled");
+            CHECK(Clock::now() - started < 1s);
+        }
+    }
+
+    SECTION("later round header wait still enforces an already-started unary generation deadline") {
+        const auto r = request(false);
+        Limits limits;
+        limits.response_header_seconds = 5;
+        limits.generation_seconds = 1;
+        std::size_t round = 0;
+        std::size_t pos = 0;
+        const auto first_round = gf::first();
+        browser_detail::GenerationIO io;
+        io.encode = [&](std::string_view checkpoint) {
+            return json::serialize(
+                encode_request(r, {}, "!synthetic-snapshot", "UTC", checkpoint));
+        };
+        io.start = [&](std::string_view, const std::function<void()> &check) {
+            check();
+            ++round;
+            pos = 0;
+        };
+        io.next = [&](std::uint64_t) -> json::value {
+            if (round == 1)
+                return first_round.at(pos++);
+            std::this_thread::sleep_for(250ms);
+            return waiting();
+        };
+        int status = 0;
+        std::string code;
+        try {
+            browser_detail::run_generation(r, limits, true, io, [](GenerationEvent) {}, {});
+        } catch (const Error &error) {
+            status = error.status;
+            code = error.code;
+        }
+        CHECK(status == 504);
+        CHECK(code == "generation_timeout");
+    }
 }

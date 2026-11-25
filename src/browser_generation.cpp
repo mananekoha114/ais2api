@@ -64,9 +64,10 @@ void run_generation(const Request &request, const Limits &limits, bool retry_ena
         auto body = io.encode(continuation.token());
         std::optional<Clock::time_point> activity;
         const auto idle = std::chrono::seconds(limits.stream_idle_seconds);
+        const auto header_timeout = std::chrono::seconds(limits.response_header_seconds);
         const auto check = [&] {
             continuation.check();
-            if (activity && Clock::now() - *activity > idle)
+            if (request.stream && activity && Clock::now() - *activity > idle)
                 throw Error(504, "stream_idle_timeout",
                             "No upstream stream bytes before idle deadline");
         };
@@ -81,22 +82,40 @@ void run_generation(const Request &request, const Limits &limits, bool retry_ena
                 constexpr std::size_t error_prefix_limit = 16384;
                 std::optional<Error> parse_failure;
                 io.start(body, check);
-                // Authorization and the first upload do not consume the unary
-                // total; later rounds and retries keep this one deadline.
-                if (!deadline) {
-                    deadline = Clock::now() + std::chrono::seconds(limits.generation_seconds);
-                    continuation.start_deadline(*deadline);
-                }
-                if (!activity)
-                    activity = Clock::now();
+                const auto header_deadline = Clock::now() + header_timeout;
+                bool headers_received = false;
                 for (;;) {
-                    check();
+                    if (headers_received) {
+                        check();
+                    } else {
+                        continuation.check();
+                        if (Clock::now() > header_deadline)
+                            throw Error(504, "upstream_timeout", "Google did not answer in time");
+                    }
                     auto value = io.next(unacknowledged);
                     unacknowledged = 0;
                     check_cancel(cancel);
                     if (!value.is_object())
                         incompatible("Browser relay state was lost");
                     const auto &state = value.as_object();
+                    const auto status_value = state.if_contains("status");
+                    const auto status =
+                        status_value && status_value->is_int64() ? status_value->as_int64() : 0;
+                    const auto pending = state.if_contains("pending");
+                    const bool has_pending = pending && pending->is_object();
+                    const bool is_done = bool_or(state, "done");
+                    if (!headers_received && (status > 0 || has_pending || is_done)) {
+                        headers_received = true;
+                        // Authorization, upload and waiting for response headers
+                        // do not consume the unary total; later rounds and
+                        // retries keep this one deadline.
+                        if (!request.stream && !deadline) {
+                            deadline = Clock::now() + std::chrono::seconds(limits.generation_seconds);
+                            continuation.start_deadline(*deadline);
+                        }
+                        if (request.stream)
+                            activity = Clock::now();
+                    }
                     auto classified = [&](Error error) {
                         if (error.status == 403 && !known_benefit(state))
                             error.code = "benefit_tier_unconfirmed";
@@ -108,8 +127,7 @@ void run_generation(const Request &request, const Limits &limits, bool retry_ena
                             ? static_cast<unsigned>(
                                   std::min<std::int64_t>(86400, retry_value->as_int64()))
                             : 0u;
-                    const auto pending = state.if_contains("pending");
-                    if (pending && pending->is_object()) {
+                    if (has_pending) {
                         // Any stream bytes forbid replay, so a large input no
                         // longer needs to stay resident for the rest of the round.
                         if (!received_bytes)
@@ -150,12 +168,10 @@ void run_generation(const Request &request, const Limits &limits, bool retry_ena
                         // The sink has consumed the event before the next read
                         // acknowledges this credit and permits another chunk.
                         unacknowledged = ++sequence;
-                        activity = Clock::now();
-                    } else if (bool_or(state, "done")) {
+                        if (request.stream)
+                            activity = Clock::now();
+                    } else if (is_done) {
                         const auto error = string_or(state, "error");
-                        const auto status_value = state.if_contains("status");
-                        const auto status =
-                            status_value && status_value->is_int64() ? status_value->as_int64() : 0;
                         if (status == 204)
                             throw Error(502, "upstream_no_content",
                                         "Google returned an empty response");
@@ -190,7 +206,8 @@ void run_generation(const Request &request, const Limits &limits, bool retry_ena
                 continuation.check();
                 const auto delay = std::max(2s, std::chrono::seconds(error.retry_after));
                 const auto ready = Clock::now() + delay;
-                if (ready >= *activity + idle || (!request.stream && ready >= *deadline))
+                if ((request.stream && activity && ready >= *activity + idle) ||
+                    (!request.stream && deadline && ready >= *deadline))
                     throw;
                 ++retries;
                 sink(GenerationEvent(GenerationEvent::Kind::continuation_failed,

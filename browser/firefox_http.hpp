@@ -71,6 +71,10 @@ struct HttpResponse {
 class HttpExchange {
   public:
     virtual ~HttpExchange() = default;
+    // Waits up to `wait` for the response's headers to arrive. Returns true
+    // once status() and headers() are ready, or false when they have not
+    // arrived yet. Throws on transport failure or cancellation.
+    virtual bool poll_headers(std::chrono::milliseconds wait, std::stop_token cancel = {}) = 0;
     virtual long status() const = 0;
     virtual const HttpHeaders &headers() const = 0;
     // The next bytes of the body, at most `limit`: nothing when none arrived
@@ -97,6 +101,10 @@ class HttpSession {
     HttpSession(const HttpSession &) = delete;
     HttpSession &operator=(const HttpSession &) = delete;
 
+    // Sends the request without waiting for the response's headers. Call
+    // poll_headers() until it returns true before inspecting status(),
+    // headers(), or calling read().
+    std::unique_ptr<HttpExchange> start(HttpRequest request, std::stop_token cancel = {});
     // Sends the request and returns once the response's headers arrived.
     std::unique_ptr<HttpExchange> open(HttpRequest request, std::stop_token cancel = {},
                                        std::chrono::milliseconds timeout = std::chrono::seconds(60));

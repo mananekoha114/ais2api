@@ -925,6 +925,7 @@ void SpiderMonkeyGateway::Impl::send(const Request &request, const Account &acco
     struct Transfer {
         std::unique_ptr<browser_detail::HttpExchange> exchange;
         std::uint64_t sequence = 0;
+        bool headers_ready = false;
         bool done = false;
         long status = 0;
         unsigned retry_after = 0;
@@ -958,31 +959,40 @@ void SpiderMonkeyGateway::Impl::send(const Request &request, const Account &acco
         HttpRequest upload{"POST", std::string(maker_suite) + "GenerateContent", sm::rpc_headers(headers, context), std::string(body)};
         check();
         phase = "generation_start";
-        transfer.exchange = http->open(std::move(upload), cancel, 60s);
-        // Run turned into Stop; Rerun removed the last turn.
-        if (auto *answered = std::exchange(clicked, nullptr)) {
-            answered->replaced();
-            answering = answered;
-        }
-        transfer.status = transfer.exchange->status();
-        transfer.retry_after = retry_after(transfer.exchange->headers());
-        if (transfer.status < 200 || transfer.status >= 300) {
-            // At most 8 KiB, for classification only.
-            const auto deadline = Clock::now() + 5s;
-            while (transfer.error_body.size() < 8192 && Clock::now() < deadline) {
-                const auto bytes = transfer.exchange->read(8192 - transfer.error_body.size(), 250ms, cancel);
-                if (!bytes) continue;
-                if (bytes->empty()) break;
-                transfer.error_body += *bytes;
-            }
-            transfer.exchange.reset();
-            close_answer();
-            transfer.error = "upstream_http_" + std::to_string(transfer.status);
-            transfer.done = true;
-        }
-        phase = "generation_read";
+        transfer.exchange = http->start(std::move(upload), cancel);
     };
     io.next = [&](std::uint64_t) -> json::value {
+        if (!transfer.done && transfer.exchange && !transfer.headers_ready) {
+            if (!transfer.exchange->poll_headers(250ms, cancel)) {
+                return sm::relay_state({.done = false,
+                                        .status = 0,
+                                        .retry_after = 0,
+                                        .benefit = transfer.benefit});
+            }
+            transfer.headers_ready = true;
+            // Run turned into Stop; Rerun removed the last turn.
+            if (auto *answered = std::exchange(clicked, nullptr)) {
+                answered->replaced();
+                answering = answered;
+            }
+            transfer.status = transfer.exchange->status();
+            transfer.retry_after = retry_after(transfer.exchange->headers());
+            if (transfer.status < 200 || transfer.status >= 300) {
+                // At most 8 KiB, for classification only.
+                const auto deadline = Clock::now() + 5s;
+                while (transfer.error_body.size() < 8192 && Clock::now() < deadline) {
+                    const auto bytes = transfer.exchange->read(8192 - transfer.error_body.size(), 250ms, cancel);
+                    if (!bytes) continue;
+                    if (bytes->empty()) break;
+                    transfer.error_body += *bytes;
+                }
+                transfer.exchange.reset();
+                close_answer();
+                transfer.error = "upstream_http_" + std::to_string(transfer.status);
+                transfer.done = true;
+            }
+            phase = "generation_read";
+        }
         auto state = sm::relay_state({.done = transfer.done,
                                       .status = transfer.status,
                                       .retry_after = transfer.retry_after,
@@ -1108,6 +1118,7 @@ void SpiderMonkeyGateway::reconfigure(const Config &config) {
     impl_->config.model_aliases = config.model_aliases;
     impl_->config.model_defaults = config.model_defaults;
     impl_->config.continuation_retry_enabled = config.continuation_retry_enabled;
+    impl_->config.limits.response_header_seconds = config.limits.response_header_seconds;
     impl_->config.limits.max_continuation_retries = config.limits.max_continuation_retries;
 }
 

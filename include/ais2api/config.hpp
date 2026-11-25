@@ -17,6 +17,7 @@ struct Limits {
     std::size_t relay_bytes = 1024 * 1024;
     std::size_t queue_size = 8;
     unsigned queue_seconds = 30;
+    unsigned response_header_seconds = 120;
     unsigned generation_seconds = 240;
     unsigned stream_idle_seconds = 240;
     unsigned max_attempts = 3;

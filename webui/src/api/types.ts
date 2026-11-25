@@ -305,6 +305,7 @@ export interface Limits {
   relay_bytes?: number
   queue_size?: number
   queue_seconds?: number
+  response_header_seconds?: number
   generation_seconds?: number
   stream_idle_seconds?: number
   max_attempts?: number
