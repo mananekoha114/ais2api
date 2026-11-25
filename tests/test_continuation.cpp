@@ -294,3 +294,94 @@ TEST_CASE("Signed tool parts survive continuation without requesting another too
     REQUIRE(json::serialize(chat).find("synthetic-tool-signature") != std::string::npos);
     REQUIRE(json::serialize(chat).find("checkpoint-1") == std::string::npos);
 }
+
+TEST_CASE("PromptFeedback blocks terminate continuation without retrying or inventing candidates",
+          "[continuation][prompt-feedback]") {
+    const auto ratings = json::parse("[[7,1]]");
+    const auto partial_wire = json::parse("[[[[[[null,\"partial\"]],\"model\"]]]]");
+    SECTION("budgeted pure PromptFeedback emits no synthetic candidates and never resumes") {
+        NativeContinuation state(budget(65536));
+        std::vector<GenerationEvent> events;
+        EventSink sink = [&](GenerationEvent e) { events.push_back(std::move(e)); };
+        auto blocked = decode_chunk(json::array{
+            nullptr, json::array{4, ratings, "Blocked by policy"},
+            json::array{12, 0, 12}, nullptr, nullptr, nullptr, nullptr, "resp-pb"});
+        state.push(std::move(blocked), sink);
+        REQUIRE_FALSE(state.finish(sink));
+        REQUIRE_FALSE(events.empty());
+        const auto &last = events.back().data;
+        CHECK_FALSE(last.contains("candidates"));
+        CHECK(prompt_block_reason(last) == "PROHIBITED_CONTENT");
+        CHECK(last.at("promptFeedback").as_object().at("blockReasonMessage") == "Blocked by policy");
+        CHECK(last.at("usageMetadata").as_object().at("promptTokenCount") == 12);
+        CHECK(last.at("responseId") == "resp-pb");
+    }
+
+    SECTION("budgeted mid-stream PromptFeedback closes open candidate stream with finishReason") {
+        NativeContinuation state(budget(65536));
+        std::vector<GenerationEvent> events;
+        EventSink sink = [&](GenerationEvent e) { events.push_back(std::move(e)); };
+        state.push(decode_chunk(partial_wire), sink);
+        auto blocked = decode_chunk(json::array{nullptr, json::array{2, nullptr, "Stopped mid-stream"},
+                                                json::array{10, 4, 14}});
+        state.push(std::move(blocked), sink);
+        REQUIRE_FALSE(state.finish(sink));
+        const auto &last = events.back().data;
+        REQUIRE(last.contains("candidates"));
+        const auto &cand = last.at("candidates").as_array()[0].as_object();
+        CHECK(cand.at("index") == 0);
+        CHECK(cand.at("finishReason") == "OTHER");
+        CHECK(cand.at("finishMessage") == "Stopped mid-stream");
+        CHECK(prompt_block_reason(last) == "OTHER");
+    }
+
+    SECTION("budgeted MAX_TOKENS with checkpoint still does not resume when PromptFeedback blocks") {
+        NativeContinuation state(budget(65536));
+        std::vector<GenerationEvent> events;
+        EventSink sink = [&](GenerationEvent e) { events.push_back(std::move(e)); };
+        state.push(checkpoint(32768), sink);
+        state.push(decode_chunk(json::array{nullptr, json::array{1, nullptr, "Safety"}}), sink);
+        REQUIRE_FALSE(state.finish(sink));
+        CHECK(prompt_block_reason(events.back().data) == "SAFETY");
+    }
+
+    SECTION("budgeted unblocked PromptFeedback without candidate finish still fails incomplete_upstream") {
+        NativeContinuation state(budget(65536));
+        std::vector<GenerationEvent> events;
+        EventSink sink = [&](GenerationEvent e) { events.push_back(std::move(e)); };
+        auto unblocked = decode_chunk(json::array{nullptr, json::array{0, ratings}});
+        state.push(std::move(unblocked), sink);
+        REQUIRE(events.size() == 1);
+        CHECK(events[0].data.contains("promptFeedback"));
+        REQUIRE(error_code([&] { (void)state.finish(sink); }) == "incomplete_upstream");
+    }
+
+    SECTION("zero-budget mode keeps pure PromptFeedback candidate-free and closes mid-stream candidates") {
+        Request plain;
+        {
+            NativeContinuation state(plain);
+            std::vector<GenerationEvent> events;
+            EventSink sink = [&](GenerationEvent e) { events.push_back(std::move(e)); };
+            state.push(decode_chunk(json::array{nullptr, json::array{4}}), sink);
+            REQUIRE_FALSE(state.finish(sink));
+            REQUIRE(events.size() == 1);
+            CHECK_FALSE(events[0].data.contains("candidates"));
+            CHECK(prompt_block_reason(events[0].data) == "PROHIBITED_CONTENT");
+        }
+        {
+            NativeContinuation state(plain);
+            std::vector<GenerationEvent> events;
+            EventSink sink = [&](GenerationEvent e) { events.push_back(std::move(e)); };
+            state.push(decode_chunk(partial_wire), sink);
+            state.push(decode_chunk(json::array{nullptr, json::array{4, nullptr, "Blocked late"}}), sink);
+            REQUIRE_FALSE(state.finish(sink));
+            REQUIRE(events.size() == 2);
+            REQUIRE(events[1].data.contains("candidates"));
+            const auto &cand = events[1].data.at("candidates").as_array()[0].as_object();
+            CHECK(cand.at("index") == 0);
+            CHECK(cand.at("finishReason") == "PROHIBITED_CONTENT");
+            CHECK(cand.at("finishMessage") == "Blocked late");
+            CHECK(prompt_block_reason(events[1].data) == "PROHIBITED_CONTENT");
+        }
+    }
+}

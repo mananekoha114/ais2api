@@ -138,7 +138,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 
 列表支持 `from`（包含）、`to`（不包含）、实际 `model`、最终执行 `account`、`status`、完整 `id`。`account=:unassigned` 只匹配未分配账号的请求。`limit` 为 1–100，默认 100。首次返回 `snapshot` 和 `next_cursor`，后续传同一 `snapshot` 及 `before=next_cursor`，按进入服务的序号倒序读取；新插入请求不会挤动后续页。已执行完的记录不可变，活动记录的状态仍会更新；到期清理可以移除旧记录。`total` 为该边界内全部匹配条数，`next_cursor=null` 表示没有下一页。
 
-请求状态为 `queued`、`running`、`finishing`、`succeeded`、`failed`、`cancelled`、`interrupted`。详情返回 `attempts` 和允许保存的 `settings`，列表仅返回 `attempt_count`。`http_status` 与 `generation_completed`、`delivery_completed` 分列，流式错误即使已发送 HTTP 200 也会标为失败或取消。`finish_reason` 保存最终上游结束原因；内容拦截（如 `PROHIBITED_CONTENT`）记录为 `failed`、`error=content_filter`，生成未正常完成，但传输仍可完成，已收到的正文继续按原接口协议返回。尝试的 `completed` 表示收到上游终态，不等同生成成功。详情不存在或已过期返回 `404 request_not_found`。
+请求状态为 `queued`、`running`、`finishing`、`succeeded`、`failed`、`cancelled`、`interrupted`。详情返回 `attempts` 和允许保存的 `settings`，列表仅返回 `attempt_count`。`http_status` 与 `generation_completed`、`delivery_completed` 分列，流式错误即使已发送 HTTP 200 也会标为失败或取消。`finish_reason` 保存最终上游结束原因；内容拦截（包括候选级结束原因以及输入级 `promptFeedback.blockReason`，如 `PROHIBITED_CONTENT`、`SAFETY`、`BLOCKLIST`、`IMAGE_SAFETY`、`OTHER`）均记录为 `failed`、`error=content_filter`，不会触发重试或冷却账号，生成未正常完成但传输仍可完成，已收到的正文继续按原接口协议返回。尝试的 `completed` 表示收到上游终态，不等同生成成功。详情不存在或已过期返回 `404 request_not_found`。
 
 `GET /stats` 等价于无参数的累计汇总。`GET /usage/summary` 无参数默认 `scope=lifetime`，有筛选参数默认 `scope=filtered`；可显式指定。累计支持模型和账号筛选，读取留存清理后仍保有的累计；按日期、状态或编号查询使用 filtered，统计所有匹配的已结束明细，不接受分页参数。两种汇总的账号筛选都按分组归属：请求数属于最终执行账号，用量和费用属于实际消耗账号，因此账号可能有消耗却没有最终归属请求。请求列表的账号筛选仍按最终执行账号。返回 `records`、`totals`、`since`、`detail_since` 和 `legacy_records`：后者为功能启用前的原统计，不含可还原的逐请求时间或费用。查询早于 `detail_since` 时只覆盖仍可查询的部分。
 
@@ -179,6 +179,7 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 - `search_model_drop_functions`：布尔，默认 `true`，立即生效。见 [搜索模型](protocol.md#search-models)。
 - `browser_proxy_relay`：布尔，默认 `false`，需重启。开启时 `proxy` 必须是单个 `http://` 或 `socks5://` URL（凭据可选），否则 PATCH 被拒绝。浏览器诊断显示 `proxy.mode`（`none`、`direct`、`relay`）与 `proxy.relayError`（不含凭据的最近一次上游失败原因）。
 - `browser_idle_seconds`：整数，`0`（默认，关闭）或 10–86400，立即生效。浏览器因空闲关闭后，诊断状态为 `idle_closed`。
+- `limits.response_header_seconds`：整数，1–4294967295，默认 `120`，立即生效（同时作用于 SpiderMonkey 与 Camoufox 的下一次生成请求）。限制等待上游 `GenerateContent` 返回响应头的最长时间（秒），超时返回 `504 upstream_timeout`；收到响应头后，非流式请求受 `limits.generation_seconds` 约束，流式请求受 `limits.stream_idle_seconds` 约束。
 
 ## 日志与断点续读
 

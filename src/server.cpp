@@ -937,6 +937,8 @@ class Service {
                                         if (!reason.empty() && reason != "FINISH_REASON_UNSPECIFIED")
                                             completed = true;
                                     }
+                            if (!prompt_block_reason(event).empty())
+                                completed = true;
                             if (!request.include_thoughts)
                                 filter_thoughts(event);
                             decode_json_text_args(event, request.json_text_args);

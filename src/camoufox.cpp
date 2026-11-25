@@ -1343,6 +1343,7 @@ void CamoufoxGateway::reconfigure(const Config& config) {
     impl_->config.model_aliases = config.model_aliases;
     impl_->config.model_defaults = config.model_defaults;
     impl_->config.continuation_retry_enabled = config.continuation_retry_enabled;
+    impl_->config.limits.response_header_seconds = config.limits.response_header_seconds;
     impl_->config.limits.max_continuation_retries = config.limits.max_continuation_retries;
 }
 json::object CamoufoxGateway::diagnostics() {

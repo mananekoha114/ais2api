@@ -204,6 +204,12 @@
           "maximum": 4294967295,
           "default": 30
         },
+        "response_header_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "default": 120
+        },
         "generation_seconds": {
           "type": "integer",
           "minimum": 1,

@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/backend.hpp"
+#include "ais2api/continuation.hpp"
 #include "ais2api/runtime.hpp"
 #include "ais2api/pricing.hpp"
 #include "browser_generation_fixture.hpp"
@@ -311,6 +312,57 @@ public:
                                                              {"candidatesTokenCount", output},
                                                              {"totalTokenCount", output + 4}}}});
             throw Error(500, "upstream_internal", "Internal error encountered.");
+        }
+        if (request.model == "synthetic-prompt-blocked-prohibited" ||
+            request.model == "gemini-4-prompt-blocked-prohibited" ||
+            request.model == "synthetic-prompt-blocked-other" ||
+            request.model == "synthetic-prompt-blocked-unknown" ||
+            request.model == "synthetic-prompt-blocked-midstream" ||
+            request.model == "gemini-4-prompt-blocked-midstream" ||
+            request.model == "synthetic-prompt-unblocked-incomplete") {
+            NativeContinuation continuation(request, {}, cancel);
+            const auto ratings = json::parse("[[7,1]]");
+            if (request.model == "synthetic-prompt-blocked-prohibited" ||
+                request.model == "gemini-4-prompt-blocked-prohibited") {
+                continuation.push(
+                    decode_chunk(json::array{
+                        nullptr,
+                        json::array{4, ratings, "Blocked by policy"},
+                        json::array{10, 0, 10}, nullptr, nullptr, nullptr, nullptr, "resp-pb"}),
+                    emit);
+            } else if (request.model == "synthetic-prompt-blocked-other") {
+                continuation.push(
+                    decode_chunk(json::array{
+                        nullptr, json::array{2, nullptr, "Blocked other"}, json::array{10, 0, 10}}),
+                    emit);
+            } else if (request.model == "synthetic-prompt-blocked-unknown") {
+                continuation.push(
+                    decode_chunk(json::array{nullptr, json::array{99}, json::array{10, 0, 10}}),
+                    emit);
+            } else if (request.model == "synthetic-prompt-blocked-midstream" ||
+                       request.model == "gemini-4-prompt-blocked-midstream") {
+                const auto thought_wire = json::parse(
+                    "[[[[[[null,\"thinking\",null,null,null,null,null,null,null,null,null,null,1]],\"model\"]]]]");
+                const auto text_wire = json::parse("[[[[[[null,\"partial\"]],\"model\"]]]]");
+                continuation.push(decode_chunk(thought_wire), emit);
+                continuation.push(decode_chunk(text_wire), emit);
+                json::array usage(10);
+                usage[0] = 10;
+                usage[1] = 3;
+                usage[2] = 15;
+                usage[9] = 2;
+                continuation.push(
+                    decode_chunk(json::array{
+                        nullptr, json::array{4, nullptr, "Mid-stream block"}, std::move(usage)}),
+                    emit);
+            } else {
+                continuation.push(
+                    decode_chunk(json::array{
+                        nullptr, json::array{0, ratings}}),
+                    emit);
+            }
+            (void)continuation.finish(emit);
+            return;
         }
         if (request.model == "synthetic-slow" || request.model == "synthetic-slow-error") {
             // Longer than two 1-second keepalive intervals.
@@ -2309,6 +2361,159 @@ TEST_CASE("Anthropic errors, count_tokens and the model list use Anthropic shape
         REQUIRE(model.at("type") == "model");
     auto openai = json::parse(get_models(server, false).body()).as_object();
     REQUIRE(openai.at("object") == "list");
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("PromptFeedback blocks return structured HTTP 200 filter states without retries across all four protocols",
+          "[generation][http][prompt-feedback]") {
+    GenerationServer server;
+    auto send_protocol = [&](std::string_view protocol, const std::string &model, bool streaming,
+                             bool include_thoughts = false) {
+        std::string target, body;
+        std::string auth = "Authorization";
+        if (protocol == "gemini") {
+            target = std::string("/v1beta/models/") + model + ":" +
+                     (streaming ? "streamGenerateContent" : "generateContent");
+            json::object req{{"contents", json::array{json::object{{"parts", json::array{json::object{{"text", "synthetic"}}}}}}}};
+            if (include_thoughts)
+                req["generationConfig"] = json::object{{"thinkingConfig", json::object{{"includeThoughts", true}}}};
+            body = json::serialize(req);
+        } else if (protocol == "chat") {
+            target = "/v1/chat/completions";
+            json::object req{{"model", model},
+                             {"stream", streaming},
+                             {"messages", json::array{json::object{{"role", "user"}, {"content", "synthetic"}}}}};
+            body = json::serialize(req);
+        } else if (protocol == "responses") {
+            target = "/v1/responses";
+            json::object req{{"model", model}, {"stream", streaming}, {"input", "synthetic"}};
+            body = json::serialize(req);
+        } else {
+            target = "/v1/messages";
+            auth = "x-api-key";
+            json::object req{{"model", model},
+                             {"max_tokens", 64},
+                             {"stream", streaming},
+                             {"messages", json::array{json::object{{"role", "user"}, {"content", "synthetic"}}}}};
+            if (include_thoughts)
+                req["thinking"] = json::object{{"type", "adaptive"}};
+            body = json::serialize(req);
+        }
+        return server.call(target, body, http::verb::post, auth);
+    };
+
+    auto expected_calls = server.state->calls.load();
+    for (auto [model, expected_reason] :
+         {std::pair{"synthetic-prompt-blocked-prohibited", "PROHIBITED_CONTENT"},
+          {"gemini-4-prompt-blocked-prohibited", "PROHIBITED_CONTENT"},
+          {"synthetic-prompt-blocked-other", "OTHER"},
+          {"synthetic-prompt-blocked-unknown", "OTHER"}}) {
+        for (bool streaming : {false, true}) {
+            for (std::string_view protocol : {"gemini", "chat", "responses", "anthropic"}) {
+                INFO(model << " " << protocol << " streaming=" << streaming);
+                auto response = send_protocol(protocol, model, streaming);
+                ++expected_calls;
+                REQUIRE(response.result_int() == 200);
+                REQUIRE(server.state->calls == expected_calls);
+
+                if (protocol == "gemini") {
+                    if (!streaming) {
+                        auto parsed = json::parse(response.body()).as_object();
+                        CHECK_FALSE(parsed.contains("candidates"));
+                        CHECK(parsed.at("promptFeedback").as_object().at("blockReason") == expected_reason);
+                    } else {
+                        CHECK(response.body().find(expected_reason) != std::string::npos);
+                        CHECK(response.body().find("\"candidates\"") == std::string::npos);
+                    }
+                } else if (protocol == "chat") {
+                    if (!streaming) {
+                        auto parsed = json::parse(response.body()).as_object();
+                        REQUIRE(parsed.at("choices").as_array().size() == 1);
+                        CHECK(parsed.at("choices").as_array()[0].as_object().at("finish_reason") == "content_filter");
+                    } else {
+                        CHECK(response.body().find("content_filter") != std::string::npos);
+                        CHECK(response.body().find("data: [DONE]") != std::string::npos);
+                    }
+                } else if (protocol == "responses") {
+                    if (!streaming) {
+                        auto parsed = json::parse(response.body()).as_object();
+                        CHECK(parsed.at("status") == "incomplete");
+                        CHECK(parsed.at("incomplete_details").as_object().at("reason") == "content_filter");
+                        CHECK(parsed.at("output").as_array().empty());
+                    } else {
+                        auto records = named_sse(response.body());
+                        REQUIRE_FALSE(records.empty());
+                        CHECK(records.back().first == "response.incomplete");
+                        const auto &resp = records.back().second.at("response").as_object();
+                        CHECK(resp.at("status") == "incomplete");
+                        CHECK(resp.at("incomplete_details").as_object().at("reason") == "content_filter");
+                        CHECK(resp.at("output").as_array().empty());
+                    }
+                } else {
+                    if (!streaming) {
+                        auto parsed = json::parse(response.body()).as_object();
+                        CHECK(parsed.at("stop_reason") == "refusal");
+                        CHECK(parsed.at("content").as_array().empty());
+                    } else {
+                        auto records = named_sse(response.body());
+                        REQUIRE(records.size() >= 3);
+                        CHECK(records.front().first == "message_start");
+                        CHECK(records[records.size() - 2].first == "message_delta");
+                        CHECK(records[records.size() - 2].second.at("delta").as_object().at("stop_reason") == "refusal");
+                        CHECK(records.back().first == "message_stop");
+                    }
+                }
+
+                auto rows = finished_history(server);
+                REQUIRE_FALSE(rows.empty());
+                CHECK(rows[0].at("status") == "failed");
+                CHECK(rows[0].at("error") == "content_filter");
+                CHECK(rows[0].at("finish_reason") == expected_reason);
+                CHECK(rows[0].at("http_status") == 200);
+                CHECK(rows[0].at("attempt_count") == 1);
+            }
+        }
+    }
+
+    // Mid-stream block after thinking + text preserves content and terminal filter state
+    // in both zero-budget and budgeted (Gemini 4) continuation modes.
+    for (const std::string &model :
+         {std::string("synthetic-prompt-blocked-midstream"), std::string("gemini-4-prompt-blocked-midstream")}) {
+        for (bool streaming : {false, true}) {
+            for (std::string_view protocol : {"gemini", "chat", "responses", "anthropic"}) {
+                INFO(model << " " << protocol << " streaming=" << streaming);
+                auto response = send_protocol(protocol, model, streaming, true);
+                ++expected_calls;
+                REQUIRE(response.result_int() == 200);
+                REQUIRE(server.state->calls == expected_calls);
+                CHECK(response.body().find("partial") != std::string::npos);
+                CHECK(response.body().find("thinking") != std::string::npos);
+                if (protocol == "gemini") {
+                    CHECK(response.body().find("PROHIBITED_CONTENT") != std::string::npos);
+                    CHECK(response.body().find("Mid-stream block") != std::string::npos);
+                } else if (protocol == "anthropic") {
+                    CHECK(response.body().find("refusal") != std::string::npos);
+                } else {
+                    CHECK(response.body().find("content_filter") != std::string::npos);
+                    if (protocol == "responses")
+                        CHECK(response.body().find(streaming ? "response.incomplete" : "\"incomplete\"") !=
+                              std::string::npos);
+                }
+                auto rows = finished_history(server);
+                CHECK(rows[0].at("status") == "failed");
+                CHECK(rows[0].at("error") == "content_filter");
+                CHECK(rows[0].at("finish_reason") == "PROHIBITED_CONTENT");
+                CHECK(rows[0].at("attempt_count") == 1);
+            }
+        }
+    }
+
+    // Unblocked chunk[1] ([0, ratings]) without a candidate finish still fails with 502 incomplete_upstream.
+    {
+        auto response = send_protocol("gemini", "synthetic-prompt-unblocked-incomplete", false);
+        REQUIRE(response.result_int() == 502);
+        CHECK(response.body().find("incomplete_upstream") != std::string::npos);
+    }
     REQUIRE_FALSE(server.failed);
 }
 

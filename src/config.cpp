@@ -190,6 +190,7 @@ json::object Config::to_json(bool portable_paths) const {
             {"relay_bytes", limits.relay_bytes},
             {"queue_size", limits.queue_size},
             {"queue_seconds", limits.queue_seconds},
+            {"response_header_seconds", limits.response_header_seconds},
             {"generation_seconds", limits.generation_seconds},
             {"stream_idle_seconds", limits.stream_idle_seconds},
             {"max_attempts", limits.max_attempts},
@@ -304,6 +305,7 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
                     {"AIS2API_RELAY_BYTES", "relay_bytes"},
                     {"AIS2API_QUEUE_SIZE", "queue_size"},
                     {"AIS2API_QUEUE_SECONDS", "queue_seconds"},
+                    {"AIS2API_RESPONSE_HEADER_SECONDS", "response_header_seconds"},
                     {"AIS2API_GENERATION_SECONDS", "generation_seconds"},
                     {"AIS2API_STREAM_IDLE_SECONDS", "stream_idle_seconds"},
                     {"AIS2API_MAX_ATTEMPTS", "max_attempts"},
@@ -409,8 +411,8 @@ static Config parse_config(Config c, json::object o) {
     throw Error(400, "invalid_config", "Invalid configuration container");
   auto &l = o.at("limits").as_object();
   fields(l, {"request_bytes", "object_bytes", "relay_bytes", "queue_size",
-             "queue_seconds", "generation_seconds", "stream_idle_seconds",
-             "max_attempts", "max_continuation_retries"});
+             "queue_seconds", "response_header_seconds", "generation_seconds",
+             "stream_idle_seconds", "max_attempts", "max_continuation_retries"});
   auto n = [&](const char *k) {
     auto x = number(l.at(k));
     if (!x || x > std::numeric_limits<unsigned>::max())
@@ -422,6 +424,7 @@ static Config parse_config(Config c, json::object o) {
   c.limits.relay_bytes = n("relay_bytes");
   c.limits.queue_size = n("queue_size");
   c.limits.queue_seconds = n("queue_seconds");
+  c.limits.response_header_seconds = n("response_header_seconds");
   c.limits.generation_seconds = n("generation_seconds");
   c.limits.stream_idle_seconds = n("stream_idle_seconds");
   c.limits.max_attempts = n("max_attempts");
@@ -556,6 +559,7 @@ void Config::validate() const {
   if (!limits.request_bytes || limits.request_bytes > 64ull * 1024 * 1024 ||
       !limits.object_bytes || !limits.relay_bytes ||
       !limits.queue_size || !limits.queue_seconds ||
+      !limits.response_header_seconds ||
       !limits.generation_seconds || !limits.stream_idle_seconds ||
       !limits.max_attempts || limits.max_attempts > 16 ||
       limits.queue_size > 4096 || limits.relay_bytes > limits.object_bytes)

@@ -51,6 +51,7 @@ std::map<std::string, std::string> child_overrides(const Config &effective) {
                       {"relay_bytes", "AIS2API_RELAY_BYTES"},
                       {"queue_size", "AIS2API_QUEUE_SIZE"},
                       {"queue_seconds", "AIS2API_QUEUE_SECONDS"},
+                      {"response_header_seconds", "AIS2API_RESPONSE_HEADER_SECONDS"},
                       {"generation_seconds", "AIS2API_GENERATION_SECONDS"},
                       {"stream_idle_seconds", "AIS2API_STREAM_IDLE_SECONDS"},
                       {"max_attempts", "AIS2API_MAX_ATTEMPTS"},

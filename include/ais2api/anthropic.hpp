@@ -55,7 +55,7 @@ class AnthropicStream {
     bool thinking_;
     // visible_: a text or tool_use block was opened, so a new thinking block
     // would trail visible content.
-    bool started_ = false, signed_ = false, calls_ = false, visible_ = false;
+    bool started_ = false, signed_ = false, calls_ = false, visible_ = false, prompt_blocked_ = false;
     Block block_ = Block::none;
     std::size_t index_ = 0, ordinal_ = 0, dropped_ = 0;
     std::string finish_reason_;

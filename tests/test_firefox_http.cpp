@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "../browser/firefox_http.hpp"
+#include "browser_generation_fixture.hpp"
 #include <boost/asio.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -509,4 +510,140 @@ TEST_CASE("A response tells how its connection came about", "[firefox-http]") {
     const auto second = session.send(request);
     CHECK(second.body == "ok");
     CHECK_FALSE(second.timing.new_connection);
+}
+
+TEST_CASE("HttpSession::start polls headers without a fixed timeout and integrates with run_generation",
+          "[firefox-http][timeout]") {
+    SECTION("poll_headers returns false until headers arrive, then populates status, headers and body") {
+        std::promise<void> release_headers;
+        const auto headers_gate = release_headers.get_future().share();
+        Server server([&](const Server::Request &, tcp::socket &socket) {
+            headers_gate.wait();
+            Server::reply(socket, "200 OK", "Content-Type: text/plain\r\n", "hello");
+        });
+        HttpSession session(options());
+        HttpRequest request;
+        request.url = server.url("/delayed");
+        auto exchange = session.start(request);
+        CHECK_FALSE(exchange->poll_headers(80ms));
+        release_headers.set_value();
+        bool ready = false;
+        for (int attempt = 0; attempt < 20 && !ready; ++attempt)
+            ready = exchange->poll_headers(200ms);
+        REQUIRE(ready);
+        CHECK(exchange->poll_headers(0ms));
+        CHECK(exchange->status() == 200);
+        CHECK(header_value(exchange->headers(), "content-type") == "text/plain");
+        CHECK(exchange->read(100, 5s) == std::string("hello"));
+        CHECK(exchange->read(100, 5s) == std::string());
+    }
+
+    SECTION("poll_headers cancels promptly while headers are pending") {
+        std::promise<void> release;
+        const auto released = release.get_future().share();
+        Server silent([&](const Server::Request &, tcp::socket &) { released.wait(); });
+        HttpSession session(options());
+        HttpRequest request;
+        request.url = silent.url("/hang");
+        std::stop_source stop;
+        auto exchange = session.start(request, stop.get_token());
+        std::jthread canceller([&] {
+            std::this_thread::sleep_for(80ms);
+            stop.request_stop();
+        });
+        const auto started = Clock::now();
+        CHECK(error_of([&] { (void)exchange->poll_headers(5s, stop.get_token()); }) == "499 cancelled");
+        CHECK(Clock::now() - started < 1s);
+        release.set_value();
+    }
+
+    SECTION("run_generation enforces response_header_seconds over live HTTP and respects updated limits") {
+        const auto payload = generation_fixture::stream(generation_fixture::reply("live-ok", 2, 1));
+        Server server([&](const Server::Request &req, tcp::socket &socket) {
+            if (req.request_line().starts_with("POST /slow-headers")) {
+                std::this_thread::sleep_for(1300ms);
+                Server::reply(socket, "200 OK", "Content-Type: application/json\r\n", payload);
+                return;
+            }
+            asio::write(socket, asio::buffer(std::string(
+                                    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\n")));
+            const auto half = payload.size() / 2;
+            Server::chunk(socket, std::string_view(payload).substr(0, half));
+            std::this_thread::sleep_for(1300ms);
+            Server::chunk(socket, std::string_view(payload).substr(half));
+            Server::chunk(socket, "");
+        });
+        HttpSession session(options());
+        const auto prompt_json = json::parse(
+            R"({"contents":[{"parts":[{"text":"hi"}]}]})");
+        const auto run_http = [&](std::string path, const Limits &limits, bool streaming) {
+            const auto req = normalize_gemini("gemini-3.1-flash-lite-preview", prompt_json.as_object(),
+                                              streaming, Config{});
+            std::unique_ptr<browser_detail::HttpExchange> exchange;
+            bool headers_ready = false;
+            bool done = false;
+            long status = 0;
+            std::uint64_t seq = 0;
+            browser_detail::GenerationIO io;
+            io.encode = [&](std::string_view) { return std::string("[]"); };
+            io.start = [&](std::string_view body, const std::function<void()> &check) {
+                check();
+                headers_ready = false;
+                done = false;
+                status = 0;
+                seq = 0;
+                HttpRequest upload;
+                upload.method = "POST";
+                upload.url = server.url(path);
+                upload.body = std::string(body);
+                exchange = session.start(std::move(upload));
+            };
+            io.next = [&](std::uint64_t) -> json::value {
+                if (!done && exchange && !headers_ready) {
+                    if (!exchange->poll_headers(200ms)) {
+                        return json::object{{"pending", nullptr}, {"done", false}, {"status", 0},
+                                            {"error", ""}, {"benefitTier", "pro"}};
+                    }
+                    headers_ready = true;
+                    status = exchange->status();
+                }
+                json::object state{{"pending", nullptr}, {"done", done}, {"status", status},
+                                   {"error", ""}, {"benefitTier", "pro"}};
+                if (done || !exchange) {
+                    state["done"] = true;
+                    return state;
+                }
+                const auto bytes = exchange->read(32768, 200ms);
+                if (!bytes) return state;
+                if (bytes->empty()) {
+                    exchange.reset();
+                    done = true;
+                    state["done"] = true;
+                    return state;
+                }
+                state["pending"] = json::object{{"sequence", static_cast<std::int64_t>(++seq)},
+                                                {"bytes", generation_fixture::base64(*bytes)}};
+                return state;
+            };
+            std::vector<GenerationEvent> events;
+            browser_detail::run_generation(
+                req, limits, false, io, [&](GenerationEvent event) { events.push_back(std::move(event)); },
+                {});
+            return events;
+        };
+
+        Limits tight;
+        tight.response_header_seconds = 1;
+        tight.generation_seconds = 10;
+        tight.stream_idle_seconds = 10;
+        CHECK(error_of([&] { (void)run_http("/slow-headers", tight, false); }) == "504 upstream_timeout");
+
+        Limits relaxed = tight;
+        relaxed.response_header_seconds = 4;
+        CHECK_FALSE(run_http("/slow-headers", relaxed, false).empty());
+
+        // Headers arrive promptly, while the body takes longer than response_header_seconds.
+        CHECK_FALSE(run_http("/slow-body", tight, false).empty());
+        CHECK_FALSE(run_http("/slow-body", tight, true).empty());
+    }
 }

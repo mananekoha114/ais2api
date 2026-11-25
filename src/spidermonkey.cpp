@@ -181,6 +181,30 @@ class DeadlineToken {
 };
 } // namespace
 
+namespace spidermonkey_detail {
+std::string run_vm_refresh_snapshot(std::stop_token parent, std::chrono::milliseconds timeout,
+                                    std::string_view account_id,
+                                    const std::function<std::string(std::stop_token)> &fetch,
+                                    const std::function<void()> &reset_vm) {
+    DeadlineToken deadline(parent, timeout);
+    try {
+        return fetch(deadline.token());
+    } catch (const Error &error) {
+        if (error.code == "cancelled") {
+            reset_vm();
+            check_cancel(parent);
+            if (deadline.timed_out()) {
+                console::emit_record({{"event", "spidermonkey_vm_refresh_timeout"},
+                                      {"account_id", std::string(account_id)}});
+                return "E:UCE";
+            }
+            throw;
+        }
+        return "E:UCE";
+    }
+}
+} // namespace spidermonkey_detail
+
 struct SpiderMonkeyGateway::Impl {
     Config config;
     Store &store;
@@ -489,7 +513,7 @@ struct SpiderMonkeyGateway::Impl {
         for (int redirect = 0;; ++redirect) {
             if (redirect > 10) incompatible("AI Studio redirected the page too often");
             // Firefox gives the top-level document its highest weight.
-            response = http->send({"GET", target, sm::document_headers(headers), std::nullopt, 42, true}, token, 30s, 16 << 20);
+            response = http->send({"GET", target, sm::document_headers(headers), std::nullopt, 42, true}, token, 60s, 16 << 20);
             if (response.status < 300 || response.status >= 400) break;
             const auto next = sm::resolve_location(target, browser_detail::header_value(response.headers, "location"));
             if (next.empty()) incompatible("AI Studio redirected the page nowhere");
@@ -559,7 +583,7 @@ struct SpiderMonkeyGateway::Impl {
         const auto now = Clock::now();
         if (!force && (now < tier_expires || now < tier_retry)) return;
         try {
-            const auto response = rpc("GetAiStudioBenefitTier", "[]", rpc_context(true), token, 8s);
+            const auto response = rpc("GetAiStudioBenefitTier", "[]", rpc_context(true), token, 15s);
             const auto read = response.status == 200 ? sm::benefit_tier(response.body) : std::string("unknown");
             tier = read;
             if (read == "unknown") {
@@ -613,7 +637,7 @@ struct SpiderMonkeyGateway::Impl {
         if (!url.starts_with("https://") || !(server == "google.com" || server.ends_with(".google.com") || server.ends_with(".gstatic.com")))
             throw Error(502, "waa_challenge_invalid", "The WAA interpreter is not served by Google");
         phase = "waa_interpreter";
-        const auto response = http->send({"GET", url, sm::script_headers(headers, url), std::nullopt}, token, 30s, 8 << 20);
+        const auto response = http->send({"GET", url, sm::script_headers(headers, url), std::nullopt}, token, 60s, 8 << 20);
         if (response.status != 200)
             throw Error(502, "upstream_error", "The WAA interpreter returned HTTP " + std::to_string(response.status));
         if (waa::interpreter_hash(response.body) != challenge.interpreter_hash)
@@ -689,7 +713,7 @@ struct SpiderMonkeyGateway::Impl {
             phase = "waa_start";
         }
         const auto started = Clock::now();
-        DeadlineToken deadline(token, 45s);
+        DeadlineToken deadline(token, 90s);
         std::unique_ptr<waa::Runtime> runtime;
         try {
             runtime = std::make_unique<waa::Runtime>(std::move(options), deadline.token());
@@ -719,19 +743,10 @@ struct SpiderMonkeyGateway::Impl {
         std::vector<std::string> refresh;
         if (vm) {
             phase = "waa_refresh";
-            std::string snapshot;
-            DeadlineToken deadline(token, 15s);
-            try {
-                snapshot = vm->refresh_snapshot(deadline.token());
-            } catch (const Error &error) {
-                if (error.code == "cancelled") {
-                    vm.reset();
-                    check_cancel(token);
-                    if (deadline.timed_out()) throw Error(504, "waa_timeout", "WAA snapshot refresh timed out");
-                    throw;
-                }
-                snapshot = "E:UCE";
-            }
+            const auto snapshot = sm::run_vm_refresh_snapshot(
+                token, 15s, account_id,
+                [&](std::stop_token call_token) { return vm->refresh_snapshot(call_token); },
+                [&] { vm.reset(); });
             refresh = {interpreter_hash, snapshot};
         }
         phase = "waa_create";
@@ -887,7 +902,7 @@ std::string SpiderMonkeyGateway::Impl::prove(const Content &content, std::stop_t
     const bool run = !content.prompt.empty(), rerun = !run && content.rerun && page->pointer->clicked();
     running = nullptr;
     std::string proof;
-    DeadlineToken deadline(token, 30s);
+    DeadlineToken deadline(token, 45s);
     try {
         const auto call_token = deadline.token();
         if (run) {
@@ -925,6 +940,7 @@ void SpiderMonkeyGateway::Impl::send(const Request &request, const Account &acco
     struct Transfer {
         std::unique_ptr<browser_detail::HttpExchange> exchange;
         std::uint64_t sequence = 0;
+        bool headers_ready = false;
         bool done = false;
         long status = 0;
         unsigned retry_after = 0;
@@ -958,31 +974,40 @@ void SpiderMonkeyGateway::Impl::send(const Request &request, const Account &acco
         HttpRequest upload{"POST", std::string(maker_suite) + "GenerateContent", sm::rpc_headers(headers, context), std::string(body)};
         check();
         phase = "generation_start";
-        transfer.exchange = http->open(std::move(upload), cancel, 60s);
-        // Run turned into Stop; Rerun removed the last turn.
-        if (auto *answered = std::exchange(clicked, nullptr)) {
-            answered->replaced();
-            answering = answered;
-        }
-        transfer.status = transfer.exchange->status();
-        transfer.retry_after = retry_after(transfer.exchange->headers());
-        if (transfer.status < 200 || transfer.status >= 300) {
-            // At most 8 KiB, for classification only.
-            const auto deadline = Clock::now() + 5s;
-            while (transfer.error_body.size() < 8192 && Clock::now() < deadline) {
-                const auto bytes = transfer.exchange->read(8192 - transfer.error_body.size(), 250ms, cancel);
-                if (!bytes) continue;
-                if (bytes->empty()) break;
-                transfer.error_body += *bytes;
-            }
-            transfer.exchange.reset();
-            close_answer();
-            transfer.error = "upstream_http_" + std::to_string(transfer.status);
-            transfer.done = true;
-        }
-        phase = "generation_read";
+        transfer.exchange = http->start(std::move(upload), cancel);
     };
     io.next = [&](std::uint64_t) -> json::value {
+        if (!transfer.done && transfer.exchange && !transfer.headers_ready) {
+            if (!transfer.exchange->poll_headers(250ms, cancel)) {
+                return sm::relay_state({.done = false,
+                                        .status = 0,
+                                        .retry_after = 0,
+                                        .benefit = transfer.benefit});
+            }
+            transfer.headers_ready = true;
+            // Run turned into Stop; Rerun removed the last turn.
+            if (auto *answered = std::exchange(clicked, nullptr)) {
+                answered->replaced();
+                answering = answered;
+            }
+            transfer.status = transfer.exchange->status();
+            transfer.retry_after = retry_after(transfer.exchange->headers());
+            if (transfer.status < 200 || transfer.status >= 300) {
+                // At most 8 KiB, for classification only.
+                const auto deadline = Clock::now() + 5s;
+                while (transfer.error_body.size() < 8192 && Clock::now() < deadline) {
+                    const auto bytes = transfer.exchange->read(8192 - transfer.error_body.size(), 250ms, cancel);
+                    if (!bytes) continue;
+                    if (bytes->empty()) break;
+                    transfer.error_body += *bytes;
+                }
+                transfer.exchange.reset();
+                close_answer();
+                transfer.error = "upstream_http_" + std::to_string(transfer.status);
+                transfer.done = true;
+            }
+            phase = "generation_read";
+        }
         auto state = sm::relay_state({.done = transfer.done,
                                       .status = transfer.status,
                                       .retry_after = transfer.retry_after,
@@ -1053,7 +1078,7 @@ json::array SpiderMonkeyGateway::models(const Account &account, std::stop_token 
     impl.refresh_tier(cancel);
     auto context = impl.rpc_context(true);
     context.tier = std::string(sm::tier_header(impl.fresh_tier()));
-    const auto response = impl.rpc("ListModels", "[]", context, cancel, 15s);
+    const auto response = impl.rpc("ListModels", "[]", context, cancel, 30s);
     if (auto failure = sm::page_rpc_failure("ListModels", response.status, response.body)) throw *failure;
     auto models = sm::discovered_models(response.body);
     impl.models_discovered = true;
@@ -1108,6 +1133,7 @@ void SpiderMonkeyGateway::reconfigure(const Config &config) {
     impl_->config.model_aliases = config.model_aliases;
     impl_->config.model_defaults = config.model_defaults;
     impl_->config.continuation_retry_enabled = config.continuation_retry_enabled;
+    impl_->config.limits.response_header_seconds = config.limits.response_header_seconds;
     impl_->config.limits.max_continuation_retries = config.limits.max_continuation_retries;
 }
 

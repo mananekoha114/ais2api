@@ -69,7 +69,7 @@ SpiderMonkey 后端不启动浏览器：ais2api 用 HTTP 加载 AI Studio 页面
   - **启动程序**：依次调用 `GetLoggingContext`、`GetAiStudioBenefitTier`、`Waa/Create`，取得解释器（按摘要缓存在 `<data_dir>/runtime/waa-interpreters/`）并启动程序。`GetLoggingContext` 返回 `[7,"Region not supported."]` 时报 403 `region_blocked`。
   - **每次生成**：先在宿主页面里填入提示词，用可信的鼠标事件点击 Run，取得 proof，再发送 `GenerateContent`；约 2.2 秒后像页面一样发出一次 `CountTokens`。
   - **重新运行**：同一账号再次发送同一段以用户发言结尾的对话时（客户端重试），如果这个页面上已经点击过，就像页面一样点击最后一轮的 Rerun。此时提示词框是空的，不发 `CountTokens`。
-  - **续期**：程序运行 12 小时后，在下一次请求时按页面的方式续期。
+  - **续期**：程序运行 12 小时后，在下一次请求时按页面的方式续期；若 15 秒刷新超时（非外部取消），则记录 `spidermonkey_vm_refresh_timeout` 诊断日志并销毁旧 VM 回退重建，不中断当前请求。
   - **页面指标**：官网 BotGuard 包装层的计时指标只在内存中记录，不上报。页面的遥测（clearcut、streamz 等）和子资源加载都没有模拟。
 - **其他接口**：`models` 直接调用 `ListModels`；`probe` 只加载页面，页面数据中有账号邮箱时核对它；Cookie 导入始终由默认后端验证。`reset_session` 丢弃页面和程序、保留连接；空闲释放时关闭全部。
 - **诊断**：`backend` 为 `spidermonkey`，另有 `pageLoaded`、`vm`（运行时长、解释器摘要前 12 位）、`vmsStarted`、`host`（嵌入的宿主脚本与对象结构表的 SHA-256、SpiderMonkey 版本）、`claimedFirefox`、`network`（用 curl-impersonate 时为 `curl-impersonate`，否则为 `libcurl`）和 `networkStack`（libcurl、TLS 库和 nghttp2 的版本）。
@@ -122,7 +122,7 @@ fetch 与 XHR 两种捕获方式都支持。页面内部结构变化时报告 `b
 - 每次发送都填写已验证账号的槽位（`X-Goog-AuthUser`），并拒绝捕获头中冲突的槽位。
 - 签名 Cookie 与请求头只保存在内存中，不会出现在诊断或日志里。
 
-生成与模型发现还会通过实时 RPC 端点和当前账号授权查询 GetAiStudioBenefitTier：超时 8 秒，响应上限 8 KiB，每个页面缓存 10 分钟，失败后 30 秒再试。捕获的等级请求头会被移除；只有确认的 plus/pro/ultra 才添加 TIER0/TIER1/TIER2，free 与未知等级不加。每次生成记录发送时使用的等级，后续缓存过期不会改变错误分类。等级未知时的 403 直接结束请求，不会让健康账号冷却或轮换。探测和每次生成尝试结束后，页面确认的等级会按账号保存，用于选号（见 [订阅等级与每日额度](quotas.md)）；查询失败不会清空已保存的等级。
+生成与模型发现还会通过实时 RPC 端点和当前账号授权查询 GetAiStudioBenefitTier：Camoufox 超时 8 秒（SpiderMonkey 为 15 秒），响应上限 8 KiB，每个页面缓存 10 分钟，失败后 30 秒再试。捕获的等级请求头会被移除；只有确认的 plus/pro/ultra 才添加 TIER0/TIER1/TIER2，free 与未知等级不加。每次生成记录发送时使用的等级，后续缓存过期不会改变错误分类。等级未知时的 403 直接结束请求，不会让健康账号冷却或轮换。探测和每次生成尝试结束后，页面确认的等级会按账号保存，用于选号（见 [订阅等级与每日额度](quotas.md)）；查询失败不会清空已保存的等级。
 
 ## 流式传输
 
@@ -130,7 +130,7 @@ fetch 与 XHR 两种捕获方式都支持。页面内部结构变化时报告 `b
 - 桥接方法 `next(sequence, waitMs)` 同时确认上一块并在页面中等待下一块或结束（最多 250 ms），不做轮询休眠。
 - C++ 解码数据块并增量解析深度为 3 的线路记录。下游消费完成后事件接收端才返回，此时 C++ 才确认该序号并允许浏览器继续读取。整个过程从不构建或保存完整的原始响应。
 - 不支持 BYOB 的实现会明确失败。
-- 取消、生成时限和空闲时限会中止页面 fetch；BiDi 操作也有超时和取消检查。流式请求使用空闲时限，只要数据持续到达就可以超过 `generation_seconds`；非流式请求还受总时限约束。
+- 取消、响应头等待时限、生成总时限和流式空闲时限都会中止进行中的上游请求（页面 fetch 或 SpiderMonkey HTTP 传输）；BiDi 操作也有超时和取消检查。SpiderMonkey 与 Camoufox 共用三阶段时限：每轮等待上游 `GenerateContent` 响应头受 `limits.response_header_seconds`（默认 120 秒，热更新）约束，超时返回 `504 upstream_timeout`；收到响应头后，流式请求仅受 `limits.stream_idle_seconds` 空闲时限约束（超时返回 `504 stream_idle_timeout`），只要数据持续到达就可以超过 `response_header_seconds` 与 `generation_seconds`；非流式请求受 `limits.generation_seconds` 总时限约束（从首轮收到响应头开始计时并覆盖后续续接轮次，不受 `stream_idle_seconds` 截断，超时返回 `504 generation_timeout`）。
 - 状态码为 200 但内容为 `google.rpc.Status` 错误信封的响应会在解码数据块前分类：`RESOURCE_EXHAUSTED`、`PERMISSION_DENIED`、`UNAUTHENTICATED` 分别映射为 429、403、401。
 - 内联媒体和非流式响应有独立的对象上限，但这并不意味着 C++ 能精确限制整个 Camoufox 进程的内存占用。
 
@@ -143,7 +143,7 @@ fetch 与 XHR 两种捕获方式都支持。页面内部结构变化时报告 `b
 | 可识别的 GenerateContent 路由 404 | 在原账号已验证的上下文中重建请求体和快照后重试。 |
 | 首次尝试返回空的 204 | 清除模板后在原账号重试一次（不占用下面的“重建/重启”机会）；再次 204 则返回错误。 |
 | 普通 404 和其他客户端错误、地区限制、生成/空闲超时 | 直接返回，不影响账号状态。 |
-| 上游 5xx、传输不完整 | 短暂等待（0.5 秒、1 秒……）后在原账号重试，不冷却。 |
+| 上游 5xx（含响应头等待超时 `upstream_timeout`）、传输不完整 | 短暂等待（0.5 秒、1 秒……）后在原账号重试，不冷却。 |
 | 403（BotGuard 快照过期或不匹配也表现为 PERMISSION_DENIED） | 先就地重建该账号的页面会话（新上下文、Cookie、页面、BotGuard 与请求模板，浏览器进程保留）再重试原账号。再次 403 时，若为 `auto` 账号且另一 Firefox 后端已就绪，则临时切换至另一后端 6 小时并立刻再试一次原账号；否则让该模型冷却 5 分钟；等级未知时的 403 直接返回，不冷却；页面确认的等级按额度表不能使用该模型时，只把该账号排除在本次请求之外，不重建、不冷却。 |
 | RPC UNAUTHENTICATED、身份未确认、签名失败 | 同样先重建一次；再次失败则整个账号进入 5 分钟 `auth` 冷却。 |
 | AI Studio 条款对话框（`terms_required`） | 欢迎对话框自动继续，不算失败。其他条款对话框先重建一次；仍出现则整个账号冷却 1 小时，认证放行不适用。 |
@@ -156,7 +156,7 @@ fetch 与 XHR 两种捕获方式都支持。页面内部结构变化时报告 `b
 补充规则：
 
 - 每个请求最多进行一次会话重建或浏览器重启。切换到其他账号总是开启新会话；只有下一个账号的指纹与当前进程不同时才重启浏览器。
-- 响应必须带有非 unspecified 的结束原因，并且传输帧完整。已经输出给客户端的内容在失败后不会重新生成。
+- 响应必须带有非 unspecified 的候选结束原因或有效的输入级拦截原因（`promptFeedback.blockReason`），并且传输帧完整；仅含未拦截安全评级的 `promptFeedback` 不算终态，仍按 `incomplete_upstream` 处理。输入或候选内容拦截属于终态，不触发重试也不冷却账号；已经输出给客户端的内容在失败后不会重新生成。
 - **配额冷却**按模型计算：分钟级限额至少等待 60 秒且不增加每日计数；其他 429 依次等待 60/60/300/300/600 秒，计数在太平洋时间午夜重置，成功后保留递增计数。`Retry-After` 可以把等待延长到最多 1 天。每日额度 429 会把该模型当日标记为已用完；本地用量估算也已用完时，直接冷却到下一次太平洋时间零点（见 [今日用量估算](quotas.md#今日用量估算)）。
 - 替换凭据不会清除未到期的配额冷却。显式的全局冷却和管理端的重置操作保持原有含义。
 - 非 200 响应只保留状态码、解析出的 `Retry-After` 和最多 8 KiB 的错误文本；格式错误的流分类最多保留 16 KiB 前缀。这些错误文本不会写入日志或返回给客户端。

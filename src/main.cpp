@@ -56,6 +56,7 @@ Arguments parse_arguments(int argc, char **argv) {
         {"--relay-bytes", "relay_bytes"},
         {"--queue-size", "queue_size"},
         {"--queue-seconds", "queue_seconds"},
+        {"--response-header-seconds", "response_header_seconds"},
         {"--generation-seconds", "generation_seconds"},
         {"--stream-idle-seconds", "stream_idle_seconds"},
         {"--max-attempts", "max_attempts"}};
@@ -133,8 +134,8 @@ void help() {
                  "  --browser PATH --proxy URL --browser-proxy-relay=true|false\n"
                  "  --headless=true|false --browser-idle-seconds N\n"
                  "  --request-bytes N --object-bytes N --relay-bytes N --queue-size N\n"
-                 "  --queue-seconds N --generation-seconds N --stream-idle-seconds N\n"
-                 "  --max-attempts N\n"
+                 "  --queue-seconds N --response-header-seconds N --generation-seconds N\n"
+                 "  --stream-idle-seconds N --max-attempts N\n"
                  "setup/browser update accept --yes to approve required system package changes.\n"
                  "All non-help results are JSON. Set api_key in config.json; secrets are never printed.\n";
 }

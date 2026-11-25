@@ -101,7 +101,8 @@
 |---|---|
 | `queue_full`（429） | 排队请求超过 `limits.queue_size`（默认 8）。同一时间只处理一个生成请求，请降低并发或调大队列。 |
 | `queue_timeout`（504） | 排队超过 `limits.queue_seconds`（默认 30 秒）。 |
-| `generation_timeout` / `stream_idle_timeout`（504） | 生成总时长或流式数据间隔超过限额（默认均为 240 秒），可调整 `limits.generation_seconds`、`limits.stream_idle_seconds`（需重启）。 |
+| `upstream_timeout`（504） | 等待上游 `GenerateContent` 返回响应头超过 `limits.response_header_seconds`（默认 120 秒，对 SpiderMonkey 与 Camoufox 均生效）。按上游 5xx 处理，无输出前会在原账号重试且不冷却；慢代理或长思考首字延迟高时可调大 `limits.response_header_seconds`（支持热更新，保存后立即生效）。 |
+| `generation_timeout` / `stream_idle_timeout`（504） | 收到上游响应头后，非流式总时长超过 `limits.generation_seconds`（默认 240 秒，不受 `stream_idle_seconds` 截断），或流式两次收到数据间隔超过 `limits.stream_idle_seconds`（默认 240 秒）。可调大对应配置（需重启）；长生成建议改用流式接口。 |
 | `invalid_argument`（400） | 请求包含不支持或冲突的参数。错误信息会指出字段名；可开启 [忽略不支持的参数](clients.md#兼容开关忽略不支持的参数)。 |
 | `model_not_found`（404） | 模型 id 不存在。以 `/v1/models` 返回为准。 |
 | `request_limit` / `media_limit` / `object_limit`（413） | 请求体、媒体或响应超出 `limits` 中的限额。 |
@@ -110,7 +111,8 @@
 | `proxy_auth_unsupported`（503） | 配置了带用户名密码的代理，但未开启 `browser_proxy_relay`。见 [配置参考](configuration.md#使用带账号密码的代理)。 |
 | `proxy_failed`（502） | 代理连接失败。诊断中的 `proxy.relayError` 会给出转发代理的具体原因（不含凭据）。不会让账号进入冷却。 |
 | `network_failed`（502） | 无法连接 Google。检查网络或代理；会按临时错误在原账号重试，不会冷却账号。 |
-| `empty_upstream` / `incomplete_upstream` / `upstream_no_content`（502） | 上游返回空内容或数据不完整。服务会在原账号短暂等待后重试；已经输出给客户端的内容不会重新生成。 |
+| `empty_upstream` / `incomplete_upstream` / `upstream_no_content`（502） | 上游返回空内容或数据不完整（含仅返回未拦截的 `promptFeedback` 且缺少候选终态 `finishReason` 的情况；已知结束码覆盖 `18` `MISSING_THOUGHT_SIGNATURE`、`19` `MALFORMED_RESPONSE`，未知正整数结束码会兜底映射为 `OTHER` 并记入 `upstream_fields_ignored`）。服务会在原账号短暂等待后重试；已经输出给客户端的内容不会重新生成。 |
+| `content_filter`（请求历史 `failed`，HTTP 200 终态） | 上游触发候选级或输入级（`promptFeedback.blockReason`）内容拦截。各协议以 HTTP 200 返回结构化过滤终态（Gemini 返回 `promptFeedback` / `finishReason`，无候选时不含 `candidates`；Chat 返回 `finish_reason: "content_filter"`；Responses 返回 `incomplete` / `response.incomplete` 且 `reason: "content_filter"`；Anthropic 返回 `stop_reason: "refusal"`），请求历史记为 `failed`、`error: "content_filter"`，**不触发重试也不冷却账号**。详见 [输入反馈与内容拦截](protocol.md#prompt-feedback)。 |
 | `cancelled`（499） | 客户端断开连接，生成已取消。 |
 
 ## 客户端相关

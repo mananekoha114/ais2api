@@ -584,7 +584,7 @@ std::shared_ptr<Transfer> HttpSession::Impl::prepare(HttpRequest request, std::c
     curl_easy_setopt(easy, CURLOPT_NOPROXY, "");
     curl_easy_setopt(easy, CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L);
     curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT, 20L);
+    curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT, 30L);
     if (total.count() > 0) curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, static_cast<long>(total.count()));
     if (!options.ca_file.empty()) curl_easy_setopt(easy, CURLOPT_CAINFO, options.ca_file.string().c_str());
     curl_easy_setopt(easy, CURLOPT_ERRORBUFFER, transfer->error);
@@ -616,21 +616,44 @@ class Exchange final : public HttpExchange {
     long status() const override { return status_; }
     const HttpHeaders &headers() const override { return headers_; }
 
-    // Waits for the response's headers.
-    void await_headers(std::stop_token cancel, std::chrono::milliseconds timeout) {
+    bool poll_headers(std::chrono::milliseconds wait, std::stop_token cancel) override {
+        check_cancel(cancel);
+        if (headers_copied_) return true;
         auto &transfer = *transfer_;
         std::unique_lock lock(transfer.mutex);
         const auto arrived = [&] { return transfer.headers_complete || transfer.finished; };
-        const bool in_time = timeout.count() > 0 ? transfer.changed.wait_for(lock, cancel, timeout, arrived)
-                                                 : (transfer.changed.wait(lock, cancel, arrived), true);
+        if (!arrived() && wait.count() > 0) transfer.changed.wait_for(lock, cancel, wait, arrived);
         if (!arrived()) {
             lock.unlock();
             check_cancel(cancel);
-            if (!in_time) throw Error(504, "upstream_timeout", "Google did not answer in time");
+            return false;
         }
         if (transfer.finished && transfer.result != CURLE_OK) throw transfer.failure();
         status_ = transfer.status;
         headers_ = transfer.headers;
+        headers_copied_ = true;
+        return true;
+    }
+    // Waits for the response's headers.
+    void await_headers(std::stop_token cancel, std::chrono::milliseconds timeout) {
+        if (timeout.count() > 0) {
+            if (!poll_headers(timeout, cancel)) throw Error(504, "upstream_timeout", "Google did not answer in time");
+            return;
+        }
+        auto &transfer = *transfer_;
+        std::unique_lock lock(transfer.mutex);
+        const auto arrived = [&] { return transfer.headers_complete || transfer.finished; };
+        transfer.changed.wait(lock, cancel, arrived);
+        if (!arrived()) {
+            lock.unlock();
+            check_cancel(cancel);
+        }
+        if (transfer.finished && transfer.result != CURLE_OK) throw transfer.failure();
+        if (!headers_copied_) {
+            status_ = transfer.status;
+            headers_ = transfer.headers;
+            headers_copied_ = true;
+        }
     }
     // The protocol and the connection's timing, once the body is complete.
     void describe(HttpResponse &response) const {
@@ -683,20 +706,26 @@ class Exchange final : public HttpExchange {
     std::shared_ptr<Transfer> transfer_;
     long status_ = 0;
     HttpHeaders headers_;
+    bool headers_copied_ = false;
 };
 } // namespace
 
 HttpSession::HttpSession(Options options) : impl_(std::make_shared<Impl>(std::move(options))) {}
 HttpSession::~HttpSession() = default;
 
-std::unique_ptr<HttpExchange> HttpSession::open(HttpRequest request, std::stop_token cancel, std::chrono::milliseconds timeout) {
+std::unique_ptr<HttpExchange> HttpSession::start(HttpRequest request, std::stop_token cancel) {
     check_cancel(cancel);
-    // The body may take as long as its reader allows; only the wait for the
-    // headers is bounded here.
+    // The body may take as long as its reader allows; headers are polled by
+    // the caller (or bounded by open()).
     auto transfer = impl_->prepare(std::move(request), 0ms);
     auto exchange = std::make_unique<Exchange>(impl_, transfer);
     impl_->post([impl = impl_.get(), transfer] { impl->start(transfer); });
-    exchange->await_headers(cancel, timeout);
+    return exchange;
+}
+
+std::unique_ptr<HttpExchange> HttpSession::open(HttpRequest request, std::stop_token cancel, std::chrono::milliseconds timeout) {
+    auto exchange = start(std::move(request), cancel);
+    static_cast<Exchange &>(*exchange).await_headers(cancel, timeout);
     return exchange;
 }
 

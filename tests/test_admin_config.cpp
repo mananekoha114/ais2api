@@ -363,3 +363,61 @@ TEST_CASE("model alias targets accept thinking suffixes and the MODEL_MAPPING en
         CHECK_THROWS_AS(Config::load(cfg.config_file), Error);
     }
 }
+TEST_CASE("response_header_seconds defaults, persists, validates, overrides via env and hot-reloads without restart",
+          "[config][admin][response-header-timeout]") {
+    CompatibilityEnvironment environment("AIS2API_RESPONSE_HEADER_SECONDS");
+    AdminDirectory dir;
+    auto cfg = Config::load(dir.path / "config.json");
+    CHECK(Config{}.limits.response_header_seconds == 120);
+    CHECK(cfg.limits.response_header_seconds == 120);
+    CHECK(cfg.to_json().at("limits").at("response_header_seconds") == 120);
+
+    auto updated = cfg.patched({{"limits", json::object{{"response_header_seconds", 180}}}});
+    CHECK(updated.limits.response_header_seconds == 180);
+    CHECK_FALSE(restart_required(cfg, updated));
+    updated.save();
+    CHECK(Config::load(cfg.config_file).limits.response_header_seconds == 180);
+    CHECK(json::parse(read_file(cfg.config_file)).at("limits").at("response_header_seconds") == 180);
+
+    for (unsigned valid : {1u, 4294967295u}) {
+        const auto patched = cfg.patched({{"limits", json::object{{"response_header_seconds", valid}}}});
+        CHECK(patched.limits.response_header_seconds == valid);
+    }
+    for (const auto& invalid : json::array{0, -1, 4294967296LL, true, "120", nullptr, 1.5})
+        CHECK_THROWS_AS(cfg.patched({{"limits", json::object{{"response_header_seconds", invalid}}}}), Error);
+
+    Config direct = cfg;
+    direct.limits.response_header_seconds = 0;
+    CHECK_THROWS_AS(direct.validate(), Error);
+
+    environment.set("45");
+    CHECK(Config::load(cfg.config_file).limits.response_header_seconds == 45);
+    CHECK(Config::load(cfg.config_file, {{"limits", json::object{{"response_header_seconds", 90}}}})
+              .limits.response_header_seconds == 90);
+    environment.set("0");
+    CHECK_THROWS_AS(Config::load(cfg.config_file), Error);
+    environment.set("");
+
+    const auto root = fs::path(AIS2API_SOURCE_DIR);
+    const auto config_schema = json::parse(read_file(root / "schemas" / "config.schema.json", 1 << 20));
+    const auto& schema_field =
+        config_schema.at("properties").at("limits").at("properties").at("response_header_seconds").as_object();
+    CHECK(schema_field.at("type") == "integer");
+    CHECK(schema_field.at("minimum") == 1);
+    CHECK(schema_field.at("maximum") == 4294967295LL);
+    CHECK(schema_field.at("default") == 120);
+
+    const auto openapi = json::parse(read_file(root / "schemas" / "management.openapi.json", 2 << 20));
+    const auto& openapi_field = openapi.at("components")
+                                    .at("schemas")
+                                    .at("ConfigPatch")
+                                    .at("properties")
+                                    .at("limits")
+                                    .at("properties")
+                                    .at("response_header_seconds")
+                                    .as_object();
+    CHECK(openapi_field.at("type") == "integer");
+    CHECK(openapi_field.at("minimum") == 1);
+    CHECK(openapi_field.at("maximum") == 4294967295LL);
+    CHECK(openapi_field.at("default") == 120);
+}

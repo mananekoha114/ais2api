@@ -868,6 +868,8 @@ const json::array *ResponsesStream::first_parts(const json::object &aggregate) {
 // item: its text and its last native part grow by the text. Everything is
 // checked before merging; once planned, merging and applying cannot fail.
 std::optional<ResponsesStream::Append> ResponsesStream::plan_append(const json::object &delta) const {
+    if (delta.contains("promptFeedback"))
+        return {};
     auto incoming = delta.if_contains("candidates");
     if (!incoming || !incoming->is_array() || incoming->as_array().size() != 1 ||
         !incoming->as_array()[0].is_object())

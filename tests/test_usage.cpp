@@ -533,6 +533,78 @@ TEST_CASE("Content filtering fails the request while preserving priced terminal 
         REQUIRE(store.stats().at("totals").at("failure") == (blocked ? 1 : 0));
     }
 }
+TEST_CASE("PromptFeedback blocks and new finish reasons account accurately without extra schema keys",
+          "[usage][prompt-feedback]") {
+    for (auto block : {"PROHIBITED_CONTENT", "SAFETY", "OTHER", "BLOCKLIST", "IMAGE_SAFETY"}) {
+        Directory d;
+        Store store(d.path);
+        store.save_price_source("google", parse_price_catalog(source_data(), 1), 1);
+        RequestUsage usage(store, "pb", "chat_completions");
+        start(usage);
+        json::object blocked_event{
+            {"promptFeedback", json::object{{"blockReason", block}}},
+            {"usageMetadata",
+             json::object{{"promptTokenCount", 100000},
+                          {"candidatesTokenCount", 0},
+                          {"totalTokenCount", 100000},
+                          {"cachedContentTokenCount", 0},
+                          {"thoughtsTokenCount", 0}}}};
+        usage.event(blocked_event, false);
+        usage.end_attempt();
+        usage.producer_done();
+        usage.http_done(200, "", true);
+        auto record = store.request("pb");
+        CHECK(record.at("status") == "failed");
+        CHECK(record.at("error") == "content_filter");
+        CHECK(record.at("finish_reason") == block);
+        CHECK(record.at("generation_completed") == false);
+        CHECK(record.at("delivery_completed") == true);
+        CHECK(record.at("cost").at("status") == "priced");
+        const auto &attempt = record.at("attempts").as_array()[0].as_object();
+        CHECK(attempt.size() == 9);
+        CHECK(attempt.at("completed") == true);
+        CHECK(attempt.at("finish_reason") == block);
+    }
+
+    // begin_attempt resets prompt_blocked_ and MALFORMED_RESPONSE is preserved verbatim.
+    {
+        Directory d;
+        Store store(d.path);
+        store.save_price_source("google", parse_price_catalog(source_data(), 1), 1);
+        RequestUsage usage(store, "reset-and-malformed", "gemini");
+        start(usage);
+        usage.event(json::object{{"promptFeedback", json::object{{"blockReason", "OTHER"}}}}, false);
+        usage.end_attempt("retry");
+        usage.begin_attempt("a", "retry");
+        auto ok = event();
+        ok.at("candidates").as_array()[0].as_object()["finishReason"] = "MALFORMED_RESPONSE";
+        usage.event(ok, true);
+        usage.end_attempt();
+        usage.producer_done();
+        usage.http_done(200, "", true);
+        auto record = store.request("reset-and-malformed");
+        CHECK(record.at("status") == "succeeded");
+        CHECK(record.at("finish_reason") == "MALFORMED_RESPONSE");
+    }
+
+    // Unblocked promptFeedback does not mark the attempt completed or content-filtered.
+    {
+        Directory d;
+        Store store(d.path);
+        RequestUsage usage(store, "unblocked-pf", "gemini");
+        start(usage);
+        usage.event(json::object{
+                        {"promptFeedback",
+                         json::object{{"ais2api", json::object{{"wireSafetyRatings", json::parse("[[7,1]]")}}}}}},
+                    false);
+        usage.end_attempt("incomplete_upstream");
+        usage.producer_done("incomplete_upstream");
+        usage.http_done(502, "incomplete_upstream", false);
+        auto record = store.request("unblocked-pf");
+        CHECK(record.at("attempts").as_array()[0].as_object().at("completed") == false);
+        CHECK(record.at("error") == "incomplete_upstream");
+    }
+}
 TEST_CASE("Version three corrects retained contributions and preserves expired totals atomically",
           "[usage][usage-followup]") {
     for (bool rollback : {false, true}) {

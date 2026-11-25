@@ -10,7 +10,7 @@
 namespace ais2api {
 // Derive usage, known costs and outcome from stored attempts without repricing.
 // Shared by live finalization, restart recovery and versioned history migration.
-void summarize_request(json::object &record, bool terminal);
+void summarize_request(json::object &record, bool terminal, bool prompt_blocked = false);
 
 // Joins producer completion and HTTP delivery. Either thread may finish first;
 // the stored terminal row and totals are written only after both have finished.
@@ -38,7 +38,7 @@ class RequestUsage {
     std::mutex mutex_;
     json::object record_, quote_;
     bool started_ = false, producer_done_ = false, http_done_ = false, terminal_ = false;
-    bool additional_ = false, attempt_open_ = false, usage_valid_ = true;
+    bool additional_ = false, attempt_open_ = false, usage_valid_ = true, prompt_blocked_ = false;
     Clock::time_point created_ = Clock::now(), started_at_ = created_;
     void save(bool wait = false);
     void end_attempt_locked(std::string_view error);

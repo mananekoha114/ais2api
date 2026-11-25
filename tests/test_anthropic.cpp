@@ -501,3 +501,56 @@ TEST_CASE("AnthropicStream ignores unspecified finish, large usage, bad signatur
     CHECK(msg.at("usage").at("input_tokens") == 0);
     CHECK(msg.at("usage").at("output_tokens") == 0);
 }
+
+TEST_CASE("Anthropic maps PromptFeedback blocks to refusal in unary and streaming",
+          "[anthropic][prompt-feedback]") {
+    for (auto reason : {"PROHIBITED_CONTENT", "OTHER"}) {
+        json::object blocked{
+            {"promptFeedback", json::object{{"blockReason", reason}}},
+            {"usageMetadata", json::object{{"promptTokenCount", 11}, {"candidatesTokenCount", 0}}}};
+        const auto unary = anthropic_response(blocked, "m", "msg_pb", false);
+        CHECK(unary.at("stop_reason") == "refusal");
+        CHECK(unary.at("content").as_array().empty());
+        CHECK(unary.at("usage").at("input_tokens") == 11);
+
+        AnthropicStream stream("m", "msg_pb", false);
+        auto events = stream.push(blocked);
+        for (auto &ev : stream.finish()) events.push_back(std::move(ev));
+        REQUIRE(events.size() == 3);
+        CHECK(events[0].as_object().at("type") == "message_start");
+        CHECK(events[1].as_object().at("type") == "message_delta");
+        CHECK(events[1].as_object().at("delta").as_object().at("stop_reason") == "refusal");
+        CHECK(events[2].as_object().at("type") == "message_stop");
+    }
+
+    // Mid-stream block after thinking and text preserves content and finishes with refusal.
+    {
+        AnthropicStream stream("m", "msg_mid", true);
+        json::object thought_part{{"text", "plan"}, {"thought", true}};
+        json::object text_part{{"text", "draft"}};
+        (void)stream.push(chunk(json::array{thought_part}));
+        (void)stream.push(chunk(json::array{text_part}));
+        json::object block_frame = chunk(json::array{}, "OTHER");
+        block_frame["promptFeedback"] = json::object{{"blockReason", "OTHER"}};
+        (void)stream.push(block_frame);
+        const auto tail = stream.finish();
+        const auto &delta = tail[tail.size() - 2].as_object().at("delta").as_object();
+        CHECK(delta.at("stop_reason") == "refusal");
+
+        json::object combined = chunk(json::array{thought_part, text_part}, "OTHER");
+        combined["promptFeedback"] = json::object{{"blockReason", "OTHER"}};
+        const auto unary = anthropic_response(combined, "m", "msg_mid", true);
+        CHECK(unary.at("stop_reason") == "refusal");
+        REQUIRE(unary.at("content").as_array().size() == 2);
+        CHECK(unary.at("content").as_array()[0].as_object().at("thinking") == "plan");
+        CHECK(unary.at("content").as_array()[1].as_object().at("text") == "draft");
+    }
+
+    // Unblocked promptFeedback does not force refusal.
+    {
+        json::object ok = chunk(json::array{json::object{{"text", "fine"}}}, "STOP");
+        ok["promptFeedback"] = json::object{{"ais2api", json::object{{"wireSafetyRatings", json::parse("[[7,1]]")}}}};
+        const auto unary = anthropic_response(ok, "m", "msg_ok", false);
+        CHECK(unary.at("stop_reason") == "end_turn");
+    }
+}

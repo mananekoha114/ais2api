@@ -72,6 +72,7 @@ const groups: { title: string; icon: IconName; fields: FieldDef[] }[] = [
     fields: [
       { key: 'limits.queue_size', label: '队列长度', desc: '同时排队等待的最大请求数。', type: 'number', min: 1, max: 4096 },
       { key: 'limits.queue_seconds', label: '排队超时', desc: '请求在队列中等待的最长时间。', type: 'number', min: 1, max: U32, unit: 's' },
+      { key: 'limits.response_header_seconds', label: '响应头超时', desc: '等待上游返回生成响应头的最长时间。保存后立即生效。', type: 'number', min: 1, max: U32, unit: 's' },
       { key: 'limits.generation_seconds', label: '生成超时', desc: '单次生成的最长时间。', type: 'number', min: 1, max: U32, unit: 's', restart: true },
       { key: 'nonstream_keepalive_seconds', label: '非流式保活', desc: '0 表示关闭（默认）。经过反向代理时，非流式请求等待过久可能被代理断开：开启后，等待超过这么多秒仍没有结果就先返回 200，之后每隔这么多秒写一个换行，结果就绪后再写入 JSON 正文；之后出现的错误也写在 200 的正文里。可设为 1–120 秒，建议 10。保存后立即生效。', type: 'number', min: 0, max: 120, unit: 's' },
       { key: 'limits.stream_idle_seconds', label: '流空闲超时', desc: '流式响应两次输出之间允许的最长间隔。', type: 'number', min: 1, max: U32, unit: 's', restart: true },

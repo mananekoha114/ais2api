@@ -34,7 +34,7 @@ beforeEach(() => {
     continuation_retry_enabled: true, browser_idle_seconds: 0, nonstream_keepalive_seconds: 0,
     cookie_import_max_accounts: 8, cookie_import_timeout_seconds: 180,
     limits: { request_bytes: 33554432, object_bytes: 67108864, relay_bytes: 1048576,
-      queue_size: 8, queue_seconds: 30, generation_seconds: 240, stream_idle_seconds: 240,
+      queue_size: 8, queue_seconds: 30, response_header_seconds: 120, generation_seconds: 240, stream_idle_seconds: 240,
       max_attempts: 3, max_continuation_retries: 1 },
   }
   backend.get.mockReset().mockImplementation(async () => ({ config, restart_required: false, config_file: 'config.json' }))
@@ -132,4 +132,29 @@ it('validates admin_key minimum length and request_bytes upper bound', async () 
   await requestBytes().setValue(String(64 * 1024 * 1024))
   expect(requestBytes().attributes('aria-invalid')).toBeUndefined()
   expect(saveButton().element.disabled).toBe(false)
+})
+
+it('validates and saves limits.response_header_seconds without requiring a restart', async () => {
+  await show()
+  const headerTimeout = () => wrapper!.get<HTMLInputElement>('input[id="f-limits.response_header_seconds"]')
+  expect(headerTimeout().element.value).toBe('120')
+  for (const invalid of ['0', '1.5', '', '4294967296']) {
+    await headerTimeout().setValue(invalid)
+    expect(headerTimeout().attributes('aria-invalid')).toBe('true')
+    expect(saveButton().element.disabled).toBe(true)
+  }
+  await headerTimeout().setValue('180')
+  expect(headerTimeout().attributes('aria-invalid')).toBeUndefined()
+  const validate = wrapper!.findAll('button').find((button) => button.text() === '校验')!
+  await validate.trigger('click')
+  await flushPromises()
+  expect(backend.post).toHaveBeenCalledWith('/config/validate', {
+    limits: { response_header_seconds: 180 },
+  })
+  expect(wrapper!.text()).toContain('校验通过，保存后立即生效')
+  await saveButton().trigger('click')
+  await flushPromises()
+  expect(backend.patch).toHaveBeenLastCalledWith('/config', {
+    limits: { response_header_seconds: 180 },
+  })
 })

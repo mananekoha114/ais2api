@@ -14,11 +14,21 @@
 #include "fpgen_fixture.hpp"
 #include <boost/asio/ip/tcp.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <condition_variable>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
+#include <mutex>
+#include <thread>
 
 namespace ais2api::experiment_detail {
 void stage_page_session(SpiderMonkeyGateway &gateway, json::object session);
+}
+namespace ais2api::spidermonkey_detail {
+std::string run_vm_refresh_snapshot(std::stop_token parent, std::chrono::milliseconds timeout,
+                                    std::string_view account_id,
+                                    const std::function<std::string(std::stop_token)> &fetch,
+                                    const std::function<void()> &reset_vm);
 }
 
 using namespace ais2api;
@@ -369,6 +379,84 @@ TEST_CASE("SpiderMonkey adopts a staged Camoufox page session for offline hybrid
 
     gateway.reset_session();
     CHECK_FALSE(bool_or(gateway.diagnostics(), "pageLoaded"));
+}
+
+TEST_CASE("SpiderMonkey refresh_snapshot timeout degrades to E:UCE while external cancellation propagates",
+          "[spidermonkey][waa]") {
+    using namespace std::chrono_literals;
+
+    SECTION("internal deadline timeout resets the old VM and returns E:UCE") {
+        bool vm_reset = false;
+        const auto snapshot = spidermonkey_detail::run_vm_refresh_snapshot(
+            {}, 50ms, "acc_refresh_timeout",
+            [](std::stop_token call_token) -> std::string {
+                std::mutex wait_mutex;
+                std::condition_variable_any wake;
+                std::unique_lock lock(wait_mutex);
+                wake.wait(lock, call_token, [] { return false; });
+                throw Error(499, "cancelled", "WAA refresh interrupted");
+            },
+            [&] { vm_reset = true; });
+        CHECK(vm_reset);
+        CHECK(snapshot == "E:UCE");
+    }
+
+    SECTION("external caller cancellation resets the VM and propagates 499 cancelled") {
+        bool vm_reset = false;
+        std::stop_source stop;
+        std::jthread canceller([&] {
+            std::this_thread::sleep_for(40ms);
+            stop.request_stop();
+        });
+        int status = 0;
+        std::string code;
+        try {
+            (void)spidermonkey_detail::run_vm_refresh_snapshot(
+                stop.get_token(), 5s, "acc_refresh_cancel",
+                [](std::stop_token call_token) -> std::string {
+                    std::mutex wait_mutex;
+                    std::condition_variable_any wake;
+                    std::unique_lock lock(wait_mutex);
+                    wake.wait(lock, call_token, [] { return false; });
+                    throw Error(499, "cancelled", "WAA refresh interrupted");
+                },
+                [&] { vm_reset = true; });
+        } catch (const Error &error) {
+            status = error.status;
+            code = error.code;
+        }
+        CHECK(vm_reset);
+        CHECK(status == 499);
+        CHECK(code == "cancelled");
+    }
+
+    SECTION("non-cancellation errors fall back to E:UCE and normal snapshots succeed") {
+        bool vm_reset = false;
+        const auto fallback = spidermonkey_detail::run_vm_refresh_snapshot(
+            {}, 5s, "acc_refresh_err",
+            [](std::stop_token) -> std::string { throw Error(502, "waa_error", "snapshot failed"); },
+            [&] { vm_reset = true; });
+        CHECK_FALSE(vm_reset);
+        CHECK(fallback == "E:UCE");
+
+        const auto ok = spidermonkey_detail::run_vm_refresh_snapshot(
+            {}, 5s, "acc_refresh_ok",
+            [](std::stop_token) -> std::string { return "!fresh-snapshot"; },
+            [&] { vm_reset = true; });
+        CHECK_FALSE(vm_reset);
+        CHECK(ok == "!fresh-snapshot");
+    }
+
+    SECTION("reconfigure accepts hot-reloaded response_header_seconds") {
+        TempDir dir;
+        Config config;
+        config.data_dir = dir.path;
+        Store store(config.data_dir);
+        SpiderMonkeyGateway gateway(config, store);
+        Config updated = config;
+        updated.limits.response_header_seconds = 180;
+        CHECK_NOTHROW(gateway.reconfigure(updated));
+    }
 }
 
 // Hidden by default: run with AIS2API_TEST_FPGEN_MODEL pointing at the pinned
