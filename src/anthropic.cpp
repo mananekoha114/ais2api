@@ -749,6 +749,7 @@ void AnthropicStream::signature(json::array &events, const json::value &value) {
 json::array AnthropicStream::push(const json::object &delta) {
     json::array events;
     if (auto usage = delta.if_contains("usageMetadata"); usage && usage->is_object()) usage_ = usage->as_object();
+    if (!prompt_block_reason(delta).empty()) prompt_blocked_ = true;
     if (!started_) {
         started_ = true;
         auto usage = this->usage();
@@ -859,8 +860,9 @@ json::array AnthropicStream::finish() {
     if (!started_)
         for (auto &event : push(json::object{})) events.push_back(std::move(event));
     close(events);
+    const auto reason = prompt_blocked_ ? std::string_view("refusal") : stop_reason(finish_reason_, calls_);
     events.push_back(json::object{{"type", "message_delta"},
-                                  {"delta", json::object{{"stop_reason", stop_reason(finish_reason_, calls_)}, {"stop_sequence", nullptr}}},
+                                  {"delta", json::object{{"stop_reason", reason}, {"stop_sequence", nullptr}}},
                                   {"usage", usage()}});
     events.push_back(json::object{{"type", "message_stop"}});
     return events;

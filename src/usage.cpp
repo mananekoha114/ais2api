@@ -132,7 +132,7 @@ json::object unknown_cost(std::string_view reason) {
         {"status", "unpriced"}, {"reason", reason}, {"amount_nano", nullptr}, {"currency", "USD"}};
 }
 } // namespace
-void summarize_request(json::object &record, bool complete) {
+void summarize_request(json::object &record, bool complete, bool prompt_blocked) {
     json::object usage;
     std::int64_t amount = 0;
     std::int64_t unpriced = 0, priced_attempts = 0;
@@ -181,7 +181,7 @@ void summarize_request(json::object &record, bool complete) {
     record["finish_reason"] = finish;
     if (complete && !interrupted) {
         auto error = string_or(record, "error");
-        if (content_filtered(finish)) {
+        if (content_filtered(finish) || prompt_blocked) {
             record["generation_completed"] = false;
             if (error.empty())
                 record["error"] = error = "content_filter";
@@ -256,6 +256,7 @@ void RequestUsage::begin_attempt(std::string_view account, std::string_view kind
     record_["account"] = identifier(account);
     usage_valid_ = true;
     attempt_open_ = true;
+    prompt_blocked_ = false;
     record_.at("attempts")
         .as_array()
         .push_back(json::object{{"account", identifier(account)},
@@ -304,7 +305,8 @@ void RequestUsage::event(const json::object &event, bool content) {
                                                             "NO_IMAGE",
                                                             "UNEXPECTED_TOOL_CALL",
                                                             "TOO_MANY_TOOL_CALLS",
-                                                            "MISSING_THOUGHT_SIGNATURE"};
+                                                            "MISSING_THOUGHT_SIGNATURE",
+                                                            "MALFORMED_RESPONSE"};
                     attempt["finish_reason"] = std::find(std::begin(reasons), std::end(reasons),
                                                          reason) != std::end(reasons)
                                                    ? reason
@@ -313,6 +315,18 @@ void RequestUsage::event(const json::object &event, bool content) {
                 if (candidate.as_object().contains("groundingMetadata"))
                     additional_ = true;
             }
+    if (const auto block = prompt_block_reason(event); !block.empty()) {
+        prompt_blocked_ = true;
+        attempt["completed"] = true;
+        if (string_or(attempt, "finish_reason").empty()) {
+            constexpr std::string_view blocks[] = {"SAFETY", "OTHER", "BLOCKLIST",
+                                                   "PROHIBITED_CONTENT", "IMAGE_SAFETY"};
+            attempt["finish_reason"] =
+                std::find(std::begin(blocks), std::end(blocks), block) != std::end(blocks)
+                    ? block
+                    : "OTHER";
+        }
+    }
 }
 void RequestUsage::end_attempt_locked(std::string_view error) {
     if (!attempt_open_)
@@ -364,7 +378,7 @@ void RequestUsage::save(bool wait) {
     if (terminal_)
         return;
     bool complete = producer_done_ && http_done_;
-    summarize_request(record_, complete);
+    summarize_request(record_, complete, prompt_blocked_);
     if (complete) {
         record_["ended_at"] = now_ms();
         record_["duration_ms"] = elapsed(created_);

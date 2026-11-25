@@ -792,16 +792,31 @@ TEST_CASE("Native usage reports visible output separately from thoughts", "[prot
 }
 
 TEST_CASE("Finish reasons use the public enum numbers", "[protocol]") {
-    auto reason = [](int code) {
-        auto event = decode_chunk(json::parse("[[[null," + std::to_string(code) + "]]]"));
-        return event.at("candidates").as_array()[0].as_object().at("finishReason");
+    auto decode_finish = [](const std::string &code_json) {
+        return decode_chunk(json::parse("[[[null," + code_json + "]]]"));
     };
-    for (auto [code, name] : {std::pair{5, "OTHER"}, {6, "LANGUAGE"}, {12, "UNEXPECTED_TOOL_CALL"},
-                              {14, "IMAGE_PROHIBITED_CONTENT"}, {15, "IMAGE_OTHER"}, {16, "NO_IMAGE"},
-                              {17, "IMAGE_RECITATION"}})
-        REQUIRE(reason(code) == name);
-    for (int unspecified : {0, 18}) {
-        auto event = decode_chunk(json::parse("[[[null," + std::to_string(unspecified) + "]]]"));
+    for (auto [code, name] :
+         {std::pair{5, "OTHER"}, {6, "LANGUAGE"}, {12, "UNEXPECTED_TOOL_CALL"},
+          {14, "IMAGE_PROHIBITED_CONTENT"}, {15, "IMAGE_OTHER"}, {16, "NO_IMAGE"},
+          {17, "IMAGE_RECITATION"}, {18, "MISSING_THOUGHT_SIGNATURE"},
+          {19, "MALFORMED_RESPONSE"}}) {
+        auto event = decode_finish(std::to_string(code));
+        REQUIRE(take_upstream_ignored(event).empty());
+        REQUIRE(event.at("candidates").as_array()[0].as_object().at("finishReason") == name);
+    }
+    {
+        auto unspecified = decode_finish("0");
+        REQUIRE(take_upstream_ignored(unspecified).empty());
+        REQUIRE_FALSE(unspecified.at("candidates").as_array()[0].as_object().contains("finishReason"));
+    }
+    for (int unknown_positive : {20, 99}) {
+        auto event = decode_finish(std::to_string(unknown_positive));
+        REQUIRE(take_upstream_ignored(event) == json::array{"candidate[1]"});
+        REQUIRE(event.at("candidates").as_array()[0].as_object().at("finishReason") == "OTHER");
+    }
+    for (const std::string &invalid_code : {std::string("-1"), std::string("\"bad\""), std::string("1.5")}) {
+        auto event = decode_finish(invalid_code);
+        REQUIRE(take_upstream_ignored(event) == json::array{"candidate[1]"});
         REQUIRE_FALSE(event.at("candidates").as_array()[0].as_object().contains("finishReason"));
     }
 }
@@ -1338,4 +1353,97 @@ TEST_CASE("Model aliases resolve once and compose with thinking suffixes", "[pro
     validate_model_target("models/gemini-4-argon-search(8192)");
     for (auto bad : {"gemini-4-argon(banana)", "two words", "gemini)", "a/b", "models/", "(low)"})
         CHECK_THROWS_AS(validate_model_target(bad), Error);
+}
+
+TEST_CASE("PromptFeedback wire chunks decode, merge, and adapt to OpenAI Option 3A",
+          "[protocol][prompt-feedback]") {
+    const auto ratings = json::parse("[[7,1]]");
+    for (auto [code, expected] :
+         {std::pair{1, "SAFETY"}, {2, "OTHER"}, {3, "BLOCKLIST"}, {4, "PROHIBITED_CONTENT"},
+          {5, "IMAGE_SAFETY"}}) {
+        auto event = decode_chunk(json::array{nullptr, json::array{code, ratings, "blocked msg"},
+                                              json::array{10, 0, 10}, nullptr, nullptr, nullptr, nullptr, "resp-1"});
+        REQUIRE(take_upstream_ignored(event).empty());
+        REQUIRE_FALSE(event.contains("candidates"));
+        REQUIRE(prompt_block_reason(event) == expected);
+        auto &pf = event.at("promptFeedback").as_object();
+        CHECK(pf.at("blockReason") == expected);
+        CHECK(pf.at("blockReasonMessage") == "blocked msg");
+        CHECK(pf.at("ais2api").as_object().at("wireSafetyRatings") == ratings);
+    }
+
+    // Code 0 is unblocked: omit blockReason and keep safety ratings when non-empty.
+    auto unblocked = decode_chunk(json::array{nullptr, json::array{0, ratings, ""}});
+    REQUIRE(take_upstream_ignored(unblocked).empty());
+    CHECK(prompt_block_reason(unblocked).empty());
+    REQUIRE(unblocked.contains("promptFeedback"));
+    CHECK_FALSE(unblocked.at("promptFeedback").as_object().contains("blockReason"));
+    CHECK_FALSE(unblocked.at("promptFeedback").as_object().contains("blockReasonMessage"));
+    CHECK(unblocked.at("promptFeedback").as_object().at("ais2api").as_object().at("wireSafetyRatings") == ratings);
+
+    // Empty PromptFeedback produces no promptFeedback field and no ignored locations.
+    auto empty_pf = decode_chunk(json::array{nullptr, json::array{0, json::array{}, ""}});
+    CHECK(take_upstream_ignored(empty_pf).empty());
+    CHECK_FALSE(empty_pf.contains("promptFeedback"));
+    CHECK(prompt_block_reason(json::object{{"promptFeedback", json::object{{"blockReason", "BLOCK_REASON_UNSPECIFIED"}}}}).empty());
+
+    // Unknown positive block_reason maps to OTHER and records promptFeedback[0].
+    auto unknown_pos = decode_chunk(json::array{nullptr, json::array{6, nullptr, "future"}});
+    CHECK(take_upstream_ignored(unknown_pos) == json::array{"promptFeedback[0]"});
+    CHECK(prompt_block_reason(unknown_pos) == "OTHER");
+    CHECK(unknown_pos.at("promptFeedback").as_object().at("blockReasonMessage") == "future");
+
+    // Negative, non-number, malformed slots, extra slots, and non-array chunk[1].
+    auto bad_slots = decode_chunk(json::array{nullptr, json::array{-1, "not-arr", 123, "extra"}});
+    CHECK(take_upstream_ignored(bad_slots) ==
+          json::array{"promptFeedback[3]", "promptFeedback[0]", "promptFeedback[1]", "promptFeedback[2]"});
+    CHECK_FALSE(bad_slots.contains("promptFeedback"));
+
+    auto bad_type = decode_chunk(json::array{nullptr, "not-an-array"});
+    CHECK(take_upstream_ignored(bad_type) == json::array{"chunk[1]"});
+    CHECK_FALSE(bad_type.contains("promptFeedback"));
+
+    // merge_event merges promptFeedback keys without overwriting prior metadata.
+    json::object merged;
+    merge_event(merged, unblocked, 8192);
+    merge_event(merged, decode_chunk(json::array{nullptr, json::array{4, nullptr, "policy"}}), 8192);
+    auto &merged_pf = merged.at("promptFeedback").as_object();
+    CHECK(merged_pf.at("blockReason") == "PROHIBITED_CONTENT");
+    CHECK(merged_pf.at("blockReasonMessage") == "policy");
+    CHECK(merged_pf.at("ais2api").as_object().at("wireSafetyRatings") == ratings);
+
+    // OpenAI Chat Option 3A: pure block (including OTHER) emits single content_filter choice.
+    auto pure_other = decode_chunk(json::array{nullptr, json::array{2, nullptr, "other block"}, json::array{8, 0, 8}});
+    auto unary_pure = openai_response(pure_other, "m", "chat-pb");
+    REQUIRE(unary_pure.at("choices").as_array().size() == 1);
+    auto &u_choice = unary_pure.at("choices").as_array()[0].as_object();
+    CHECK(u_choice.at("index") == 0);
+    CHECK(u_choice.at("finish_reason") == "content_filter");
+    CHECK(u_choice.at("logprobs").is_null());
+    CHECK(u_choice.at("message").as_object().at("role") == "assistant");
+    CHECK(u_choice.at("message").as_object().at("content") == "");
+
+    auto stream_pure = openai_delta(pure_other, "m", "chat-pb");
+    REQUIRE(stream_pure.at("choices").as_array().size() == 1);
+    auto &s_choice = stream_pure.at("choices").as_array()[0].as_object();
+    CHECK(s_choice.at("index") == 0);
+    CHECK(s_choice.at("finish_reason") == "content_filter");
+    CHECK(s_choice.at("logprobs").is_null());
+    auto &s_delta = s_choice.at("delta").as_object();
+    CHECK(s_delta.at("role") == "assistant");
+    CHECK(s_delta.at("content") == "");
+    CHECK(s_delta.at("ais2api").as_object().at("gemini_delta").as_object().at("promptFeedback").as_object().at("blockReason") == "OTHER");
+
+    // Non-empty candidates with promptFeedback blockReason=OTHER still map finish_reason to content_filter.
+    json::object with_candidate = decode_chunk(response_wire(one(json::array{nullptr, "partial"}), 5));
+    with_candidate["promptFeedback"] = json::object{{"blockReason", "OTHER"}};
+    auto unary_mid = openai_response(with_candidate, "m", "chat-mid");
+    CHECK(unary_mid.at("choices").as_array()[0].as_object().at("finish_reason") == "content_filter");
+    CHECK(unary_mid.at("choices").as_array()[0].as_object().at("message").as_object().at("content") == "partial");
+    auto stream_mid = openai_delta(with_candidate, "m", "chat-mid");
+    CHECK(stream_mid.at("choices").as_array()[0].as_object().at("finish_reason") == "content_filter");
+
+    // Unblocked promptFeedback does not synthesize a content_filter choice.
+    CHECK(openai_response(unblocked, "m", "chat-unblocked").at("choices").as_array().empty());
+    CHECK(openai_delta(unblocked, "m", "chat-unblocked").at("choices").as_array().empty());
 }

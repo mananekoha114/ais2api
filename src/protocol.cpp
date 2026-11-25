@@ -624,6 +624,10 @@ void apply_extension(json::object &body, const json::object &ext) {
         }
     }
 }
+bool is_wire_int(const json::value &v) {
+    return v.is_int64() ||
+           (v.is_uint64() && v.as_uint64() <= static_cast<std::uint64_t>(INT64_MAX));
+}
 // Indexed by the Candidate.FinishReason numbers of the public generativelanguage proto.
 std::string finish_name(std::int64_t n) {
     static const char *names[] = {"FINISH_REASON_UNSPECIFIED",
@@ -643,8 +647,24 @@ std::string finish_name(std::int64_t n) {
                                   "IMAGE_PROHIBITED_CONTENT",
                                   "IMAGE_OTHER",
                                   "NO_IMAGE",
-                                  "IMAGE_RECITATION"};
-    return n >= 0 && n < 18 ? names[n] : names[0];
+                                  "IMAGE_RECITATION",
+                                  "MISSING_THOUGHT_SIGNATURE",
+                                  "MALFORMED_RESPONSE"};
+    if (n >= 0 && n < 20)
+        return names[n];
+    return n >= 20 ? "OTHER" : names[0];
+}
+// Indexed by PromptFeedback.BlockReason numbers of the public generativelanguage proto.
+std::string block_reason_name(std::int64_t n) {
+    static const char *names[] = {"",
+                                  "SAFETY",
+                                  "OTHER",
+                                  "BLOCKLIST",
+                                  "PROHIBITED_CONTENT",
+                                  "IMAGE_SAFETY"};
+    if (n >= 0 && n <= 5)
+        return names[n];
+    return n > 5 ? "OTHER" : "";
 }
 // Records an ignored upstream wire location once per chunk.
 void note_ignored(std::vector<std::string> &ignored, std::string location) {
@@ -909,6 +929,16 @@ bool content_filtered(std::string_view reason) {
     return reason == "SAFETY" || reason == "RECITATION" || reason == "BLOCKLIST" ||
            reason == "PROHIBITED_CONTENT" || reason == "SPII" || reason == "IMAGE_SAFETY" ||
            reason == "IMAGE_PROHIBITED_CONTENT" || reason == "IMAGE_RECITATION";
+}
+
+std::string prompt_block_reason(const json::object &event) {
+    auto feedback = event.if_contains("promptFeedback");
+    if (!feedback || !feedback->is_object())
+        return {};
+    auto reason = string_or(feedback->as_object(), "blockReason");
+    if (reason.empty() || reason == "BLOCK_REASON_UNSPECIFIED")
+        return {};
+    return reason;
 }
 
 json::array encode_contents(const json::array &contents) {
@@ -1588,7 +1618,7 @@ json::object decode_chunk(const json::value &wire) {
     json::object out;
     std::vector<std::string> ignored;
     for (std::size_t i = 0; i < a.size(); ++i)
-        if (!a[i].is_null() && i != 0 && i != 2 && i != 7)
+        if (!a[i].is_null() && i != 0 && i != 1 && i != 2 && i != 7)
             note_ignored(ignored, "chunk[" + std::to_string(i) + "]");
     if (at(a, 0).is_array()) {
         json::array candidates;
@@ -1617,9 +1647,15 @@ json::object decode_chunk(const json::value &wire) {
                     {"role", str(at(content, 1)).empty() ? "model" : str(at(content, 1))},
                     {"parts", parts}};
             }
-            if (at(c, 1).is_number())
-                if (auto finish = finish_name(number(c[1])); finish != "FINISH_REASON_UNSPECIFIED")
+            if (is_wire_int(at(c, 1))) {
+                const auto code = number(c[1]);
+                if (code < 0 || code >= 20)
+                    note_ignored(ignored, "candidate[1]");
+                if (auto finish = finish_name(code); finish != "FINISH_REASON_UNSPECIFIED")
                     candidate["finishReason"] = std::move(finish);
+            } else if (!at(c, 1).is_null()) {
+                note_ignored(ignored, "candidate[1]");
+            }
             if (at(c, 3).is_string())
                 candidate["finishMessage"] = c[3];
             // Only a string is a checkpoint. Other values stay ignored for every
@@ -1632,6 +1668,38 @@ json::object decode_chunk(const json::value &wire) {
         }
         if (!candidates.empty())
             out["candidates"] = candidates;
+    }
+    if (at(a, 1).is_array()) {
+        auto &pf = a[1].as_array();
+        json::object feedback;
+        for (std::size_t j = 3; j < pf.size(); ++j)
+            if (!pf[j].is_null())
+                note_ignored(ignored, "promptFeedback[" + std::to_string(j) + "]");
+        if (is_wire_int(at(pf, 0))) {
+            const auto code = number(pf[0]);
+            if (code < 0 || code > 5)
+                note_ignored(ignored, "promptFeedback[0]");
+            if (auto reason = block_reason_name(code); !reason.empty())
+                feedback["blockReason"] = std::move(reason);
+        } else if (!at(pf, 0).is_null()) {
+            note_ignored(ignored, "promptFeedback[0]");
+        }
+        if (at(pf, 1).is_array()) {
+            if (!pf[1].as_array().empty())
+                feedback["ais2api"] = json::object{{"wireSafetyRatings", pf[1]}};
+        } else if (!at(pf, 1).is_null()) {
+            note_ignored(ignored, "promptFeedback[1]");
+        }
+        if (at(pf, 2).is_string()) {
+            if (!pf[2].as_string().empty())
+                feedback["blockReasonMessage"] = pf[2];
+        } else if (!at(pf, 2).is_null()) {
+            note_ignored(ignored, "promptFeedback[2]");
+        }
+        if (!feedback.empty())
+            out["promptFeedback"] = std::move(feedback);
+    } else if (!at(a, 1).is_null()) {
+        note_ignored(ignored, "chunk[1]");
     }
     if (at(a, 2).is_array()) {
         auto &u = a[2].as_array();
@@ -1749,9 +1817,19 @@ namespace {
 // Applies one event to `next` in place. Callers validate the event first, so
 // this cannot fail halfway (allocation failure aside).
 void apply_event(json::object &next, const json::object &event) {
-    for (auto &kv : event)
-        if (kv.key() != "candidates")
-            next[kv.key()] = kv.value();
+    for (auto &kv : event) {
+        if (kv.key() == "candidates")
+            continue;
+        if (kv.key() == "promptFeedback" && kv.value().is_object()) {
+            if (auto existing = next.if_contains("promptFeedback");
+                existing && existing->is_object()) {
+                for (auto &pf : kv.value().as_object())
+                    existing->as_object()[pf.key()] = pf.value();
+                continue;
+            }
+        }
+        next[kv.key()] = kv.value();
+    }
     if (auto incoming = event.if_contains("candidates"); incoming && incoming->is_array()) {
         if (!next.if_contains("candidates"))
             next["candidates"] = json::array{};
@@ -2524,6 +2602,17 @@ json::object openai_response(const json::object &gemini, std::string_view model,
                              {"finish_reason", reason},
                              {"logprobs", nullptr}});
         }
+    if (!prompt_block_reason(gemini).empty()) {
+        if (choices.empty()) {
+            choices.push_back(
+                json::object{{"index", 0},
+                             {"message", json::object{{"role", "assistant"}, {"content", ""}}},
+                             {"finish_reason", "content_filter"},
+                             {"logprobs", nullptr}});
+        } else {
+            choices[0].as_object()["finish_reason"] = "content_filter";
+        }
+    }
     json::object result{{"id", id},
                         {"object", "chat.completion"},
                         {"created", unix_seconds()},
@@ -2566,6 +2655,17 @@ json::object openai_delta(const json::object &gemini, std::string_view model, st
                              {"finish_reason", reason},
                              {"logprobs", nullptr}});
         }
+    if (!prompt_block_reason(gemini).empty()) {
+        if (choices.empty()) {
+            choices.push_back(
+                json::object{{"index", 0},
+                             {"delta", json::object{{"role", "assistant"}, {"content", ""}}},
+                             {"finish_reason", "content_filter"},
+                             {"logprobs", nullptr}});
+        } else {
+            choices[0].as_object()["finish_reason"] = "content_filter";
+        }
+    }
     for (auto &choice : choices)
         choice.as_object().at("delta").as_object()["ais2api"] =
             json::object{{"gemini_delta", native_gemini}};

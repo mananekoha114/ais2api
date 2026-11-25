@@ -13,11 +13,14 @@ void NativeContinuation::check() const {
 }
 void NativeContinuation::push(json::object event, const EventSink &sink) {
     check();
+    bool event_has_candidates = false;
     if (auto candidates = event.if_contains("candidates"); candidates && candidates->is_array()) {
         if (budget_ && candidates->as_array().size() > 1)
             throw Error(502, "invalid_upstream", "Continuation requires a single candidate");
         for (auto &value : candidates->as_array()) {
             auto &candidate = value.as_object();
+            saw_candidates_ = true;
+            event_has_candidates = true;
             if (auto checkpoint = candidate.if_contains(continuation_token_key)) {
                 if (!checkpoint->is_string())
                     throw Error(502, "invalid_upstream", "Invalid continuation checkpoint");
@@ -35,6 +38,20 @@ void NativeContinuation::push(json::object event, const EventSink &sink) {
                 candidate.erase("finishReason");
                 candidate.erase("finishMessage");
             }
+        }
+    }
+    if (const auto block = prompt_block_reason(event); !block.empty()) {
+        if (budget_) {
+            for (auto &kv : event.at("promptFeedback").as_object())
+                prompt_feedback_[kv.key()] = kv.value();
+            event.erase("promptFeedback");
+        } else if (saw_candidates_ && !event_has_candidates) {
+            json::object candidate{{"index", 0}, {"finishReason", block}};
+            if (auto message =
+                    event.at("promptFeedback").as_object().if_contains("blockReasonMessage");
+                message && message->is_string() && !message->as_string().empty())
+                candidate["finishMessage"] = *message;
+            event["candidates"] = json::array{std::move(candidate)};
         }
     }
     if (budget_) {
@@ -55,17 +72,33 @@ bool NativeContinuation::finish(const EventSink &sink) {
     check();
     if (!budget_)
         return false;
-    if (terminal_.empty())
+    const auto block = string_or(prompt_feedback_, "blockReason");
+    const bool prompt_blocked = !block.empty() && block != "BLOCK_REASON_UNSPECIFIED";
+    if (terminal_.empty() && !prompt_blocked)
         throw Error(502, "incomplete_upstream", "Upstream response ended without a finish reason");
     ++rounds_;
     const auto count = usage_.if_contains("candidatesTokenCount");
     const bool counted = count && ((count->is_int64() && count->as_int64() >= 0) ||
                                    (count->is_uint64() && count->as_uint64() <= INT64_MAX));
     const auto produced = counted ? count->to_number<std::int64_t>() : 0;
-    const bool limited = string_or(terminal_, "finishReason") == "MAX_TOKENS";
+    const bool limited = !prompt_blocked && string_or(terminal_, "finishReason") == "MAX_TOKENS";
     const bool resume =
         limited && budget_ > studio_round_tokens && (!counted || produced < budget_ - output_);
-    json::object event{{"candidates", json::array{terminal_}}};
+    json::object event;
+    if (prompt_blocked) {
+        if (saw_candidates_ || !terminal_.empty()) {
+            if (terminal_.empty()) {
+                terminal_ = {{"index", 0}, {"finishReason", block}};
+                if (auto message = prompt_feedback_.if_contains("blockReasonMessage");
+                    message && message->is_string() && !message->as_string().empty())
+                    terminal_["finishMessage"] = *message;
+            }
+            event["candidates"] = json::array{terminal_};
+        }
+        event["promptFeedback"] = prompt_feedback_;
+    } else {
+        event["candidates"] = json::array{terminal_};
+    }
     if (!usage_.empty())
         event["usageMetadata"] = usage_;
     if (!response_id_.empty())
@@ -98,6 +131,7 @@ bool NativeContinuation::finish(const EventSink &sink) {
     checkpoint_.clear();
     terminal_.clear();
     usage_.clear();
+    prompt_feedback_.clear();
     return true;
 }
 } // namespace ais2api

@@ -35,8 +35,9 @@ class NativeContinuation {
     std::optional<Clock::time_point> deadline_;
     const std::stop_token cancel_;
     unsigned rounds_ = 0;
+    bool saw_candidates_ = false;
     std::string token_, checkpoint_, response_id_;
     std::set<std::string> checkpoints_;
-    json::object terminal_, usage_;
+    json::object terminal_, usage_, prompt_feedback_;
 };
 } // namespace ais2api

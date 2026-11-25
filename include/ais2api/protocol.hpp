@@ -9,6 +9,9 @@
 namespace ais2api {
 // Shared classification for client finish reasons and request accounting.
 bool content_filtered(std::string_view reason);
+// Returns event["promptFeedback"]["blockReason"] when non-empty and not
+// "BLOCK_REASON_UNSPECIFIED", otherwise "".
+std::string prompt_block_reason(const json::object& event);
 enum class Protocol { gemini, openai };
 struct Request {
     Protocol protocol = Protocol::gemini;
